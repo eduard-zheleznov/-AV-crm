@@ -178,6 +178,7 @@ class AvitoBrowser:
     ) -> RevealRoundResult:
         explicit_error_seen = self._has_temp_number_error(page)
         button_found = False
+        ambiguous_retry_used = False
         for attempt in range(1, attempts + 1):
             self._recover_manual_action(page, url)
             existing = self._phone_from_visible_controls(page)
@@ -229,9 +230,18 @@ class AvitoBrowser:
                     button_found,
                 )
             if not explicit_error_seen:
+                if not ambiguous_retry_used and attempt < attempts:
+                    ambiguous_retry_used = True
+                    LOGGER.info(
+                        "Номер и явная ошибка Avito не появились; "
+                        "один раз перезагружаем это же объявление"
+                    )
+                    self._goto_with_retries(page, url)
+                    self._wait_delay(0.45, 0.75)
+                    continue
                 LOGGER.info(
-                    "Повторы остановлены: явная ошибка Avito «не можем показать телефон» "
-                    "не обнаружена"
+                    "Повторы остановлены: один безопасный повтор без "
+                    "явной ошибки Avito уже использован"
                 )
                 break
         return RevealRoundResult(None, explicit_error_seen, button_found)
@@ -324,6 +334,11 @@ class AvitoBrowser:
                         candidate.scroll_into_view_if_needed(timeout=3000)
                         self._wait_delay(0.15, 0.35)
                         candidate.click(timeout=click_timeout_ms)
+                        LOGGER.info(
+                            "Нажат вариант кнопки телефона %s[%s]",
+                            selector_name,
+                            index,
+                        )
                         return candidate, True
                     except Exception as exc:
                         LOGGER.warning(

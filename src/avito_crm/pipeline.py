@@ -167,6 +167,7 @@ class Pipeline:
                                         "Оператор отклонил результат OCR; номер не сохранён"
                                     )
 
+                        summary.captured += 1
                         if self.mode == "capture" or not self.live:
                             patch = QueuePatch(
                                 status=ItemStatus.CAPTURED,
@@ -176,7 +177,6 @@ class Pipeline:
                                 run_id=summary.run_id,
                             )
                             self._finalize(canonical_url, item, patch)
-                            summary.captured += 1
                             consecutive_failures = 0
                             continue
 

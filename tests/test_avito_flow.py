@@ -15,6 +15,7 @@ class FakeButton:
 def _browser_for_round(settings, monkeypatch, *, explicit_error):
     browser = AvitoBrowser(settings, ocr=object())
     button = FakeButton()
+    reloads = []
     monkeypatch.setattr(browser, "_wait_for_manual_action", lambda *_args: None)
     monkeypatch.setattr(browser, "_phone_from_visible_controls", lambda *_args: None)
     monkeypatch.setattr(browser, "_has_temp_number_label", lambda *_args: False)
@@ -27,32 +28,35 @@ def _browser_for_round(settings, monkeypatch, *, explicit_error):
     monkeypatch.setattr(browser, "_click_phone_button", click_phone_button)
     monkeypatch.setattr(browser, "_wait_delay", lambda *_args: None)
     monkeypatch.setattr(browser, "_sleep_range", lambda *_args: None)
+    monkeypatch.setattr(browser, "_goto_with_retries", lambda _page, url: reloads.append(url))
     monkeypatch.setattr(
         browser,
         "_wait_for_phone_result",
         lambda *_args: (None, False, explicit_error, False),
     )
-    return browser, button
+    return browser, button, reloads
 
 
-def test_phone_click_is_not_repeated_without_explicit_avito_error(settings, monkeypatch):
-    browser, button = _browser_for_round(settings, monkeypatch, explicit_error=False)
+def test_phone_click_gets_one_reload_retry_without_explicit_avito_error(settings, monkeypatch):
+    browser, button, reloads = _browser_for_round(settings, monkeypatch, explicit_error=False)
 
     result = browser._reveal_round(object(), "https://www.avito.ru/x", 6, round_number=1)
 
     assert result.phone is None
     assert result.explicit_phone_error is False
-    assert button.clicks == 1
+    assert button.clicks == 2
+    assert reloads == ["https://www.avito.ru/x"]
 
 
 def test_phone_click_uses_bounded_retries_for_explicit_avito_error(settings, monkeypatch):
-    browser, button = _browser_for_round(settings, monkeypatch, explicit_error=True)
+    browser, button, reloads = _browser_for_round(settings, monkeypatch, explicit_error=True)
 
     result = browser._reveal_round(object(), "https://www.avito.ru/x", 6, round_number=1)
 
     assert result.phone is None
     assert result.explicit_phone_error is True
     assert button.clicks == 6
+    assert reloads == []
 
 
 def test_ip_restriction_is_treated_as_manual_action(settings, monkeypatch):
