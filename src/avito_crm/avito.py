@@ -113,7 +113,7 @@ class AvitoBrowser:
             self._maybe_take_long_break()
             self._goto_with_retries(page, canonical_url)
             self._wait_delay(0.45, 0.75)
-            self._wait_for_manual_action(page, canonical_url)
+            self._recover_manual_action(page, canonical_url)
 
             existing = self._phone_from_visible_controls(page)
             if existing:
@@ -143,7 +143,7 @@ class AvitoBrowser:
                 )
                 self._goto_with_retries(page, canonical_url)
                 self._wait_delay(0.45, 0.75)
-                self._wait_for_manual_action(page, canonical_url)
+                self._recover_manual_action(page, canonical_url)
                 second_round = self._reveal_round(
                     page,
                     canonical_url,
@@ -179,7 +179,7 @@ class AvitoBrowser:
         explicit_error_seen = self._has_temp_number_error(page)
         button_found = False
         for attempt in range(1, attempts + 1):
-            self._wait_for_manual_action(page, url)
+            self._recover_manual_action(page, url)
             existing = self._phone_from_visible_controls(page)
             if existing:
                 return RevealRoundResult(existing, explicit_error_seen, button_found)
@@ -194,10 +194,11 @@ class AvitoBrowser:
                     self.settings.avito_phone_retry_max,
                 )
 
-            button = self._find_phone_button(page)
+            button, candidate_found = self._click_phone_button(page)
+            button_found = button_found or candidate_found
             if button is None:
                 LOGGER.warning(
-                    "Круг %s, попытка %s/%s: кнопка телефона не найдена",
+                    "Круг %s, попытка %s/%s: кликабельная кнопка телефона не найдена",
                     round_number,
                     attempt,
                     attempts,
@@ -206,18 +207,19 @@ class AvitoBrowser:
                     break
                 continue
 
-            button_found = True
-            button.scroll_into_view_if_needed()
-            self._wait_delay(0.15, 0.35)
-            button.click(timeout=self.settings.avito_page_timeout * 1000)
             LOGGER.info(
                 "Круг %s: кнопка телефона нажата, попытка %s/%s",
                 round_number,
                 attempt,
                 attempts,
             )
-            result, label_ready, error_seen = self._wait_for_phone_result(page, url)
+            result, label_ready, error_seen, page_reloaded = self._wait_for_phone_result(page, url)
             explicit_error_seen = explicit_error_seen or error_seen
+            if page_reloaded:
+                LOGGER.info(
+                    "Страница перезагружена после ручной проверки; заново ищем кнопку телефона"
+                )
+                continue
             if result:
                 return RevealRoundResult(result, explicit_error_seen, button_found)
             if label_ready:
@@ -234,7 +236,9 @@ class AvitoBrowser:
                 break
         return RevealRoundResult(None, explicit_error_seen, button_found)
 
-    def _wait_for_phone_result(self, page: Page, url: str) -> tuple[PhoneResult | None, bool, bool]:
+    def _wait_for_phone_result(
+        self, page: Page, url: str
+    ) -> tuple[PhoneResult | None, bool, bool, bool]:
         max_wait = self._random_between(
             self.settings.avito_temp_number_wait_min,
             self.settings.avito_temp_number_wait_max,
@@ -243,19 +247,20 @@ class AvitoBrowser:
         deadline = time.monotonic() + max_wait
         error_seen = False
         while time.monotonic() < deadline:
-            self._wait_for_manual_action(page, url)
+            if self._recover_manual_action(page, url):
+                return None, False, error_seen, True
             direct = self._phone_from_visible_controls(page)
             if direct:
-                return direct, False, error_seen
+                return direct, False, error_seen, False
             if self._has_temp_number_label(page):
                 self._sleep_range(
                     self.settings.avito_after_label_min,
                     self.settings.avito_after_label_max,
                 )
-                return None, True, error_seen
+                return None, True, error_seen, False
             error_seen = error_seen or self._has_temp_number_error(page)
             time.sleep(0.3)
-        return None, False, error_seen
+        return None, False, error_seen, False
 
     def _read_open_phone(self, page: Page, button: Locator | None, url: str) -> PhoneResult:
         direct = self._phone_from_visible_controls(page)
@@ -285,27 +290,57 @@ class AvitoBrowser:
                 self._sleep_range(1.0, 3.0)
         raise PhoneNotFoundError(f"Страница не загрузилась после 3 попыток: {last_error}")
 
-    def _find_phone_button(self, page: Page) -> Locator | None:
+    def _click_phone_button(self, page: Page) -> tuple[Locator | None, bool]:
+        """Click the first working phone control and fall back from stale candidates."""
         candidates = [
-            page.locator('[data-marker="seller-contact-bar/button-show-number"]'),
-            page.locator('button[data-marker*="show-number"]'),
-            page.locator('button[data-marker*="phone"]'),
-            page.get_by_role("button", name=PHONE_BUTTON_RE),
-            page.get_by_role("link", name=PHONE_BUTTON_RE),
-            page.locator("button", has_text=PHONE_BUTTON_RE),
-            page.locator("a", has_text=PHONE_BUTTON_RE),
-            page.get_by_text(PHONE_BUTTON_RE),
+            (
+                "show-number-exact",
+                page.locator('[data-marker="seller-contact-bar/button-show-number"]'),
+            ),
+            ("show-number", page.locator('button[data-marker*="show-number"]')),
+            ("button-role", page.get_by_role("button", name=PHONE_BUTTON_RE)),
+            ("link-role", page.get_by_role("link", name=PHONE_BUTTON_RE)),
+            ("button-text", page.locator("button", has_text=PHONE_BUTTON_RE)),
+            ("link-text", page.locator("a", has_text=PHONE_BUTTON_RE)),
+            # Avito also uses header phone buttons whose marker does not say
+            # "show-number". Keep this broad selector after semantic controls.
+            ("phone-marker", page.locator('button[data-marker*="phone"]')),
+            ("visible-text", page.get_by_text(PHONE_BUTTON_RE)),
         ]
-        for locator in candidates:
+        candidate_found = False
+        click_timeout_ms = max(
+            1000,
+            min(8000, int(self.settings.avito_page_timeout * 1000)),
+        )
+        for selector_name, locator in candidates:
             try:
                 count = min(locator.count(), 8)
                 for index in range(count):
                     candidate = locator.nth(index)
-                    if candidate.is_visible():
-                        return candidate
-            except Exception:
+                    if not candidate.is_visible():
+                        continue
+                    candidate_found = True
+                    try:
+                        candidate.scroll_into_view_if_needed(timeout=3000)
+                        self._wait_delay(0.15, 0.35)
+                        candidate.click(timeout=click_timeout_ms)
+                        return candidate, True
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Не удалось нажать вариант кнопки телефона %s[%s]: %s; "
+                            "пробуем следующий",
+                            selector_name,
+                            index,
+                            exc.__class__.__name__,
+                        )
+            except Exception as exc:
+                LOGGER.debug(
+                    "Не удалось проверить селектор кнопки телефона %s: %s",
+                    selector_name,
+                    exc.__class__.__name__,
+                )
                 continue
-        return None
+        return None, candidate_found
 
     def _phone_from_visible_controls(self, page: Page) -> PhoneResult | None:
         candidates = [
@@ -377,10 +412,33 @@ class AvitoBrowser:
         detail = errors[-1] if errors else "подходящая область номера не найдена"
         raise PhoneNotFoundError(f"Не удалось распознать номер: {detail}")
 
-    def _wait_for_manual_action(self, page: Page, url: str) -> None:
+    def _recover_manual_action(self, page: Page, url: str) -> bool:
+        """Wait for the operator, then reload the listing to discard stale DOM state."""
+        recovered = False
+        for _reload_number in range(1, 4):
+            if not self._wait_for_manual_action(page, url):
+                return recovered
+            recovered = True
+            LOGGER.info(
+                "После ручной проверки заново загружаем это же объявление, "
+                "чтобы обновить элементы страницы"
+            )
+            self._sleep_range(1.5, 3.0)
+            self._goto_with_retries(page, url)
+            self._wait_delay(0.45, 0.75)
+
+        if self._manual_action_reason(page):
+            self._save_diagnostic(page, url, "manual-repeated")
+            raise ManualActionRequired(
+                "Avito повторно запросил ручную проверку после 3 перезагрузок; "
+                "остановитесь и повторите запуск позже"
+            )
+        return recovered
+
+    def _wait_for_manual_action(self, page: Page, url: str) -> bool:
         reason = self._manual_action_reason(page)
         if not reason:
-            return
+            return False
         self._save_diagnostic(page, url, "manual-required")
         if self.settings.avito_headless:
             raise ManualActionRequired(
@@ -395,8 +453,8 @@ class AvitoBrowser:
         while time.monotonic() < deadline:
             time.sleep(3)
             if not self._manual_action_reason(page):
-                LOGGER.info("Ручное действие завершено, продолжаем")
-                return
+                LOGGER.info("Ручное действие завершено")
+                return True
         raise ManualActionRequired(
             f"Ручное действие Avito ({reason}) не завершено за отведённое время"
         )
