@@ -13,6 +13,7 @@ output/
 logs/
 screenshots/
 browser-profile/
+.playwright-cli/
 /queue-template.xlsx
 /queue.xlsx
 /queues/

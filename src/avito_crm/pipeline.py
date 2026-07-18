@@ -35,6 +35,7 @@ class Pipeline:
         mode: str,
         live: bool,
         include_manual: bool = False,
+        interactive_phone_check: bool = False,
     ) -> None:
         if mode not in {"capture", "crm", "full"}:
             raise ValueError(f"Unknown pipeline mode: {mode}")
@@ -45,6 +46,7 @@ class Pipeline:
         self.mode = mode
         self.live = live
         self.include_manual = include_manual
+        self.interactive_phone_check = interactive_phone_check
         self.stop_file = settings.data_dir / "STOP"
 
     def run(self, limit: int) -> RunSummary:
@@ -153,6 +155,17 @@ class Pipeline:
                                 result.source,
                                 mask_phone(phone),
                             )
+                            if self.interactive_phone_check:
+                                print(f"\nРаспознанный номер: {phone}")
+                                answer = input(
+                                    "Сверьте его с номером в открытом браузере. "
+                                    "Если совпадает, введите ДА: "
+                                )
+                                if answer.strip().casefold() != "да":
+                                    phone = None
+                                    raise PhoneNotFoundError(
+                                        "Оператор отклонил результат OCR; номер не сохранён"
+                                    )
 
                         if self.mode == "capture" or not self.live:
                             patch = QueuePatch(

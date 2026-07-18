@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import httpx
 
@@ -75,6 +76,29 @@ def test_crm_skips_existing_contact_by_default(settings):
 
     assert result.status == ItemStatus.DUPLICATE
     assert result.contact_id == "99"
+
+
+def test_crm_projects_can_be_listed_before_project_is_configured(settings):
+    settings_without_project = replace(
+        settings,
+        lptracker_project_id=None,
+        lptracker_project_name="",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/projects":
+            return _success([{"id": 1, "name": "Ремонт"}])
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+    http = httpx.Client(transport=transport, base_url=settings.lptracker_base_url)
+    with LpTrackerClient(settings_without_project, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        projects = crm.list_projects()
+
+    assert projects == [{"id": 1, "name": "Ремонт"}]
 
 
 def _success(result):

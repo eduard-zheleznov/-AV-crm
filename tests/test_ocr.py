@@ -20,3 +20,23 @@ def test_ocr_uses_consensus_without_real_tesseract(monkeypatch):
 
     assert result.phone == "+79991234567"
     assert result.source == "ocr"
+
+
+def test_viewport_fallback_uses_proven_crops_and_psm6(monkeypatch):
+    ocr = PhoneOcr(min_agreement=2)
+    configs = []
+
+    def fake_ocr(*_args, **kwargs):
+        configs.append(kwargs["config"])
+        return "8 999 123-45-67"
+
+    monkeypatch.setattr(ocr.pytesseract, "image_to_string", fake_ocr)
+    image = Image.new("RGB", (1280, 720), "white")
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+
+    result = ocr.read_viewport_png(buffer.getvalue())
+
+    assert result.phone == "+79991234567"
+    assert result.source == "ocr-viewport-crop"
+    assert configs and all("--psm 6" in config for config in configs)

@@ -53,7 +53,7 @@ class LpTrackerClient:
             self.client.close()
 
     def authenticate(self) -> None:
-        self.settings.require_crm()
+        self.settings.require_crm_credentials()
         payload = self._request(
             "POST",
             "/login",
@@ -78,6 +78,7 @@ class LpTrackerClient:
         return _ensure_list(result, "список полей проекта")
 
     def resolve_destination(self) -> CrmDestination:
+        self.settings.require_crm_destination()
         projects = self.list_projects()
         project = self._select_project(projects)
         project_id = int(project["id"])

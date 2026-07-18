@@ -41,10 +41,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     crm_check.set_defaults(command="crm-check")
 
+    crm_projects = subparsers.add_parser(
+        "crm-projects", help="Показать доступные проекты CRM без изменений данных"
+    )
+    crm_projects.set_defaults(command="crm-projects")
+
     capture = subparsers.add_parser(
         "capture", help="Только открыть/распознать номера и записать status=captured"
     )
     _add_source_args(capture, require_source=True, include_limit=True)
+    capture.add_argument(
+        "--interactive-check",
+        action="store_true",
+        help="Держать браузер открытым и попросить визуально подтвердить распознанный номер",
+    )
 
     run = subparsers.add_parser(
         "run", help="Полный поток; без --live работает как безопасный capture"
@@ -116,6 +126,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _doctor(args, settings)
     if args.command == "crm-check":
         return _crm_check(settings)
+    if args.command == "crm-projects":
+        return _crm_projects(settings)
     if args.command == "status":
         return _status(settings)
     if args.command == "stop":
@@ -147,6 +159,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 mode=mode,
                 live=live,
                 include_manual=args.retry_manual,
+                interactive_phone_check=bool(getattr(args, "interactive_check", False)),
             ).run(args.limit)
         _print_summary(summary, live)
         return 0 if summary.errors == 0 and summary.manual_required == 0 else 3
@@ -224,6 +237,19 @@ def _crm_check(settings: Settings) -> int:
     print(f"  Проект: {destination.project_id} — {destination.project_name}")
     print(f"  Поле: {destination.field_id} — {destination.field_name} ({destination.field_type})")
     print(f"  Значение: {settings.lptracker_field_value}")
+    return 0
+
+
+def _crm_projects(settings: Settings) -> int:
+    with LpTrackerClient(settings) as crm:
+        projects = crm.list_projects()
+    if not projects:
+        print("В аккаунте LPTracker нет доступных проектов.")
+        return 0
+    print("Доступные проекты LPTracker; данные не изменялись:")
+    for project in projects:
+        print(f"  {project.get('id')} — {project.get('name', '')}")
+    print("Скопируйте нужный ID в LPTRACKER_PROJECT_ID локального .env.")
     return 0
 
 

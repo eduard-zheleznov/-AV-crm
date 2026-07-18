@@ -30,7 +30,9 @@ class PhoneOcr:
                 "Tesseract OCR не найден. Установите его или задайте TESSERACT_CMD."
             ) from exc
 
-    def read_png(self, png: bytes, artifact_path: Path | None = None) -> PhoneResult:
+    def read_png(
+        self, png: bytes, artifact_path: Path | None = None, *, psm: int = 7
+    ) -> PhoneResult:
         try:
             image = Image.open(io.BytesIO(png)).convert("RGB")
         except Exception as exc:
@@ -44,7 +46,7 @@ class PhoneOcr:
             try:
                 text = self.pytesseract.image_to_string(
                     variant,
-                    config="--psm 7 -c tessedit_char_whitelist=+0123456789()- ",
+                    config=f"--psm {psm} -c tessedit_char_whitelist=+0123456789()- ",
                     lang="eng",
                 ).strip()
             except Exception as exc:
@@ -67,6 +69,40 @@ class PhoneOcr:
             confidence=min(1.0, votes / max(self.min_agreement + 1, len(readings))),
             raw_text=raw,
         )
+
+    def read_viewport_png(self, png: bytes) -> PhoneResult:
+        """Fallback crops proven by the user's existing full-viewport recognizer."""
+        try:
+            image = Image.open(io.BytesIO(png)).convert("RGB")
+        except Exception as exc:
+            raise PhoneNotFoundError(f"Не удалось открыть скриншот страницы: {exc}") from exc
+
+        errors: list[str] = []
+        for top, bottom in ((0.18, 0.40), (0.25, 0.70)):
+            width, height = image.size
+            region = image.crop(
+                (
+                    int(width * 0.15),
+                    int(height * top),
+                    int(width * 0.85),
+                    int(height * bottom),
+                )
+            )
+            if region.width > 900:
+                scale = 900 / region.width
+                region = region.resize(
+                    (900, max(1, int(region.height * scale))), Image.Resampling.LANCZOS
+                )
+            buffer = io.BytesIO()
+            region.save(buffer, format="PNG")
+            try:
+                result = self.read_png(buffer.getvalue(), psm=6)
+                result.source = "ocr-viewport-crop"
+                return result
+            except PhoneNotFoundError as exc:
+                errors.append(str(exc))
+        detail = errors[-1] if errors else "области номера пусты"
+        raise PhoneNotFoundError(f"OCR proven-crop не распознал номер: {detail}")
 
     @staticmethod
     def _variants(image: Image.Image) -> list[tuple[str, Image.Image]]:
