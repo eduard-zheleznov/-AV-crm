@@ -22,6 +22,10 @@ class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 
 
+class NotificationError(AppError):
+    """A notification provider rejected or failed to deliver a message."""
+
+
 class CrmError(AppError):
     """LPTracker returned an error or an invalid response."""
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import socket
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +41,34 @@ def _float(name: str, default: float) -> float:
         return float(value)
     except ValueError as exc:
         raise ConfigurationError(f"{name}: ожидалось число") from exc
+
+
+CHAT_ID_RE = re.compile(r"(?:-?\d+|@[A-Za-z0-9_]{5,})")
+
+
+def parse_chat_ids(value: str) -> tuple[str, ...]:
+    candidates = [part.strip() for part in re.split(r"[,;\s]+", value) if part.strip()]
+    invalid = [candidate for candidate in candidates if not CHAT_ID_RE.fullmatch(candidate)]
+    if invalid:
+        raise ConfigurationError("Некорректный Telegram Chat ID: " + ", ".join(invalid[:3]))
+    return tuple(dict.fromkeys(candidates))
+
+
+def parse_reminder_minutes(value: str) -> tuple[float, ...]:
+    raw_values = [part.strip() for part in re.split(r"[,;\s]+", value) if part.strip()]
+    if not raw_values:
+        return ()
+    try:
+        result = tuple(float(part) for part in raw_values)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "TELEGRAM_CAPTCHA_REMINDER_MINUTES: укажите минуты через запятую"
+        ) from exc
+    if any(minutes <= 0 for minutes in result):
+        raise ConfigurationError("Интервалы Telegram должны быть больше нуля")
+    if tuple(sorted(set(result))) != result:
+        raise ConfigurationError("Интервалы Telegram должны возрастать и не повторяться")
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +122,13 @@ class Settings:
     avito_long_break_interval_max: float
     avito_long_break_duration_min: float
     avito_long_break_duration_max: float
+    telegram_bot_token: str
+    telegram_primary_chat_ids: tuple[str, ...]
+    telegram_backup_chat_ids: tuple[str, ...]
+    telegram_reminder_minutes: tuple[float, ...]
+    telegram_request_timeout: float
+    telegram_send_attempts: int
+    notification_computer_name: str
     tesseract_cmd: str
     ocr_min_agreement: int
     max_attempts: int
@@ -152,7 +189,7 @@ class Settings:
             avito_min_delay=_float("AVITO_MIN_DELAY_SECONDS", 7.0),
             avito_max_delay=_float("AVITO_MAX_DELAY_SECONDS", 15.0),
             avito_page_timeout=_float("AVITO_PAGE_TIMEOUT_SECONDS", 45.0),
-            avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 300.0),
+            avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 43_200.0),
             avito_max_per_session=_int("AVITO_MAX_PER_SESSION", 25) or 25,
             avito_phone_first_round_attempts=int(_int("AVITO_PHONE_FIRST_ROUND_ATTEMPTS", 6) or 0),
             avito_phone_second_round_attempts=int(
@@ -168,6 +205,17 @@ class Settings:
             avito_long_break_interval_max=_float("AVITO_LONG_BREAK_INTERVAL_MAX_SECONDS", 1800.0),
             avito_long_break_duration_min=_float("AVITO_LONG_BREAK_DURATION_MIN_SECONDS", 180.0),
             avito_long_break_duration_max=_float("AVITO_LONG_BREAK_DURATION_MAX_SECONDS", 420.0),
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_primary_chat_ids=parse_chat_ids(os.getenv("TELEGRAM_PRIMARY_CHAT_IDS", "")),
+            telegram_backup_chat_ids=parse_chat_ids(os.getenv("TELEGRAM_BACKUP_CHAT_IDS", "")),
+            telegram_reminder_minutes=parse_reminder_minutes(
+                os.getenv("TELEGRAM_CAPTCHA_REMINDER_MINUTES", "30,60")
+            ),
+            telegram_request_timeout=_float("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 15.0),
+            telegram_send_attempts=_int("TELEGRAM_SEND_ATTEMPTS", 3) or 3,
+            notification_computer_name=os.getenv(
+                "NOTIFICATION_COMPUTER_NAME", os.getenv("COMPUTERNAME", socket.gethostname())
+            ).strip(),
             tesseract_cmd=os.getenv("TESSERACT_CMD", "").strip(),
             ocr_min_agreement=_int("OCR_MIN_AGREEMENT", 2) or 2,
             max_attempts=_int("PIPELINE_MAX_ATTEMPTS", 3) or 3,
@@ -181,6 +229,8 @@ class Settings:
             raise ConfigurationError("Некорректный диапазон задержек Avito")
         if self.avito_max_per_session < 1:
             raise ConfigurationError("AVITO_MAX_PER_SESSION должен быть больше нуля")
+        if self.avito_manual_timeout < 60:
+            raise ConfigurationError("AVITO_MANUAL_TIMEOUT_SECONDS должен быть не меньше 60")
         ranges = (
             (
                 "AVITO_PHONE_RETRY",
@@ -219,6 +269,20 @@ class Settings:
             )
         if self.max_attempts < 1:
             raise ConfigurationError("PIPELINE_MAX_ATTEMPTS должен быть больше нуля")
+        if self.telegram_request_timeout <= 0:
+            raise ConfigurationError("TELEGRAM_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
+        if self.telegram_send_attempts < 1 or self.telegram_send_attempts > 10:
+            raise ConfigurationError("TELEGRAM_SEND_ATTEMPTS должен быть от 1 до 10")
+        if (
+            self.telegram_bot_token
+            and self.telegram_primary_chat_ids
+            and self.telegram_reminder_minutes
+        ):
+            last_reminder_seconds = self.telegram_reminder_minutes[-1] * 60
+            if last_reminder_seconds >= self.avito_manual_timeout:
+                raise ConfigurationError(
+                    "Последнее Telegram-напоминание должно быть раньше таймаута капчи"
+                )
         if self.duplicate_policy not in {"skip", "create_lead"}:
             raise ConfigurationError("CRM_DUPLICATE_POLICY: допустимо skip или create_lead")
 

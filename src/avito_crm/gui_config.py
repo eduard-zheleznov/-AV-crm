@@ -9,6 +9,9 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
+from avito_crm.config import parse_chat_ids, parse_reminder_minutes
+from avito_crm.errors import ConfigurationError
+
 SPREADSHEET_URL_RE = re.compile(
     r"https?://docs\.google\.com/spreadsheets/(?:u/\d+/)?d/([A-Za-z0-9_-]+)",
     re.IGNORECASE,
@@ -100,6 +103,33 @@ def parse_limit(value: str) -> int:
     if not 1 <= limit <= 10_000:
         raise ValueError("Лимит должен быть от 1 до 10000")
     return limit
+
+
+def parse_telegram_chat_ids(value: str) -> tuple[str, ...]:
+    try:
+        return parse_chat_ids(value)
+    except ConfigurationError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def parse_telegram_reminders(value: str) -> tuple[float, ...]:
+    try:
+        reminders = parse_reminder_minutes(value)
+    except ConfigurationError as exc:
+        raise ValueError(str(exc)) from exc
+    if not reminders:
+        raise ValueError("Укажите хотя бы одно Telegram-напоминание")
+    return reminders
+
+
+def parse_captcha_wait_hours(value: str) -> float:
+    try:
+        hours = float(value.strip().replace(",", "."))
+    except ValueError as exc:
+        raise ValueError("Время ожидания капчи должно быть числом часов") from exc
+    if not 1 <= hours <= 168:
+        raise ValueError("Время ожидания капчи должно быть от 1 до 168 часов")
+    return hours
 
 
 def _single_line(value: str) -> str:

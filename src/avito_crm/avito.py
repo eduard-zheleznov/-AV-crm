@@ -18,8 +18,9 @@ from playwright.sync_api import (
 )
 
 from avito_crm.config import Settings
-from avito_crm.errors import ManualActionRequired, PhoneNotFoundError
+from avito_crm.errors import ManualActionRequired, NotificationError, PhoneNotFoundError
 from avito_crm.models import PhoneResult
+from avito_crm.notifications import TelegramNotifier
 from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url, extract_phones
 
@@ -62,9 +63,16 @@ class RevealRoundResult:
 class AvitoBrowser:
     """Visible, persistent and intentionally sequential Avito browser session."""
 
-    def __init__(self, settings: Settings, ocr: PhoneOcr) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        ocr: PhoneOcr,
+        notifier: TelegramNotifier | None = None,
+    ) -> None:
         self.settings = settings
         self.ocr = ocr
+        self.notifier = notifier or TelegramNotifier(settings)
+        self._owns_notifier = notifier is None
         self.playwright: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
@@ -84,6 +92,8 @@ class AvitoBrowser:
         except Exception:
             self.playwright.stop()
             self.playwright = None
+            if self._owns_notifier:
+                self.notifier.close()
             raise
         self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
         self.page.set_default_timeout(self.settings.avito_page_timeout * 1000)
@@ -95,6 +105,8 @@ class AvitoBrowser:
             self.context.close()
         if self.playwright:
             self.playwright.stop()
+        if self._owns_notifier:
+            self.notifier.close()
         self.page = None
         self.context = None
         self.playwright = None
@@ -456,6 +468,12 @@ class AvitoBrowser:
             return False
         self._save_diagnostic(page, url, "manual-required")
         if self.settings.avito_headless:
+            self._notify_safely(
+                "send_captcha_detected",
+                reason=reason,
+                url=url,
+                wait_seconds=0,
+            )
             raise ManualActionRequired(
                 f"Avito запросил {reason}; запустите в видимом режиме и завершите действие вручную"
             )
@@ -464,15 +482,76 @@ class AvitoBrowser:
             reason,
             self.settings.avito_manual_timeout,
         )
-        deadline = time.monotonic() + self.settings.avito_manual_timeout
+        started_at = time.monotonic()
+        deadline = started_at + self.settings.avito_manual_timeout
+        reminders = tuple(minutes * 60 for minutes in self.settings.telegram_reminder_minutes)
+        reminder_index = 0
+        backup_alerted = False
+        self._notify_safely(
+            "send_captcha_detected",
+            reason=reason,
+            url=url,
+            wait_seconds=self.settings.avito_manual_timeout,
+        )
+
         while time.monotonic() < deadline:
-            time.sleep(3)
+            now = time.monotonic()
+            elapsed = now - started_at
+            while reminder_index < len(reminders) and elapsed >= reminders[reminder_index]:
+                escalate = reminder_index == len(reminders) - 1
+                self._notify_safely(
+                    "send_captcha_reminder",
+                    reason=reason,
+                    url=url,
+                    elapsed_seconds=elapsed,
+                    escalate=escalate,
+                )
+                backup_alerted = backup_alerted or (
+                    escalate and bool(self.settings.telegram_backup_chat_ids)
+                )
+                reminder_index += 1
+
+            next_event = deadline
+            if reminder_index < len(reminders):
+                next_event = min(next_event, started_at + reminders[reminder_index])
+            time.sleep(max(0.1, min(3.0, next_event - now)))
+            if (self.settings.data_dir / "STOP").exists():
+                self._notify_safely(
+                    "send_captcha_stopped",
+                    url=url,
+                    include_backup=backup_alerted,
+                )
+                raise ManualActionRequired("Ожидание ручной проверки Avito остановлено оператором")
             if not self._manual_action_reason(page):
                 LOGGER.info("Ручное действие завершено")
+                self._notify_safely(
+                    "send_captcha_resolved",
+                    url=url,
+                    elapsed_seconds=time.monotonic() - started_at,
+                    include_backup=backup_alerted,
+                )
                 return True
+        self._notify_safely(
+            "send_captcha_timeout",
+            reason=reason,
+            url=url,
+            wait_seconds=self.settings.avito_manual_timeout,
+        )
         raise ManualActionRequired(
             f"Ручное действие Avito ({reason}) не завершено за отведённое время"
         )
+
+    def _notify_safely(self, method: str, **kwargs: object) -> bool:
+        if not self.notifier.enabled:
+            return False
+        try:
+            getattr(self.notifier, method)(**kwargs)
+            return True
+        except NotificationError as exc:
+            LOGGER.warning("Telegram-уведомление не доставлено: %s", exc)
+        except Exception as exc:
+            LOGGER.warning("Telegram-уведомление не доставлено (%s)", exc.__class__.__name__)
+        return False
 
     @staticmethod
     def _page_visible_text(page: Page) -> str:

@@ -6,12 +6,16 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 PHONEISH_RE = re.compile(r"(?<!\d)(?:\+?7|8)(?:[\s()\-.]*\d){10}(?!\d)")
+TELEGRAM_TOKEN_URL_RE = re.compile(r"(https://api\.telegram\.org/bot)[^/\s]+", re.IGNORECASE)
+TELEGRAM_TOKEN_RE = re.compile(r"\d{5,}:[A-Za-z0-9_-]{10,}")
 
 
 class RedactingFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         value = super().format(record)
-        return PHONEISH_RE.sub("+7***REDACTED***", value)
+        value = PHONEISH_RE.sub("+7***REDACTED***", value)
+        value = TELEGRAM_TOKEN_URL_RE.sub(r"\1***REDACTED***", value)
+        return TELEGRAM_TOKEN_RE.sub("***TELEGRAM_TOKEN_REDACTED***", value)
 
 
 def configure_logging(log_dir: Path, verbose: bool = False) -> None:

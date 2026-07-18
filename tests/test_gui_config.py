@@ -5,7 +5,10 @@ import pytest
 from avito_crm.gui_config import (
     extract_spreadsheet_id,
     google_sheet_url,
+    parse_captcha_wait_hours,
     parse_limit,
+    parse_telegram_chat_ids,
+    parse_telegram_reminders,
     read_env_values,
     service_account_email,
     update_env_values,
@@ -80,3 +83,28 @@ def test_parse_limit(raw, expected):
 def test_parse_limit_rejects_invalid_values(raw):
     with pytest.raises(ValueError):
         parse_limit(raw)
+
+
+def test_parse_telegram_chat_ids_accepts_multiple_recipients():
+    assert parse_telegram_chat_ids("12345, -100123; @duty_team 12345") == (
+        "12345",
+        "-100123",
+        "@duty_team",
+    )
+
+
+@pytest.mark.parametrize("raw", ["abc", "@x", "123,wrong"])
+def test_parse_telegram_chat_ids_rejects_invalid_values(raw):
+    with pytest.raises(ValueError):
+        parse_telegram_chat_ids(raw)
+
+
+def test_parse_telegram_reminders_requires_increasing_values():
+    assert parse_telegram_reminders("30, 60") == (30.0, 60.0)
+    with pytest.raises(ValueError):
+        parse_telegram_reminders("60,30")
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1", 1.0), ("12", 12.0), ("24,5", 24.5)])
+def test_parse_captcha_wait_hours(raw, expected):
+    assert parse_captcha_wait_hours(raw) == expected

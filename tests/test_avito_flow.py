@@ -1,3 +1,7 @@
+from dataclasses import replace
+
+import pytest
+
 from avito_crm.avito import AvitoBrowser
 
 
@@ -86,6 +90,116 @@ def test_manual_action_reloads_same_listing_before_continuing(settings, monkeypa
 
     assert recovered is True
     assert navigations == [url]
+
+
+class FakeNotifier:
+    enabled = True
+
+    def __init__(self, *, fail=False):
+        self.events = []
+        self.fail = fail
+
+    def _record(self, name, **kwargs):
+        if self.fail:
+            raise RuntimeError("telegram unavailable")
+        self.events.append((name, kwargs))
+
+    def send_captcha_detected(self, **kwargs):
+        self._record("detected", **kwargs)
+
+    def send_captcha_reminder(self, **kwargs):
+        self._record("reminder", **kwargs)
+
+    def send_captcha_resolved(self, **kwargs):
+        self._record("resolved", **kwargs)
+
+    def send_captcha_timeout(self, **kwargs):
+        self._record("timeout", **kwargs)
+
+    def send_captcha_stopped(self, **kwargs):
+        self._record("stopped", **kwargs)
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+def test_captcha_wait_sends_cascade_and_continues_automatically(settings, monkeypatch):
+    configured = replace(
+        settings,
+        avito_manual_timeout=120,
+        telegram_reminder_minutes=(0.05, 0.1),
+        telegram_backup_chat_ids=("10002",),
+    )
+    notifier = FakeNotifier()
+    clock = FakeClock()
+    browser = AvitoBrowser(configured, ocr=object(), notifier=notifier)
+    monkeypatch.setattr("avito_crm.avito.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("avito_crm.avito.time.sleep", clock.sleep)
+    monkeypatch.setattr(browser, "_save_diagnostic", lambda *_args: None)
+    monkeypatch.setattr(
+        browser,
+        "_manual_action_reason",
+        lambda _page: "ручную проверку" if clock.now < 7 else "",
+    )
+
+    assert browser._wait_for_manual_action(object(), "https://www.avito.ru/x") is True
+    assert [name for name, _kwargs in notifier.events] == [
+        "detected",
+        "reminder",
+        "reminder",
+        "resolved",
+    ]
+    assert notifier.events[1][1]["escalate"] is False
+    assert notifier.events[2][1]["escalate"] is True
+    assert notifier.events[3][1]["include_backup"] is True
+
+
+def test_telegram_failure_does_not_interrupt_captcha_wait(settings, monkeypatch):
+    configured = replace(settings, avito_manual_timeout=120)
+    notifier = FakeNotifier(fail=True)
+    clock = FakeClock()
+    browser = AvitoBrowser(configured, ocr=object(), notifier=notifier)
+    monkeypatch.setattr("avito_crm.avito.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("avito_crm.avito.time.sleep", clock.sleep)
+    monkeypatch.setattr(browser, "_save_diagnostic", lambda *_args: None)
+    monkeypatch.setattr(
+        browser,
+        "_manual_action_reason",
+        lambda _page: "ручную проверку" if clock.now < 1 else "",
+    )
+
+    assert browser._wait_for_manual_action(object(), "https://www.avito.ru/x") is True
+
+
+def test_stop_request_interrupts_long_captcha_wait(settings, monkeypatch):
+    configured = replace(settings, avito_manual_timeout=120)
+    notifier = FakeNotifier()
+    clock = FakeClock()
+    browser = AvitoBrowser(configured, ocr=object(), notifier=notifier)
+    monkeypatch.setattr("avito_crm.avito.time.monotonic", clock.monotonic)
+
+    def sleep_and_request_stop(seconds):
+        clock.sleep(seconds)
+        (configured.data_dir / "STOP").write_text("test", encoding="utf-8")
+
+    monkeypatch.setattr("avito_crm.avito.time.sleep", sleep_and_request_stop)
+    monkeypatch.setattr(browser, "_save_diagnostic", lambda *_args: None)
+    monkeypatch.setattr(browser, "_manual_action_reason", lambda _page: "ручную проверку")
+
+    from avito_crm.errors import ManualActionRequired
+
+    with pytest.raises(ManualActionRequired, match="остановлено оператором"):
+        browser._wait_for_manual_action(object(), "https://www.avito.ru/x")
+
+    assert [name for name, _kwargs in notifier.events] == ["detected", "stopped"]
 
 
 class FakeCandidate:

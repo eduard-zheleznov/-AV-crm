@@ -14,7 +14,10 @@ from tkinter import END, filedialog, messagebox, ttk
 from avito_crm.gui_config import (
     extract_spreadsheet_id,
     google_sheet_url,
+    parse_captcha_wait_hours,
     parse_limit,
+    parse_telegram_chat_ids,
+    parse_telegram_reminders,
     read_env_values,
     service_account_email,
     update_env_values,
@@ -23,6 +26,7 @@ from avito_crm.gui_config import (
 APP_TITLE = "Avito → CRM"
 GOOGLE_CREDENTIALS_URL = "https://console.cloud.google.com/iam-admin/serviceaccounts"
 GOOGLE_SHEETS_API_URL = "https://console.cloud.google.com/apis/library/sheets.googleapis.com"
+TELEGRAM_BOTFATHER_URL = "https://t.me/BotFather"
 
 
 class DesktopApp:
@@ -47,19 +51,31 @@ class DesktopApp:
             value=values.get("GUI_RETRY_MANUAL", "false").strip().lower()
             in {"1", "true", "yes", "on"}
         )
+        self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
+        self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
+        self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
+        self.telegram_reminders_var = tk.StringVar(
+            value=values.get("TELEGRAM_CAPTCHA_REMINDER_MINUTES", "30,60")
+        )
+        self.captcha_wait_hours_var = tk.StringVar(
+            value=self._initial_wait_hours(values.get("AVITO_MANUAL_TIMEOUT_SECONDS", ""))
+        )
+        self.telegram_summary_var = tk.StringVar()
+        self.telegram_dialog: tk.Toplevel | None = None
         self.email_var = tk.StringVar(value="Сервисный email пока не определён")
         self.status_var = tk.StringVar(value="Готово к настройке")
 
         self._configure_window()
         self._configure_styles()
         self._build_layout()
+        self._refresh_telegram_summary()
         self._refresh_service_email(show_error=False)
         self.root.after(100, self._poll_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _configure_window(self) -> None:
         self.root.title(APP_TITLE)
-        self.root.geometry("1040x760")
+        self.root.geometry("1040x820")
         self.root.minsize(860, 640)
         self.root.configure(bg="#F4F6FA")
 
@@ -216,6 +232,27 @@ class DesktopApp:
             style="Secondary.TButton",
         ).grid(row=0, column=2, padx=(8, 0))
 
+        notification_row = ttk.Frame(settings_card, style="Card.TFrame")
+        notification_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        notification_row.columnconfigure(1, weight=1)
+        ttk.Label(
+            notification_row,
+            text="Капча и уведомления",
+            style="Field.TLabel",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(
+            notification_row,
+            textvariable=self.telegram_summary_var,
+            style="Hint.TLabel",
+        ).grid(row=0, column=1, sticky="w")
+        self.telegram_button = ttk.Button(
+            notification_row,
+            text="Настроить Telegram",
+            command=self._show_telegram_settings,
+            style="Secondary.TButton",
+        )
+        self.telegram_button.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
         controls = ttk.Frame(outer, style="App.TFrame")
         controls.grid(row=2, column=0, sticky="ew", pady=16)
         controls.columnconfigure(4, weight=1)
@@ -344,6 +381,217 @@ class DesktopApp:
             webbrowser.open(GOOGLE_SHEETS_API_URL)
             webbrowser.open(GOOGLE_CREDENTIALS_URL)
 
+    @staticmethod
+    def _initial_wait_hours(raw_seconds: str) -> str:
+        try:
+            hours = float(raw_seconds) / 3600 if raw_seconds.strip() else 12.0
+        except ValueError:
+            hours = 12.0
+        # Older installations used five minutes. Migrate them to an unattended-safe value.
+        if hours < 1:
+            hours = 12.0
+        return f"{hours:g}"
+
+    def _refresh_telegram_summary(self) -> None:
+        if not self.telegram_token_var.get().strip() or not self.telegram_primary_var.get().strip():
+            self.telegram_summary_var.set(
+                "не настроено — ожидание работает, сообщения не отправляются"
+            )
+            return
+        reminders = self.telegram_reminders_var.get().strip() or "30,60"
+        wait_hours = self.captcha_wait_hours_var.get().strip() or "12"
+        backup = "; есть резервный получатель" if self.telegram_backup_var.get().strip() else ""
+        self.telegram_summary_var.set(f"сразу + {reminders} мин; ждём до {wait_hours} ч{backup}")
+
+    def _show_telegram_settings(self) -> None:
+        if self.telegram_dialog and self.telegram_dialog.winfo_exists():
+            self.telegram_dialog.lift()
+            self.telegram_dialog.focus_force()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        self.telegram_dialog = dialog
+        dialog.title("Telegram и ожидание капчи")
+        dialog.geometry("780x430")
+        dialog.minsize(700, 420)
+        dialog.transient(self.root)
+        dialog.configure(bg="#F4F6FA")
+
+        card = ttk.Frame(dialog, style="Card.TFrame", padding=22)
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+        card.columnconfigure(1, weight=1)
+        ttk.Label(card, text="Уведомления о капче", style="Section.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "Сразу пишем основному ответственному, затем напоминаем. "
+                "Последнее напоминание уходит также резервному человеку."
+            ),
+            style="Hint.TLabel",
+            wraplength=700,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 18))
+
+        ttk.Label(card, text="Токен бота", style="Field.TLabel").grid(
+            row=2, column=0, sticky="w", padx=(0, 14)
+        )
+        ttk.Entry(card, textvariable=self.telegram_token_var, show="●").grid(
+            row=2, column=1, sticky="ew"
+        )
+        ttk.Button(
+            card,
+            text="Открыть BotFather",
+            command=lambda: webbrowser.open(TELEGRAM_BOTFATHER_URL),
+            style="Secondary.TButton",
+        ).grid(row=2, column=2, padx=(10, 0))
+
+        ttk.Label(card, text="Основные Chat ID", style="Field.TLabel").grid(
+            row=3, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.telegram_primary_var).grid(
+            row=3, column=1, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(card, text="Резервные Chat ID", style="Field.TLabel").grid(
+            row=4, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.telegram_backup_var).grid(
+            row=4, column=1, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "Несколько ID можно указать через запятую. "
+                "Каждый человек сначала пишет боту /start."
+            ),
+            style="Hint.TLabel",
+        ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
+
+        timings = ttk.Frame(card, style="Card.TFrame")
+        timings.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        timings.columnconfigure(1, weight=1)
+        ttk.Label(timings, text="Напоминания, мин", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        ttk.Entry(timings, textvariable=self.telegram_reminders_var, width=18).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Label(timings, text="Максимально ждать, часов", style="Field.TLabel").grid(
+            row=0, column=2, sticky="e", padx=(24, 12)
+        )
+        ttk.Entry(timings, textvariable=self.captcha_wait_hours_var, width=10).grid(
+            row=0, column=3, sticky="e"
+        )
+
+        ttk.Label(
+            card,
+            text=(
+                "После решения капчи программа сама заметит, что проверка исчезла, "
+                "отправит сообщение «продолжаем» и откроет следующую ссылку."
+            ),
+            style="Hint.TLabel",
+            wraplength=700,
+            justify="left",
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(16, 0))
+
+        buttons = ttk.Frame(card, style="Card.TFrame")
+        buttons.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        buttons.columnconfigure(0, weight=1)
+        ttk.Button(
+            buttons,
+            text="Найти Chat ID",
+            command=self._start_telegram_chats,
+            style="Secondary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            buttons,
+            text="Отправить тест",
+            command=self._start_telegram_test,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Отмена",
+            command=dialog.destroy,
+            style="Secondary.TButton",
+        ).grid(row=0, column=2, padx=(16, 0))
+        ttk.Button(
+            buttons,
+            text="Сохранить",
+            command=self._save_telegram_dialog,
+            style="Primary.TButton",
+        ).grid(row=0, column=3, padx=(8, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+
+    def _notification_env_values(
+        self, *, require_token: bool = False, require_primary: bool = False
+    ) -> dict[str, str]:
+        token = self.telegram_token_var.get().strip()
+        if "\r" in token or "\n" in token:
+            raise ValueError("Токен Telegram должен занимать одну строку")
+        primary = parse_telegram_chat_ids(self.telegram_primary_var.get())
+        backup = parse_telegram_chat_ids(self.telegram_backup_var.get())
+        reminders = parse_telegram_reminders(self.telegram_reminders_var.get())
+        wait_hours = parse_captcha_wait_hours(self.captcha_wait_hours_var.get())
+        if require_token and not token:
+            raise ValueError("Сначала вставьте токен бота от BotFather")
+        if (primary or backup) and not token:
+            raise ValueError("Для Telegram Chat ID необходимо указать токен бота")
+        if require_primary and not primary:
+            raise ValueError("Укажите хотя бы один основной Chat ID")
+        wait_seconds = wait_hours * 3600
+        if reminders[-1] * 60 >= wait_seconds:
+            raise ValueError("Последнее напоминание должно быть раньше окончания ожидания")
+        return {
+            "TELEGRAM_BOT_TOKEN": token,
+            "TELEGRAM_PRIMARY_CHAT_IDS": ",".join(primary),
+            "TELEGRAM_BACKUP_CHAT_IDS": ",".join(backup),
+            "TELEGRAM_CAPTCHA_REMINDER_MINUTES": ",".join(f"{item:g}" for item in reminders),
+            "AVITO_MANUAL_TIMEOUT_SECONDS": f"{wait_seconds:g}",
+        }
+
+    def _save_telegram_settings(
+        self, *, require_token: bool = False, require_primary: bool = False
+    ) -> None:
+        updates = self._notification_env_values(
+            require_token=require_token, require_primary=require_primary
+        )
+        update_env_values(self.env_path, updates)
+        self._refresh_telegram_summary()
+
+    def _save_telegram_dialog(self) -> None:
+        try:
+            self._save_telegram_settings()
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Telegram", str(exc), parent=self.telegram_dialog or self.root)
+            return
+        if self.telegram_dialog:
+            self.telegram_dialog.destroy()
+        self.status_var.set("Настройки Telegram сохранены")
+
+    def _start_telegram_chats(self) -> None:
+        try:
+            self._save_telegram_settings(require_token=True)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Telegram", str(exc), parent=self.telegram_dialog or self.root)
+            return
+        if self.telegram_dialog:
+            self.telegram_dialog.destroy()
+        self._start_process("telegram-chats", ["telegram-chats"])
+
+    def _start_telegram_test(self) -> None:
+        try:
+            self._save_telegram_settings(require_token=True, require_primary=True)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Telegram", str(exc), parent=self.telegram_dialog or self.root)
+            return
+        if self.telegram_dialog:
+            self.telegram_dialog.destroy()
+        self._start_process("telegram-test", ["telegram-test"])
+
     def _open_sheet(self) -> None:
         try:
             spreadsheet_id = extract_spreadsheet_id(self.sheet_var.get())
@@ -360,6 +608,7 @@ class DesktopApp:
         credentials = Path(self.credentials_var.get().strip()).expanduser()
         service_account_email(credentials)
         limit = parse_limit(self.limit_var.get())
+        notification_updates = self._notification_env_values()
         update_env_values(
             self.env_path,
             {
@@ -368,6 +617,7 @@ class DesktopApp:
                 "GOOGLE_WORKSHEET": worksheet,
                 "GUI_DEFAULT_LIMIT": str(limit),
                 "GUI_RETRY_MANUAL": str(self.retry_manual_var.get()).lower(),
+                **notification_updates,
             },
         )
         self.sheet_var.set(google_sheet_url(spreadsheet_id))
@@ -427,14 +677,18 @@ class DesktopApp:
             )
             return
 
+        labels = {
+            "verify": ("Проверяем доступ…", "Проверка доступа\n"),
+            "live": ("Запускаем…", "Запуск очереди в CRM\n"),
+            "telegram-chats": ("Ищем Telegram-чаты…", "Поиск Telegram Chat ID\n"),
+            "telegram-test": ("Проверяем Telegram…", "Тест Telegram-уведомлений\n"),
+        }
+        status_text, log_text = labels.get(kind, ("Выполняем…", "Запуск операции\n"))
         self.process_kind = kind
-        self.status_var.set("Проверяем доступ…" if kind == "verify" else "Запускаем…")
+        self.status_var.set(status_text)
         self._set_running(True)
         self._append_log("\n" + "─" * 72 + "\n")
-        self._append_log(
-            "Проверка доступа\n" if kind == "verify" else "Запуск очереди в CRM\n",
-            "success",
-        )
+        self._append_log(log_text, "success")
 
         command = [str(python), "-m", "avito_crm", *arguments]
         environment = os.environ.copy()
@@ -492,7 +746,13 @@ class DesktopApp:
         self.process = None
         self._set_running(False)
         if return_code == 0:
-            self.status_var.set("Доступ проверен" if kind == "verify" else "Очередь завершена")
+            success_status = {
+                "verify": "Доступ проверен",
+                "live": "Очередь завершена",
+                "telegram-chats": "Поиск Chat ID завершён",
+                "telegram-test": "Telegram работает",
+            }
+            self.status_var.set(success_status.get(kind, "Готово"))
             self._append_log("Готово.\n", "success")
         else:
             self.status_var.set("Завершено с ошибками")
@@ -520,7 +780,7 @@ class DesktopApp:
         self.status_var.set("Останавливаем после текущей строки…")
         self.stop_button.configure(state="disabled")
         self._append_log(
-            "Запрошена мягкая остановка. Текущая строка будет завершена.\n",
+            "Запрошена мягкая остановка. Текущая строка будет безопасно завершена.\n",
             "warning",
         )
 
@@ -528,6 +788,7 @@ class DesktopApp:
         state = "disabled" if running else "normal"
         self.start_button.configure(state=state)
         self.verify_button.configure(state=state)
+        self.telegram_button.configure(state=state)
         self.stop_button.configure(state="normal" if running else "disabled")
         if running:
             self.progress.grid()
@@ -557,6 +818,12 @@ class DesktopApp:
         lowered = line.lower()
         if "ручную проверку" in lowered:
             self.status_var.set("Завершите проверку в браузере")
+        elif "telegram-сообщение доставлено" in lowered:
+            self.status_var.set("Telegram работает")
+        elif "найденные telegram-чаты" in lowered:
+            self.status_var.set("Скопируйте Chat ID из журнала")
+        elif "ручное действие завершено" in lowered:
+            self.status_var.set("Проверка пройдена, продолжаем…")
         elif "открываем объявление" in lowered:
             self.status_var.set("Открываем следующую ссылку…")
         elif "номер получен" in lowered:

@@ -14,6 +14,7 @@ from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError
 from avito_crm.logging_utils import configure_logging
+from avito_crm.notifications import TelegramNotifier
 from avito_crm.ocr import PhoneOcr
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import QueueColumns, build_queue_source
@@ -45,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
         "crm-projects", help="Показать доступные проекты CRM без изменений данных"
     )
     crm_projects.set_defaults(command="crm-projects")
+
+    subparsers.add_parser("telegram-test", help="Отправить тест основным и резервным получателям")
+    subparsers.add_parser("telegram-chats", help="Показать Chat ID людей, написавших боту")
 
     capture = subparsers.add_parser(
         "capture", help="Только открыть/распознать номера и записать status=captured"
@@ -133,6 +137,10 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _crm_check(settings)
     if args.command == "crm-projects":
         return _crm_projects(settings)
+    if args.command == "telegram-test":
+        return _telegram_test(settings)
+    if args.command == "telegram-chats":
+        return _telegram_chats(settings)
     if args.command == "status":
         return _status(settings)
     if args.command == "stop":
@@ -261,6 +269,32 @@ def _crm_projects(settings: Settings) -> int:
     for project in projects:
         print(f"  {project.get('id')} — {project.get('name', '')}")
     print("Скопируйте нужный ID в LPTRACKER_PROJECT_ID локального .env.")
+    return 0
+
+
+def _telegram_test(settings: Settings) -> int:
+    with TelegramNotifier(settings) as notifier:
+        if not notifier.enabled:
+            raise ConfigurationError(
+                "Для проверки укажите TELEGRAM_BOT_TOKEN и TELEGRAM_PRIMARY_CHAT_IDS"
+            )
+        sent = notifier.send_test()
+    print(f"OK: тестовое Telegram-сообщение доставлено, чатов: {sent}.")
+    return 0
+
+
+def _telegram_chats(settings: Settings) -> int:
+    with TelegramNotifier(settings) as notifier:
+        chats = notifier.recent_chats()
+    if not chats:
+        print(
+            "Chat ID пока не найдены. Каждый получатель должен открыть бота, "
+            "нажать Start или отправить /start, затем повторить поиск."
+        )
+        return 0
+    print("Найденные Telegram-чаты (скопируйте нужный Chat ID в настройки):")
+    for chat in chats:
+        print(f"  {chat.chat_id} — {chat.label}")
     return 0
 
 
