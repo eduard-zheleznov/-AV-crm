@@ -9,7 +9,16 @@
    behavior before production use.
 6. Commit only source, tests, safe examples, and documentation.
 
+Before commit:
+
+```bash
+ruff check src tests
+ruff format --check src tests
+pytest
+git diff --check
+git grep -nE '(password|token|secret)\s*[:=]' -- ':!*.example' ':!docs/*'
+```
+
 Runtime phone numbers, CRM IDs, browser sessions, screenshots, and errors can
 contain personal or operational data. They must stay on the remote computer and
 outside Git.
-

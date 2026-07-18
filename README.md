@@ -1,4 +1,130 @@
 # Avito → LPTracker CRM
 
-Safe baseline for the Avito-to-CRM automation project. Implementation lives in
-a task-specific feature branch until verified.
+Последовательная, возобновляемая система:
+
+```text
+Google Sheets / XLSX / CSV
+          ↓
+видимый Chromium с постоянным профилем
+          ↓
+DOM → OCR изображения (если номер не текстом)
+          ↓
+нормализация +7XXXXXXXXXX и дедупликация
+          ↓
+LPTracker: контакт/лид + поле «Тег+ для новых с Ав и Ян»
+          ↓
+статус, ошибка, Run ID и продолжение с нужной строки
+```
+
+Система не содержит обхода CAPTCHA, подмены отпечатка браузера, ротации прокси
+или других механизмов обхода защиты. Работа идёт по одному объявлению, с
+пау­зами и лимитом сессии. Если Avito требует проверку, открытый браузер ждёт
+оператора и безопасно останавливает очередь по таймауту.
+
+## Что реализовано
+
+- Google Sheets, локальный `.xlsx` и `.csv` как взаимозаменяемые очереди;
+- автоматическое добавление служебных колонок без удаления исходных данных;
+- видимый Chromium и постоянный профиль с сохранённой сессией Avito;
+- извлечение номера из `tel:`/DOM, затем OCR нескольких вариантов изображения;
+- строгая нормализация российских номеров в `+7XXXXXXXXXX`;
+- автоматический поиск проекта, поля и допустимой категории в LPTracker;
+- проверка контакта по телефону до создания лида;
+- идемпотентность по объявлению, телефону и локальному SQLite-журналу;
+- команды `capture`, `sync-crm`, `run`, `stop`, `status`, `doctor`;
+- явный `--live` для любых записей в CRM;
+- мягкая остановка, лимит успешных лидов, повтор ошибок и аварийный выключатель;
+- диагностические скриншоты только при ошибках и без попадания в Git.
+
+## Быстрый запуск на Windows
+
+Требования: Windows 10/11, Python 3.11+, Git и Tesseract OCR.
+
+```powershell
+git clone https://github.com/eduard-zheleznov/-AV-crm.git avito-crm
+cd avito-crm
+git switch feature/avito-crm-pipeline
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\install.ps1
+```
+
+Установщик создаст `.venv`, установит зависимости и Chromium, затем создаст
+локальный `.env` и `queue-template.xlsx`. Реальные логин, пароль и JSON
+сервисного аккаунта Google должны находиться только на удалённом компьютере.
+
+Подробная инструкция: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+## Безопасная первая проверка
+
+```powershell
+# 1. Проверка OCR, Chromium, очереди и CRM без изменений CRM
+.\scripts\doctor.ps1 -Source google -OnlineCrm
+
+# 2. Получить один номер, ничего не создавая в CRM
+.\scripts\run.ps1 -Source google -Limit 1 -Mode capture
+
+# 3. После визуальной проверки телефона создать ровно один лид
+.\scripts\run.ps1 -Source google -Limit 1 -Mode crm -Live
+
+# 4. Полный поток на заданное количество новых лидов
+.\scripts\run.ps1 -Source google -Limit 10 -Mode full -Live
+```
+
+Для локального Excel:
+
+```powershell
+.\scripts\run.ps1 -Source xlsx -File "C:\queues\avito.xlsx" -Sheet "Лист1" -Limit 10 -Live
+```
+
+Остановить после текущего безопасного шага:
+
+```powershell
+.\scripts\stop.ps1
+.\scripts\status.ps1
+```
+
+Следующий запуск продолжит незавершённые строки. `done`, `duplicate` и `invalid`
+повторно не обрабатываются.
+
+## Статусы очереди
+
+| Статус | Значение | Повтор по умолчанию |
+|---|---|---:|
+| `processing` | шаг начат; после аварии можно продолжить | да |
+| `captured` | номер распознан, CRM ещё не изменялась | для CRM |
+| `done` | лид создан и ID записан | нет |
+| `duplicate` | контакт/лид уже существует | нет |
+| `error` | ошибка записана в строке | да, до лимита попыток |
+| `manual_required` | Avito требует ручного действия | только `-RetryManual` |
+| `invalid` | ссылка не относится к объявлению Avito | нет |
+
+`-Limit` в полном live-режиме означает количество **созданных лидов**, а не
+число просмотренных строк. Дубликаты и ошибки лимит не расходуют.
+
+## Конфигурация
+
+Все параметры документированы в [.env.example](.env.example). Обязательные:
+
+- `LPTRACKER_LOGIN`, `LPTRACKER_PASSWORD`;
+- `LPTRACKER_PROJECT_ID` (предпочтительно) либо точное `LPTRACKER_PROJECT_NAME`;
+- `GOOGLE_CREDENTIALS_FILE`, `GOOGLE_SPREADSHEET_ID`, `GOOGLE_WORKSHEET` для
+  Google Sheets;
+- `TESSERACT_CMD`, если `tesseract.exe` отсутствует в `PATH`.
+
+Целевое поле и значение уже стоят в безопасных значениях по умолчанию:
+
+- `Тег+ для новых с Ав и Ян`;
+- `Сбор № лпр (Ав, ремонт кв. под ключ)`.
+
+Перед созданием первого лида система проверяет, что проект, поле и категория
+существуют. При опечатке запуск завершится до изменения CRM.
+
+## Данные и секреты
+
+`.env`, Google credentials, браузерный профиль, номера, CRM ID, SQLite, журналы,
+скриншоты и backup Excel исключены из Git. Репозиторий сейчас публичный, поэтому
+особенно важно не добавлять в него никакие рабочие данные; для коммерческой
+эксплуатации рекомендуется сделать его private.
+
+Подробности: [docs/SECURITY.md](docs/SECURITY.md) и
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
