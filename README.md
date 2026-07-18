@@ -54,6 +54,14 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 Подробная инструкция: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
+## Запуск без терминала
+
+`install.ps1` создаёт на рабочем столе ярлык **«Avito в CRM»**. В GUI выбираются
+Google-таблица, лист, JSON service account и лимит. Там же есть проверка доступа,
+живой журнал и мягкая остановка.
+
+Подробнее: [docs/GOOGLE_GUI.md](docs/GOOGLE_GUI.md).
+
 ## Безопасная первая проверка
 
 Самый простой вариант — интерактивный мастер. Он сначала показывает проекты

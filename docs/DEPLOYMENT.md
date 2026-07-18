@@ -89,6 +89,17 @@ JSON не должен находиться внутри репозитория.
 
 ## 6. Production
 
+Для ежедневной работы используйте ярлык **«Avito в CRM»** на рабочем столе. Если ярлык был удалён,
+его можно восстановить одноразовой командой:
+
+```powershell
+.\scripts\create-shortcut.ps1
+```
+
+Полная настройка GUI и Google: [`GOOGLE_GUI.md`](GOOGLE_GUI.md).
+
+Терминальная альтернатива:
+
 ```powershell
 .\scripts\run.ps1 -Source google -Limit 10 -Mode full -Live
 ```

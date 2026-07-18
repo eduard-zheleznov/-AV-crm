@@ -35,6 +35,7 @@ if ($Dev) {
 }
 & $VenvPython -m playwright install chromium
 & $VenvPython -m avito_crm init
+& (Join-Path $PSScriptRoot "create-shortcut.ps1")
 
 $TesseractCandidates = @(
     "$env:ProgramFiles\Tesseract-OCR\tesseract.exe",
@@ -64,7 +65,6 @@ if ($Tesseract) {
 
 Write-Host ""
 Write-Host "Установка завершена. Следующие шаги:"
-Write-Host "1. Заполните .env (секреты не коммитить)."
-Write-Host "2. Выполните: .\scripts\doctor.ps1"
-Write-Host "3. Добавьте 1 ссылку в queue-template.xlsx, закройте Excel и запустите:"
-Write-Host "   .\scripts\first-test.ps1 -Source xlsx -File .\queue-template.xlsx -Sheet Лист1"
+Write-Host "1. Заполните CRM-секреты в .env (не коммитить)."
+Write-Host "2. Запустите ярлык 'Авито в CRM' на рабочем столе."
+Write-Host "3. Выберите Google JSON, вставьте ссылку таблицы и нажмите 'Проверить доступ'."
