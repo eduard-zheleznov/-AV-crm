@@ -41,7 +41,24 @@ $TesseractCandidates = @(
     "${env:ProgramFiles(x86)}\Tesseract-OCR\tesseract.exe"
 )
 $Tesseract = $TesseractCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if (-not $Tesseract -and -not (Get-Command tesseract -ErrorAction SilentlyContinue)) {
+$TesseractCommand = Get-Command tesseract -ErrorAction SilentlyContinue
+if (-not $Tesseract -and $TesseractCommand) {
+    $Tesseract = $TesseractCommand.Source
+}
+if ($Tesseract) {
+    $EnvPath = Join-Path $ProjectRoot ".env"
+    $EnvText = [System.IO.File]::ReadAllText($EnvPath)
+    if ($EnvText -match '(?m)^TESSERACT_CMD=\s*$') {
+        $EnvText = [regex]::Replace(
+            $EnvText,
+            '(?m)^TESSERACT_CMD=\s*$',
+            "TESSERACT_CMD=$Tesseract"
+        )
+        $Utf8Bom = New-Object System.Text.UTF8Encoding($true)
+        [System.IO.File]::WriteAllText($EnvPath, $EnvText, $Utf8Bom)
+        Write-Host "Tesseract найден и записан в .env: $Tesseract"
+    }
+} else {
     Write-Warning "Tesseract OCR не найден. Установите Windows-сборку Tesseract и укажите TESSERACT_CMD в .env."
 }
 
