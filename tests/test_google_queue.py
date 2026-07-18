@@ -13,10 +13,31 @@ class FakeSheet:
 
     def update(self, values, range_name=None, **_kwargs):
         self.header_update = (values, range_name)
-        self.values[0] = list(values[0])
+        if self.values:
+            self.values[0] = list(values[0])
+        else:
+            self.values.append(list(values[0]))
 
     def batch_update(self, data, **_kwargs):
         self.batch = data
+
+
+class FakeEmptySheet(FakeSheet):
+    def __init__(self):
+        super().__init__()
+        self.values = []
+        self.frozen_rows = 0
+        self.formatted_range = None
+        self.filter_enabled = False
+
+    def freeze(self, *, rows):
+        self.frozen_rows = rows
+
+    def format(self, range_name, _format):
+        self.formatted_range = range_name
+
+    def set_basic_filter(self):
+        self.filter_enabled = True
 
 
 def test_google_sheet_uses_current_gspread_argument_order(settings):
@@ -42,3 +63,18 @@ def test_google_sheet_uses_current_gspread_argument_order(settings):
     )
     assert source.sheet.batch
     assert any(cell["values"] == [[ItemStatus.CAPTURED]] for cell in source.sheet.batch)
+
+
+def test_google_sheet_initializes_an_empty_tab(settings):
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.columns = QueueColumns.from_settings(settings)
+    source.max_attempts = 3
+    source.sheet = FakeEmptySheet()
+
+    items = source.list_actionable()
+
+    assert items == []
+    assert source.sheet.values[0] == ["Ссылка", *source.columns.managed]
+    assert source.sheet.frozen_rows == 1
+    assert source.sheet.formatted_range == "1:1"
+    assert source.sheet.filter_enabled is True

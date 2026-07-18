@@ -1,0 +1,82 @@
+import json
+
+import pytest
+
+from avito_crm.gui_config import (
+    extract_spreadsheet_id,
+    google_sheet_url,
+    parse_limit,
+    read_env_values,
+    service_account_email,
+    update_env_values,
+)
+
+SPREADSHEET_ID = "1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+
+
+def test_extract_spreadsheet_id_accepts_url_and_raw_id():
+    url = f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit#gid=123"
+    account_url = f"https://docs.google.com/spreadsheets/u/0/d/{SPREADSHEET_ID}/edit"
+
+    assert extract_spreadsheet_id(url) == SPREADSHEET_ID
+    assert extract_spreadsheet_id(account_url) == SPREADSHEET_ID
+    assert extract_spreadsheet_id(SPREADSHEET_ID) == SPREADSHEET_ID
+    assert google_sheet_url(SPREADSHEET_ID).endswith(f"/{SPREADSHEET_ID}/edit")
+
+
+def test_extract_spreadsheet_id_rejects_unrelated_text():
+    with pytest.raises(ValueError):
+        extract_spreadsheet_id("not a google sheet")
+
+
+def test_update_env_values_preserves_secrets_and_uses_bom(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LPTRACKER_PASSWORD=keep-this-secret\nGOOGLE_SPREADSHEET_ID=old\n",
+        encoding="utf-8-sig",
+    )
+
+    update_env_values(
+        env_file,
+        {
+            "GOOGLE_SPREADSHEET_ID": SPREADSHEET_ID,
+            "GUI_DEFAULT_LIMIT": "25",
+            "GOOGLE_WORKSHEET": "Лиды #1",
+            "GOOGLE_CREDENTIALS_FILE": r"C:\Program Data\service #1.json",
+        },
+    )
+
+    assert env_file.read_bytes().startswith(b"\xef\xbb\xbf")
+    values = read_env_values(env_file)
+    assert values["LPTRACKER_PASSWORD"] == "keep-this-secret"
+    assert values["GOOGLE_SPREADSHEET_ID"] == SPREADSHEET_ID
+    assert values["GUI_DEFAULT_LIMIT"] == "25"
+    assert values["GOOGLE_WORKSHEET"] == "Лиды #1"
+    assert values["GOOGLE_CREDENTIALS_FILE"] == r"C:\Program Data\service #1.json"
+
+
+def test_service_account_email_validates_json_without_returning_key(tmp_path):
+    path = tmp_path / "google.json"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "client_email": "worker@example.iam.gserviceaccount.com",
+                "private_key": "test-only-private-key",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert service_account_email(path) == "worker@example.iam.gserviceaccount.com"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("25", 25), ("10000", 10000)])
+def test_parse_limit(raw, expected):
+    assert parse_limit(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "0", "10001", "1.5"])
+def test_parse_limit_rejects_invalid_values(raw):
+    with pytest.raises(ValueError):
+        parse_limit(raw)

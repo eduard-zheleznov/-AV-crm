@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 from abc import ABC, abstractmethod
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -286,6 +287,7 @@ class GoogleSheetsQueueSource(QueueSource):
 
             client = gspread.service_account(filename=str(credentials_file))
             spreadsheet = client.open_by_key(spreadsheet_id)
+            self.spreadsheet = spreadsheet
             self.sheet = spreadsheet.worksheet(worksheet)
         except Exception as exc:
             raise SourceError(f"Не удалось открыть Google Sheet: {exc}") from exc
@@ -296,7 +298,13 @@ class GoogleSheetsQueueSource(QueueSource):
         except Exception as exc:
             raise SourceError(f"Не удалось прочитать Google Sheet: {exc}") from exc
         if not values:
-            raise SourceError("Google Sheet пуст; добавьте строку заголовков")
+            headers = [self.columns.url, *self.columns.managed]
+            try:
+                self.sheet.update([headers], "1:1", value_input_option="RAW")
+            except Exception as exc:
+                raise SourceError(f"Не удалось подготовить пустой Google Sheet: {exc}") from exc
+            self._format_empty_sheet(headers)
+            return headers, []
         headers = [str(value).strip() for value in values[0]]
         if self.columns.url not in headers:
             raise SourceError(f"В Google Sheet нет колонки {self.columns.url!r}")
@@ -313,6 +321,60 @@ class GoogleSheetsQueueSource(QueueSource):
         width = len(headers)
         rows = [row + [""] * (width - len(row)) for row in values[1:]]
         return headers, rows
+
+    def _format_empty_sheet(self, headers: list[str]) -> None:
+        """Apply a restrained native layout only when the tab was fully empty."""
+        with suppress(Exception):
+            self.sheet.freeze(rows=1)
+            self.sheet.format(
+                "1:1",
+                {
+                    "backgroundColor": {"red": 0.95, "green": 0.96, "blue": 0.97},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": {"red": 0.1, "green": 0.13, "blue": 0.19},
+                    },
+                    "verticalAlignment": "MIDDLE",
+                    "wrapStrategy": "CLIP",
+                },
+            )
+            self.sheet.set_basic_filter()
+
+        spreadsheet = getattr(self, "spreadsheet", None)
+        sheet_id = getattr(self.sheet, "id", None)
+        if spreadsheet is None or sheet_id is None:
+            return
+        with suppress(Exception):
+            spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 0,
+                                    "endIndex": 1,
+                                },
+                                "properties": {"pixelSize": 520},
+                                "fields": "pixelSize",
+                            }
+                        },
+                        {
+                            "updateDimensionProperties": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "COLUMNS",
+                                    "startIndex": 1,
+                                    "endIndex": len(headers),
+                                },
+                                "properties": {"pixelSize": 150},
+                                "fields": "pixelSize",
+                            }
+                        },
+                    ]
+                }
+            )
 
     def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
         headers, rows = self._read()
