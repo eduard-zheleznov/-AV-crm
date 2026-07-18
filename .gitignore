@@ -13,6 +13,9 @@ output/
 logs/
 screenshots/
 browser-profile/
+/queue-template.xlsx
+/queue.xlsx
+/queues/
 *.sqlite
 *.sqlite3
 *.db
@@ -23,6 +26,9 @@ venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
@@ -34,4 +40,3 @@ build/
 .idea/
 .vscode/
 Thumbs.db
-
