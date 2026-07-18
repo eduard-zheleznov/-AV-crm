@@ -59,7 +59,7 @@ if ($LiveConfirmation.Trim().ToUpperInvariant() -ne "СОЗДАТЬ 1 ЛИД") {
     exit 0
 }
 Invoke-App -Arguments (
-    @("sync-crm") + $SourceArguments + @("--limit", "1", "--live")
+    @("sync-crm") + $SourceArguments + @("--limit", "1", "--live", "--require-goal")
 )
 
 Write-Host ""

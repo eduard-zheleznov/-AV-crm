@@ -71,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_source_args(sync, require_source=True, include_limit=True)
     sync.add_argument("--live", action="store_true", help="Обязательное подтверждение записи")
+    sync.add_argument(
+        "--require-goal",
+        action="store_true",
+        help="Вернуть ошибку, если не создано ровно запрошенное число лидов",
+    )
 
     subparsers.add_parser("status", help="Показать итог последнего запуска без телефонов")
     subparsers.add_parser("stop", help="Мягко остановить работающий процесс после текущего шага")
@@ -162,6 +167,12 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 interactive_phone_check=bool(getattr(args, "interactive_check", False)),
             ).run(args.limit)
         _print_summary(summary, live)
+        if getattr(args, "require_goal", False) and summary.created < args.limit:
+            print(
+                f"ОШИБКА: создано {summary.created} из {args.limit} запрошенных лидов.",
+                file=sys.stderr,
+            )
+            return 4
         return 0 if summary.errors == 0 and summary.manual_required == 0 else 3
     raise ConfigurationError(f"Неизвестная команда: {args.command}")
 

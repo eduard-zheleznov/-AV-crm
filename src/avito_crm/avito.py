@@ -154,9 +154,7 @@ class AvitoBrowser:
                 if second_round.phone:
                     return self._complete_listing(second_round.phone)
 
-            explicit_error = (
-                first_round.explicit_phone_error or last_round.explicit_phone_error
-            )
+            explicit_error = first_round.explicit_phone_error or last_round.explicit_phone_error
             button_found = first_round.button_found or last_round.button_found
             suffix = "phone-temporary-error" if explicit_error else "phone-failed"
             self._save_diagnostic(page, canonical_url, suffix)

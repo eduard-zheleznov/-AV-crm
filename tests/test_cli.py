@@ -25,3 +25,18 @@ def test_first_test_commands_are_available():
 
     assert projects.command == "crm-projects"
     assert capture.interactive_check is True
+
+    sync = build_parser().parse_args(
+        [
+            "sync-crm",
+            "--source",
+            "xlsx",
+            "--file",
+            "test.xlsx",
+            "--limit",
+            "1",
+            "--live",
+            "--require-goal",
+        ]
+    )
+    assert sync.require_goal is True
