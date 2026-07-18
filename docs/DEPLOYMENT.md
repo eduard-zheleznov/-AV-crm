@@ -18,7 +18,7 @@
 ```powershell
 git clone https://github.com/eduard-zheleznov/-AV-crm.git C:\avito-crm
 cd C:\avito-crm
-git switch feature/avito-crm-pipeline
+git switch feature/adopt-proven-avito-flow
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install.ps1
 ```
@@ -55,6 +55,15 @@ JSON не должен находиться внутри репозитория.
 названий используйте переменные `QUEUE_*_COLUMN` в `.env`.
 
 ## 5. Staging-последовательность
+
+Рекомендуемый вариант — единый мастер из
+[`FIRST_TEST.md`](FIRST_TEST.md):
+
+```powershell
+.\scripts\first-test.ps1 -Source xlsx -File ".\queue-template.xlsx" -Sheet "Лист1"
+```
+
+Либо те же шаги вручную:
 
 ```powershell
 # Никаких записей в CRM
@@ -100,4 +109,3 @@ Baseline не содержит worker-кода, поэтому практиче�
 первого принятия должен указывать на последний проверенный release tag. Runtime
 данные не удаляются. Созданные CRM-лиды автоматически не удаляются — это
 осознанная защита от разрушительных откатов.
-

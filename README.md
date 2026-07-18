@@ -43,7 +43,7 @@ LPTracker: контакт/лид + поле «Тег+ для новых с Ав 
 ```powershell
 git clone https://github.com/eduard-zheleznov/-AV-crm.git avito-crm
 cd avito-crm
-git switch feature/avito-crm-pipeline
+git switch feature/adopt-proven-avito-flow
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\install.ps1
 ```
@@ -55,6 +55,22 @@ Set-ExecutionPolicy -Scope Process Bypass
 Подробная инструкция: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Безопасная первая проверка
+
+Самый простой вариант — интерактивный мастер. Он сначала показывает проекты
+CRM, затем держит браузер открытым для сверки одного номера и только после
+отдельного подтверждения создаёт ровно один лид:
+
+```powershell
+.\scripts\first-test.ps1 -Source xlsx -File ".\queue-template.xlsx" -Sheet "Лист1"
+```
+
+Первый тест через Excel проще: он не требует сервисного аккаунта Google.
+После успешной проверки тот же мастер можно запустить с `-Source google`.
+
+Подробно, с ожидаемым результатом каждого шага:
+[docs/FIRST_TEST.md](docs/FIRST_TEST.md).
+
+Те же действия вручную:
 
 ```powershell
 # 1. Проверка OCR, Chromium, очереди и CRM без изменений CRM
@@ -118,6 +134,12 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 Перед созданием первого лида система проверяет, что проект, поле и категория
 существуют. При опечатке запуск завершится до изменения CRM.
+
+## Повторные лиды
+
+Текущий `CRM_DUPLICATE_POLICY=skip` — временный безопасный режим для первого
+запуска. Намеренные повторы будут добавлены отдельным управляемым сценарием после
+согласования бизнес-ключа повтора. До этого production-настройку не меняйте.
 
 ## Данные и секреты
 
