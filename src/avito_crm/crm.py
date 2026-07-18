@@ -102,19 +102,25 @@ class LpTrackerClient:
         value: Any = self.settings.lptracker_field_value
         if field_type == "cats":
             categories = field.get("categories") or []
-            category_names = [
-                str(category.get("name", "")) if isinstance(category, dict) else str(category)
-                for category in categories
-            ]
-            category_map = {_normalized_name(name): name for name in category_names}
-            target = category_map.get(_normalized_name(self.settings.lptracker_field_value))
-            if not target:
-                raise ConfigurationError(
-                    f"В поле {self.settings.lptracker_field_name!r} нет значения "
-                    f"{self.settings.lptracker_field_value!r}. Доступно: "
-                    f"{', '.join(category_names)}"
+            if categories:
+                category_names = [
+                    str(category.get("name", "")) if isinstance(category, dict) else str(category)
+                    for category in categories
+                ]
+                category_map = {_normalized_name(name): name for name in category_names}
+                target = category_map.get(_normalized_name(self.settings.lptracker_field_value))
+                if not target:
+                    raise ConfigurationError(
+                        f"В поле {self.settings.lptracker_field_name!r} нет значения "
+                        f"{self.settings.lptracker_field_value!r}. Доступно: "
+                        f"{', '.join(category_names)}"
+                    )
+                value = [target] if _truthy(field.get("is_multi_select")) else target
+            else:
+                LOGGER.info(
+                    "LPTracker не вернул варианты поля-категории в списке проекта; "
+                    "используем настроенное точное значение"
                 )
-            value = [target] if _truthy(field.get("is_multi_select")) else target
         return CrmDestination(
             project_id=project_id,
             project_name=str(project.get("name", "")),

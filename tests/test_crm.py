@@ -101,6 +101,34 @@ def test_crm_projects_can_be_listed_before_project_is_configured(settings):
     assert projects == [{"id": 1, "name": "Ремонт"}]
 
 
+def test_crm_accepts_configured_category_when_project_list_omits_options(settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/projects":
+            return _success([{"id": 1, "name": "Ремонт"}])
+        if request.url.path == "/project/1/customs":
+            return _success(
+                [
+                    {
+                        "id": 42,
+                        "name": "Тег+ для новых с Ав и Ян",
+                        "type": "cats",
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+    http = httpx.Client(transport=transport, base_url=settings.lptracker_base_url)
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        destination = crm.resolve_destination()
+
+    assert destination.field_id == 42
+    assert destination.field_value == "Сбор № лпр (Ав, ремонт кв. под ключ)"
+
+
 def _success(result):
     return httpx.Response(200, json={"status": "success", "result": result})
 
