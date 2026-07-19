@@ -1,4 +1,6 @@
+import hashlib
 import smtplib
+import ssl
 from dataclasses import replace
 
 import httpx
@@ -10,6 +12,8 @@ from avito_crm.notifications import (
     MaxNotifier,
     NotificationRouter,
     TelegramNotifier,
+    _max_http_error_description,
+    _max_ssl_context,
     split_max_text,
     split_telegram_text,
 )
@@ -171,6 +175,38 @@ def test_max_error_never_exposes_bot_token(settings):
 
     assert token not in str(captured.value)
     assert "REDACTED" in str(captured.value)
+
+
+def test_max_ssl_context_contains_official_ministry_root():
+    expected = "d26d2d0231b7c39f92cc738512ba54103519e4405d68b5bd703e9788ca8ecf31"
+
+    fingerprints = {
+        hashlib.sha256(certificate).hexdigest()
+        for certificate in _max_ssl_context().get_ca_certs(binary_form=True)
+    }
+
+    assert expected in fingerprints
+
+
+def test_max_tls_error_has_actionable_message():
+    request = httpx.Request("GET", "https://platform-api2.max.ru/me")
+    try:
+        try:
+            raise ssl.SSLCertVerificationError("certificate verify failed")
+        except ssl.SSLCertVerificationError as cause:
+            raise httpx.ConnectError("TLS failed", request=request) from cause
+    except httpx.ConnectError as exc:
+        description = _max_http_error_description(exc)
+
+    assert "TLS-сертификат" in description
+    assert "1.4.1" in description
+
+
+def test_max_connection_error_has_host_and_port():
+    request = httpx.Request("GET", "https://platform-api2.max.ru/me")
+    error = httpx.ConnectError("connection refused", request=request)
+
+    assert "platform-api2.max.ru:443" in _max_http_error_description(error)
 
 
 def test_max_recent_recipients_reads_started_users_and_group_chats(settings):

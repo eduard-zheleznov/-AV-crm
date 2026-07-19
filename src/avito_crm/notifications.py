@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
+from importlib.resources import files
 
 import httpx
 
@@ -20,6 +21,7 @@ LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
 MAX_MESSAGE_LIMIT = 4000
+MAX_ROOT_CA_RESOURCE = "certs/russian_trusted_root_ca.pem"
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +34,41 @@ class TelegramChat:
 class MaxRecipient:
     target: str
     label: str
+
+
+def _max_ssl_context() -> ssl.SSLContext:
+    """Build a MAX-only trust context without weakening TLS for other services."""
+    context = ssl.create_default_context()
+    root_ca = (
+        files("avito_crm")
+        .joinpath(*MAX_ROOT_CA_RESOURCE.split("/"))
+        .read_text(encoding="ascii")
+    )
+    context.load_verify_locations(cadata=root_ca)
+    return context
+
+
+def _max_http_error_description(exc: httpx.HTTPError) -> str:
+    """Return an actionable, token-safe reason for a MAX transport failure."""
+    current: BaseException | None = exc
+    while current is not None:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return (
+                "не удалось проверить TLS-сертификат MAX; "
+                "обновите программу до версии 1.4.1 или новее"
+            )
+        current = current.__cause__ or current.__context__
+
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "истёк тайм-аут подключения к platform-api2.max.ru"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "MAX не ответил за отведённое время"
+    if isinstance(exc, httpx.ConnectError):
+        return (
+            "не удалось подключиться к platform-api2.max.ru:443; "
+            "проверьте доступ сервера к этому адресу"
+        )
+    return exc.__class__.__name__
 
 
 class TelegramNotifier:
@@ -286,6 +323,7 @@ class MaxNotifier:
             base_url=settings.max_api_base_url,
             timeout=httpx.Timeout(settings.max_request_timeout, connect=10.0),
             follow_redirects=False,
+            verify=_max_ssl_context(),
         )
 
     @property
@@ -514,8 +552,10 @@ class MaxNotifier:
                 if self.token:
                     description = description.replace(self.token, "***REDACTED***")
                 last_error = f"HTTP {response.status_code}: {description or 'ошибка API'}"
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = exc.__class__.__name__
+            except httpx.HTTPError as exc:
+                last_error = _max_http_error_description(exc)
+            except ValueError:
+                last_error = "MAX вернул ответ не в формате JSON"
             if attempt < self.send_attempts:
                 time.sleep(min(2**attempt, 5))
         raise NotificationError(f"MAX API недоступен ({last_error})")

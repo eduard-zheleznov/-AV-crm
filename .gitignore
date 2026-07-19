@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 *.pem
+!src/avito_crm/certs/russian_trusted_root_ca.pem
 *.key
 credentials*.json
 service-account*.json

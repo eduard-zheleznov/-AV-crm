@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "avito-crm-pipeline"
-version = "1.4.0"
+version = "1.4.1"
 description = "Resumable Avito phone extraction and LPTracker CRM ingestion pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,6 +33,9 @@ avito-crm-gui = "avito_crm.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+avito_crm = ["certs/*.pem"]
 
 [tool.pytest.ini_options]
 addopts = "-q --disable-warnings --strict-markers"
