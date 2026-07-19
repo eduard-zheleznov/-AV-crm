@@ -8,9 +8,14 @@ from typing import Any
 class ItemStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
+    RETRY_PHONE = "retry_phone"
+    RETRY_TECHNICAL = "retry_technical"
     CAPTURED = "captured"
     DONE = "done"
     DUPLICATE = "duplicate"
+    INACTIVE = "inactive"
+    UNAVAILABLE = "unavailable"
+    NO_PHONE = "no_phone"
     ERROR = "error"
     MANUAL_REQUIRED = "manual_required"
     INVALID = "invalid"
@@ -19,6 +24,9 @@ class ItemStatus(StrEnum):
 TERMINAL_STATUSES = {
     ItemStatus.DONE.value,
     ItemStatus.DUPLICATE.value,
+    ItemStatus.INACTIVE.value,
+    ItemStatus.UNAVAILABLE.value,
+    ItemStatus.NO_PHONE.value,
     ItemStatus.INVALID.value,
 }
 
@@ -67,8 +75,14 @@ class RunSummary:
     duplicates: int = 0
     errors: int = 0
     invalid: int = 0
+    inactive: int = 0
+    unavailable: int = 0
+    phone_failed: int = 0
+    retries: int = 0
     manual_required: int = 0
     inspected: int = 0
+    processed: int = 0
+    rounds: int = 0
     stopped_reason: str = ""
 
 

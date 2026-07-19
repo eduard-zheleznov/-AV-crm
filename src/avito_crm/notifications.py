@@ -16,6 +16,7 @@ import httpx
 
 from avito_crm.config import Settings
 from avito_crm.errors import ConfigurationError, NotificationError
+from avito_crm.models import RunSummary
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
@@ -224,6 +225,14 @@ class TelegramNotifier:
             ),
             recipients,
         )
+
+    def send_run_completed(
+        self, *, summary: RunSummary, source_name: str, mode: str, live: bool
+    ) -> int:
+        _subject, body = _run_completion_message(
+            summary, self.computer_name, source_name, mode, live
+        )
+        return self.send(body, self.primary_chat_ids)
 
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_chat_ids, *self.backup_chat_ids))
@@ -460,6 +469,14 @@ class MaxNotifier:
             ),
             recipients,
         )
+
+    def send_run_completed(
+        self, *, summary: RunSummary, source_name: str, mode: str, live: bool
+    ) -> int:
+        _subject, body = _run_completion_message(
+            summary, self.computer_name, source_name, mode, live
+        )
+        return self.send(body, self.primary_recipients)
 
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
@@ -741,6 +758,14 @@ class EmailNotifier:
             recipients,
         )
 
+    def send_run_completed(
+        self, *, summary: RunSummary, source_name: str, mode: str, live: bool
+    ) -> int:
+        subject, body = _run_completion_message(
+            summary, self.computer_name, source_name, mode, live
+        )
+        return self.send(subject, body, self.primary_recipients)
+
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
         return self.send(
@@ -840,6 +865,9 @@ class NotificationRouter:
     def send_captcha_stopped(self, **kwargs: object) -> int:
         return self._dispatch("send_captcha_stopped", **kwargs)
 
+    def send_run_completed(self, **kwargs: object) -> int:
+        return self._dispatch("send_run_completed", **kwargs)
+
 
 def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
     value = str(text or "").strip()
@@ -860,6 +888,52 @@ def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[
 
 def split_max_text(text: str) -> list[str]:
     return split_telegram_text(text, limit=MAX_MESSAGE_LIMIT)
+
+
+def _run_completion_message(
+    summary: RunSummary,
+    computer_name: str,
+    source_name: str,
+    mode: str,
+    live: bool,
+) -> tuple[str, str]:
+    reason = (summary.stopped_reason or "Работа завершена").strip()
+    reason_lower = reason.casefold()
+    if summary.errors or reason_lower.startswith("ошибка запуска"):
+        headline = "⚠️ Запуск завершён с техническими ошибками"
+        subject = "[Avito CRM] Завершено с техническими ошибками"
+    elif summary.manual_required:
+        headline = "⏸ Запуск остановлен: требуется ручное действие"
+        subject = "[Avito CRM] Требуется ручное действие"
+    elif "останов" in reason_lower:
+        headline = "⏹ Запуск остановлен оператором"
+        subject = "[Avito CRM] Запуск остановлен"
+    else:
+        headline = "✅ Запуск Avito → CRM завершён"
+        subject = "[Avito CRM] Запуск завершён"
+
+    source_kind = source_name.split(":", 1)[0] or "очередь"
+    lines = (
+        headline,
+        f"Компьютер: {computer_name}",
+        f"Run ID: {summary.run_id}",
+        f"Источник: {source_kind}; режим: {mode}; CRM: {'да' if live else 'нет'}",
+        "",
+        f"Обработано ссылок: {summary.processed}",
+        f"Всего попыток: {summary.inspected}; кругов: {summary.rounds}",
+        f"Номеров открыто: {summary.captured}",
+        f"Лидов создано: {summary.created}",
+        f"Дубликатов: {summary.duplicates}",
+        f"Неактивных объявлений: {summary.inactive}",
+        f"Без кнопки телефона: {summary.unavailable}",
+        f"Номер не открыт после всех попыток: {summary.phone_failed}",
+        f"Повторных попыток: {summary.retries}",
+        f"Некорректных ссылок: {summary.invalid}",
+        f"Технических ошибок: {summary.errors}",
+        f"Требуют ручного действия: {summary.manual_required}",
+        f"Итог: {reason}",
+    )
+    return subject, "\n".join(lines)
 
 
 def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:

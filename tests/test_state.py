@@ -20,6 +20,31 @@ def test_state_store_records_resumable_item(tmp_path):
         assert state.latest_run()["captured"] == 1
 
 
+def test_state_store_persists_outcome_and_round_counters(tmp_path):
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = RunSummary(
+            run_id="run-outcomes",
+            requested=5,
+            inactive=1,
+            unavailable=1,
+            phone_failed=1,
+            retries=2,
+            processed=4,
+            inspected=6,
+            rounds=3,
+        )
+        state.begin_run(summary)
+        state.finish_run(summary)
+        run = state.latest_run()
+
+    assert run["inactive"] == 1
+    assert run["unavailable"] == 1
+    assert run["phone_failed"] == 1
+    assert run["retries"] == 2
+    assert run["processed"] == 4
+    assert run["rounds"] == 3
+
+
 def test_state_store_accumulates_a_resumed_run(tmp_path):
     with StateStore(tmp_path / "state.sqlite3") as state:
         first = RunSummary(run_id="remote-1", requested=3, created=1, captured=1)

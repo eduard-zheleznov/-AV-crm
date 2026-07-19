@@ -20,7 +20,14 @@ from playwright.sync_api import (
 )
 
 from avito_crm.config import Settings
-from avito_crm.errors import ManualActionRequired, NotificationError, PhoneNotFoundError
+from avito_crm.errors import (
+    BrowserOperationError,
+    InactiveListingError,
+    ManualActionRequired,
+    NotificationError,
+    PhoneButtonUnavailableError,
+    PhoneNotFoundError,
+)
 from avito_crm.models import PhoneResult
 from avito_crm.notifications import NotificationRouter
 from avito_crm.ocr import PhoneOcr
@@ -49,6 +56,17 @@ TEMP_NUMBER_ERROR_PATTERNS = (
     "произошла ошибка, поэтому мы не можем показать телефон",
     "не можем показать телефон",
     "попробуйте перезагрузить страницу",
+)
+
+INACTIVE_LISTING_PATTERNS = (
+    ("снято с публикации", "объявление снято с публикации"),
+    ("объявление закрыто", "объявление закрыто"),
+    ("объявление заблокировано", "объявление заблокировано"),
+    ("объявление удалено", "объявление удалено"),
+    ("такого объявления нет", "объявление не найдено"),
+    ("страница не найдена", "страница объявления не найдена"),
+    ("объявление больше не актуально", "объявление больше не актуально"),
+    ("продавец снял объявление", "продавец снял объявление"),
 )
 
 PHONE_BUTTON_RE = re.compile(
@@ -184,6 +202,9 @@ class AvitoBrowser:
             self._goto_with_retries(page, canonical_url)
             self._wait_delay(0.45, 0.75)
             self._recover_manual_action(page, canonical_url)
+            inactive_reason = self._inactive_listing_reason(page)
+            if inactive_reason:
+                raise InactiveListingError(inactive_reason)
 
             existing = self._phone_from_visible_controls(page)
             if existing:
@@ -229,7 +250,12 @@ class AvitoBrowser:
             suffix = "phone-temporary-error" if explicit_error else "phone-failed"
             self._save_diagnostic(page, canonical_url, suffix)
             if not button_found:
-                raise PhoneNotFoundError("Кнопка «Показать телефон» не найдена")
+                inactive_reason = self._inactive_listing_reason(page)
+                if inactive_reason:
+                    raise InactiveListingError(inactive_reason)
+                raise PhoneButtonUnavailableError(
+                    "На загруженной странице нет кнопки «Показать телефон»"
+                )
             if explicit_error:
                 raise PhoneNotFoundError(
                     "Avito не показал временный номер после двух ограниченных кругов"
@@ -237,11 +263,19 @@ class AvitoBrowser:
             raise PhoneNotFoundError(
                 "После клика не появились ни «Временный номер», ни явная ошибка Avito"
             )
-        except (PhoneNotFoundError, ManualActionRequired):
+        except (
+            BrowserOperationError,
+            InactiveListingError,
+            ManualActionRequired,
+            PhoneButtonUnavailableError,
+            PhoneNotFoundError,
+        ):
             raise
         except Exception as exc:
             self._save_diagnostic(page, canonical_url, "browser-error")
-            raise PhoneNotFoundError(f"Ошибка браузера при открытии номера: {exc}") from exc
+            raise BrowserOperationError(
+                f"Ошибка браузера при открытии номера: {exc.__class__.__name__}: {exc}"
+            ) from exc
 
     def _reveal_round(
         self, page: Page, url: str, attempts: int, *, round_number: int
@@ -251,6 +285,9 @@ class AvitoBrowser:
         ambiguous_retry_used = False
         for attempt in range(1, attempts + 1):
             self._recover_manual_action(page, url)
+            inactive_reason = self._inactive_listing_reason(page)
+            if inactive_reason:
+                raise InactiveListingError(inactive_reason)
             existing = self._phone_from_visible_controls(page)
             if existing:
                 return RevealRoundResult(existing, explicit_error_seen, button_found)
@@ -368,7 +405,7 @@ class AvitoBrowser:
                     exc.__class__.__name__,
                 )
                 self._sleep_range(1.0, 3.0)
-        raise PhoneNotFoundError(f"Страница не загрузилась после 3 попыток: {last_error}")
+        raise BrowserOperationError(f"Страница не загрузилась после 3 попыток: {last_error}")
 
     def _click_phone_button(self, page: Page) -> tuple[Locator | None, bool]:
         """Click the first working phone control and fall back from stale candidates."""
@@ -587,12 +624,6 @@ class AvitoBrowser:
                 raise ManualActionRequired("Ожидание ручной проверки Avito остановлено оператором")
             if not self._manual_action_reason(page):
                 LOGGER.info("Ручное действие завершено")
-                self._notify_safely(
-                    "send_captcha_resolved",
-                    url=url,
-                    elapsed_seconds=time.monotonic() - started_at,
-                    include_backup=backup_alerted,
-                )
                 return True
         self._notify_safely(
             "send_captcha_timeout",
@@ -629,6 +660,13 @@ class AvitoBrowser:
             return "ручную проверку"
         if any(pattern in content for pattern in AUTH_PATTERNS):
             return "авторизацию"
+        return ""
+
+    def _inactive_listing_reason(self, page: Page) -> str:
+        content = self._page_visible_text(page)
+        for marker, reason in INACTIVE_LISTING_PATTERNS:
+            if marker in content:
+                return reason
         return ""
 
     @staticmethod

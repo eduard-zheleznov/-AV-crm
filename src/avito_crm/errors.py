@@ -18,8 +18,20 @@ class InvalidListingError(AppError):
     """The queue item is not a supported Avito listing URL."""
 
 
+class InactiveListingError(AppError):
+    """Avito explicitly reports that the listing is removed, closed or blocked."""
+
+
+class PhoneButtonUnavailableError(AppError):
+    """A loaded listing has no control that can reveal a phone number."""
+
+
 class PhoneNotFoundError(AppError):
-    """No valid phone number could be extracted from the listing."""
+    """A phone control was present, but no valid phone number could be extracted."""
+
+
+class BrowserOperationError(AppError):
+    """A browser or page-loading operation failed for a technical reason."""
 
 
 class ManualActionRequired(AppError):

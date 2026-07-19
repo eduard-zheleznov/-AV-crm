@@ -577,7 +577,8 @@ class DesktopApp:
             card,
             text=(
                 "После решения капчи программа сама заметит, что проверка исчезла, "
-                "отправит сообщение «продолжаем» и откроет следующую ссылку."
+                "и продолжит работу без отдельного уведомления. Итоговая статистика "
+                "придёт после завершения всего запуска."
             ),
             style="Hint.TLabel",
             wraplength=700,
@@ -1260,8 +1261,14 @@ class DesktopApp:
             }
             self.status_var.set(success_status.get(kind, "Готово"))
             self._append_log("Готово.\n", "success")
+        elif return_code == 5:
+            self.status_var.set("Требуется ручное действие")
+            self._append_log(
+                "Процесс поставлен на паузу для ручного действия.\n",
+                "warning",
+            )
         else:
-            self.status_var.set("Завершено с ошибками")
+            self.status_var.set("Завершено с техническими ошибками")
             self._append_log(
                 f"Процесс завершён с кодом {return_code}. Смотрите ошибку выше.\n",
                 "error",
@@ -1277,7 +1284,7 @@ class DesktopApp:
         if self.process_kind == "avito-profile":
             messagebox.showinfo(
                 "Профиль Avito",
-                "Закройте все окна синего Chromium. Профиль сохранится автоматически.",
+                "Закройте все окна Playwright-браузера. Профиль сохранится автоматически.",
                 parent=self.root,
             )
             return
@@ -1367,7 +1374,8 @@ class DesktopApp:
             if self.process_kind == "avito-profile":
                 messagebox.showinfo(
                     "Профиль Avito открыт",
-                    "Сначала закройте все окна синего Chromium, чтобы безопасно сохранить профиль.",
+                    "Сначала закройте все окна Playwright-браузера, "
+                    "чтобы безопасно сохранить профиль.",
                     parent=self.root,
                 )
                 return

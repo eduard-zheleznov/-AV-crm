@@ -130,7 +130,7 @@ def _add_source_args(
         parser.add_argument(
             "--retry-manual",
             action="store_true",
-            help="Повторить строки manual_required после ручной проверки",
+            help="Повторить строки, ожидающие ручной проверки Avito",
         )
 
 
@@ -217,6 +217,13 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 include_manual=args.retry_manual,
                 interactive_phone_check=bool(getattr(args, "interactive_check", False)),
             ).run(args.limit)
+        if live:
+            _publish_run_analytics(
+                settings,
+                summary,
+                source_name=source_name,
+                retry_manual=bool(args.retry_manual),
+            )
         _print_summary(summary, live)
         if getattr(args, "require_goal", False) and summary.created < args.limit:
             print(
@@ -224,7 +231,11 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 file=sys.stderr,
             )
             return 4
-        return 0 if summary.errors == 0 and summary.manual_required == 0 else 3
+        if summary.errors:
+            return 3
+        if summary.manual_required:
+            return 5
+        return 0
     raise ConfigurationError(f"Неизвестная команда: {args.command}")
 
 
@@ -396,14 +407,48 @@ def _source_name(args: argparse.Namespace, settings: Settings) -> str:
     return f"{args.source}:{Path(args.file).resolve()}:{args.sheet or settings.google_worksheet}"
 
 
+def _publish_run_analytics(
+    settings: Settings,
+    summary,
+    *,
+    source_name: str,
+    retry_manual: bool,
+) -> None:
+    if settings.google_credentials_file is None or not settings.google_spreadsheet_id:
+        return
+    try:
+        from avito_crm.remote_control import GoogleControlPanel
+
+        panel = GoogleControlPanel.connect(settings)
+        panel.ensure_layout()
+        panel.record_pipeline_summary(
+            summary,
+            source_label=source_name.split(":", 1)[0],
+            retry_manual=retry_manual,
+        )
+    except Exception as exc:
+        print(
+            "ПРЕДУПРЕЖДЕНИЕ: запуск завершён, но аналитика Google не обновлена "
+            f"({exc.__class__.__name__}).",
+            file=sys.stderr,
+        )
+
+
 def _print_summary(summary, live: bool) -> None:
     print("\nИтог запуска:")
     print(f"  Run ID: {summary.run_id}")
-    print(f"  Проверено строк: {summary.inspected}")
+    print(f"  Обработано ссылок: {summary.processed}")
+    print(f"  Выполнено попыток: {summary.inspected}")
+    print(f"  Кругов обработки: {summary.rounds}")
     print(f"  Номеров распознано: {summary.captured}")
     print(f"  Лидов создано: {summary.created}")
     print(f"  Дубликатов: {summary.duplicates}")
-    print(f"  Ошибок: {summary.errors}")
+    print(f"  Неактивных объявлений: {summary.inactive}")
+    print(f"  Без кнопки телефона: {summary.unavailable}")
+    print(f"  Номер не открыт после всех попыток: {summary.phone_failed}")
+    print(f"  Повторных попыток: {summary.retries}")
+    print(f"  Некорректных ссылок: {summary.invalid}")
+    print(f"  Технических ошибок: {summary.errors}")
     print(f"  Требуют ручного действия: {summary.manual_required}")
     print(f"  Остановка: {summary.stopped_reason}")
     if not live:

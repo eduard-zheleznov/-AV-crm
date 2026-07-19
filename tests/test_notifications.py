@@ -14,6 +14,7 @@ from avito_crm.notifications import (
     TelegramNotifier,
     _max_http_error_description,
     _max_ssl_context,
+    _run_completion_message,
     split_max_text,
     split_telegram_text,
 )
@@ -463,3 +464,33 @@ def test_router_default_delivery_order_is_max_email_telegram(settings):
         ]
     finally:
         router.close()
+
+
+def test_completion_message_reports_normal_outcomes_without_phone_data():
+    from avito_crm.models import RunSummary
+
+    summary = RunSummary(
+        run_id="run-summary",
+        requested=10,
+        processed=8,
+        inspected=12,
+        rounds=3,
+        captured=4,
+        created=3,
+        inactive=2,
+        unavailable=1,
+        phone_failed=1,
+        retries=4,
+        stopped_reason="Очередь обработана",
+    )
+
+    subject, body = _run_completion_message(
+        summary, "server-1", "google:secret-id:Лист1", "full", True
+    )
+
+    assert subject == "[Avito CRM] Запуск завершён"
+    assert "Обработано ссылок: 8" in body
+    assert "Неактивных объявлений: 2" in body
+    assert "Номер не открыт после всех попыток: 1" in body
+    assert "secret-id" not in body
+    assert "очередь продолжает работу" not in body

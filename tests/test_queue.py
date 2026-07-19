@@ -1,3 +1,4 @@
+import pytest
 from openpyxl import Workbook, load_workbook
 
 from avito_crm.models import ItemStatus, QueuePatch
@@ -40,14 +41,25 @@ def test_xlsx_queue_adds_columns_updates_atomically_and_backs_up(tmp_path, setti
     assert len(list((tmp_path / "backups").glob("*.xlsx"))) == 1
 
 
-def test_terminal_xlsx_rows_are_not_actionable(tmp_path, settings):
+@pytest.mark.parametrize(
+    "status",
+    [
+        ItemStatus.DONE,
+        ItemStatus.DUPLICATE,
+        ItemStatus.INACTIVE,
+        ItemStatus.UNAVAILABLE,
+        ItemStatus.NO_PHONE,
+        ItemStatus.INVALID,
+    ],
+)
+def test_terminal_xlsx_rows_are_not_actionable(tmp_path, settings, status):
     path = tmp_path / "queue.xlsx"
     columns = QueueColumns.from_settings(settings)
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Лист1"
     sheet.append([columns.url, *columns.managed])
-    sheet.append(["https://www.avito.ru/moskva/item_123456789", "done", "+79991234567"])
+    sheet.append(["https://www.avito.ru/moskva/item_123456789", status, "+79991234567"])
     workbook.save(path)
     workbook.close()
 

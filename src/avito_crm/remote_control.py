@@ -22,7 +22,9 @@ from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 LOGGER = logging.getLogger(__name__)
 
 CONTROL_MARKER = "AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"
-HISTORY_HEADERS = (
+ANALYTICS_MARKER = "AVITO CRM — АНАЛИТИКА"
+ANALYTICS_WORKSHEET = "Аналитика"
+LEGACY_HISTORY_HEADERS = (
     "Команда ID",
     "Лимит",
     "Лист очереди",
@@ -35,6 +37,30 @@ HISTORY_HEADERS = (
     "Ошибок",
     "Сообщение",
     "Компьютер",
+)
+HISTORY_HEADERS = (
+    "Команда ID",
+    "Лимит",
+    "Лист очереди",
+    "Повторить после ручной проверки",
+    "Запущено",
+    "Завершено",
+    "Статус",
+    "Создано лидов",
+    "Дубликатов",
+    "Технических ошибок",
+    "Сообщение",
+    "Компьютер",
+    "Обработано ссылок",
+    "Всего попыток",
+    "Номеров открыто",
+    "Неактивных",
+    "Без кнопки телефона",
+    "Не открыто после попыток",
+    "Ручная проверка",
+    "Повторных попыток",
+    "Некорректных ссылок",
+    "Дата завершения",
 )
 
 
@@ -62,7 +88,13 @@ class CommandState:
     base_duplicates: int = 0
     base_errors: int = 0
     base_invalid: int = 0
+    base_inactive: int = 0
+    base_unavailable: int = 0
+    base_phone_failed: int = 0
+    base_retries: int = 0
     base_manual_required: int = 0
+    base_processed: int = 0
+    base_inspected: int = 0
     result: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -78,7 +110,12 @@ class ProgressSnapshot:
     duplicates: int = 0
     errors: int = 0
     invalid: int = 0
+    inactive: int = 0
+    unavailable: int = 0
+    phone_failed: int = 0
+    retries: int = 0
     manual_required: int = 0
+    processed: int = 0
     inspected: int = 0
     row_id: str = ""
 
@@ -99,6 +136,7 @@ class GoogleControlPanel:
         self.worksheet_not_found = worksheet_not_found
         self.control: Any | None = None
         self.history: Any | None = None
+        self.analytics: Any | None = None
 
     @classmethod
     def connect(cls, settings: Settings) -> GoogleControlPanel:
@@ -128,6 +166,9 @@ class GoogleControlPanel:
         self.history = self._worksheet_or_create(
             self.settings.google_history_worksheet, rows=1000, cols=len(HISTORY_HEADERS)
         )
+        self.analytics = self._worksheet_or_create(
+            ANALYTICS_WORKSHEET, rows=110, cols=8
+        )
         try:
             marker = self._cell(self.control.get("A1:F12"), 1, 1)
             if marker != CONTROL_MARKER:
@@ -139,18 +180,40 @@ class GoogleControlPanel:
                     )
                 self._initialize_control()
             else:
+                self._upgrade_control_labels()
                 self._apply_sheet_rules(self.control)
-            history_values = self.history.get("A1:L1")
+            history_values = self.history.get(f"A1:{_column_letter(len(HISTORY_HEADERS))}1")
             history_headers = tuple(history_values[0]) if history_values else ()
-            if history_headers and history_headers != HISTORY_HEADERS:
+            if history_headers and history_headers not in {
+                LEGACY_HISTORY_HEADERS,
+                HISTORY_HEADERS,
+            }:
                 raise SourceError(
                     f"Лист {self.settings.google_history_worksheet!r} уже занят "
                     "другими данными. Переименуйте его или задайте "
                     "другой GOOGLE_HISTORY_WORKSHEET."
                 )
-            if not history_headers:
-                self.history.update([list(HISTORY_HEADERS)], "A1:L1", value_input_option="RAW")
-                self._format_history()
+            with suppress(Exception):
+                self.history.resize(
+                    rows=max(1000, int(getattr(self.history, "row_count", 0))),
+                    cols=len(HISTORY_HEADERS),
+                )
+            if history_headers != HISTORY_HEADERS:
+                self.history.update(
+                    [list(HISTORY_HEADERS)],
+                    f"A1:{_column_letter(len(HISTORY_HEADERS))}1",
+                    value_input_option="RAW",
+                )
+            self._format_history()
+            self._backfill_history_dates()
+            analytics_marker = self._cell(self.analytics.get("A1:H2"), 1, 1)
+            if analytics_marker and analytics_marker != ANALYTICS_MARKER:
+                raise SourceError(
+                    f"Лист {ANALYTICS_WORKSHEET!r} уже занят другими данными. "
+                    "Переименуйте его и повторите настройку пульта."
+                )
+            if not analytics_marker:
+                self._initialize_analytics()
         except Exception as exc:
             raise SourceError(f"Не удалось подготовить листы пульта: {exc}") from exc
 
@@ -267,9 +330,19 @@ class GoogleControlPanel:
                         0,
                         "",
                         _computer_name(self.settings),
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        "",
                     ]
                 ],
-                f"A{row_number}:L{row_number}",
+                f"A{row_number}:V{row_number}",
                 value_input_option="RAW",
             )
             return row_number
@@ -292,13 +365,90 @@ class GoogleControlPanel:
                         int(result.get("errors", 0)),
                         str(result.get("message", ""))[:500],
                         _computer_name(self.settings),
+                        int(result.get("processed", 0)),
+                        int(result.get("inspected", 0)),
+                        int(result.get("captured", 0)),
+                        int(result.get("inactive", 0)),
+                        int(result.get("unavailable", 0)),
+                        int(result.get("phone_failed", 0)),
+                        int(result.get("manual_required", 0)),
+                        int(result.get("retries", 0)),
+                        int(result.get("invalid", 0)),
+                        str(result.get("finished_at", utc_now()))[:10],
                     ]
                 ],
-                f"F{state.history_row}:L{state.history_row}",
-                value_input_option="RAW",
+                f"F{state.history_row}:V{state.history_row}",
+                value_input_option="USER_ENTERED",
             )
         except Exception as exc:
             raise SourceError(f"Не удалось завершить запись истории: {exc}") from exc
+
+    def record_pipeline_summary(
+        self,
+        summary: RunSummary,
+        *,
+        source_label: str,
+        retry_manual: bool,
+    ) -> None:
+        """Upsert a GUI/CLI run so the analytics sheet includes every production launch."""
+        history = self._require_history()
+        try:
+            existing = history.get_all_values()
+            row_number = next(
+                (
+                    index
+                    for index, row in enumerate(existing, start=1)
+                    if row and str(row[0]).strip() == summary.run_id
+                ),
+                len(existing) + 1,
+            )
+            if summary.errors:
+                status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
+            elif summary.manual_required:
+                status = "ТРЕБУЕТ ВНИМАНИЯ"
+            elif "останов" in summary.stopped_reason.casefold():
+                status = "ОСТАНОВЛЕНО"
+            else:
+                status = "ЗАВЕРШЕНО"
+            finished_at = utc_now()
+            message = (
+                f"Создано {summary.created}; открыто номеров {summary.captured}; "
+                f"неактивных {summary.inactive}; без кнопки {summary.unavailable}; "
+                f"не открыто после попыток {summary.phone_failed}; "
+                f"технических ошибок {summary.errors}. "
+                f"Остановка: {summary.stopped_reason or 'не указана'}."
+            )
+            row = [
+                summary.run_id,
+                summary.requested,
+                source_label[:145],
+                "да" if retry_manual else "нет",
+                finished_at,
+                finished_at,
+                status,
+                summary.created,
+                summary.duplicates,
+                summary.errors,
+                message[:500],
+                _computer_name(self.settings),
+                summary.processed,
+                summary.inspected,
+                summary.captured,
+                summary.inactive,
+                summary.unavailable,
+                summary.phone_failed,
+                summary.manual_required,
+                summary.retries,
+                summary.invalid,
+                finished_at[:10],
+            ]
+            history.update(
+                [row],
+                f"A{row_number}:V{row_number}",
+                value_input_option="USER_ENTERED",
+            )
+        except Exception as exc:
+            raise SourceError(f"Не удалось записать итог запуска в аналитику: {exc}") from exc
 
     def count_command(self, worksheet: str, command_id: str) -> ProgressSnapshot:
         try:
@@ -313,20 +463,41 @@ class GoogleControlPanel:
             return ProgressSnapshot()
         run_index = headers.index(self.settings.run_id_column)
         status_index = headers.index(self.settings.status_column)
+        attempts_index = (
+            headers.index(self.settings.attempts_column)
+            if self.settings.attempts_column in headers
+            else -1
+        )
         counts: dict[str, int] = {}
+        attempts = 0
+        processed = 0
         for row in values[1:]:
             run_value = row[run_index].strip() if run_index < len(row) else ""
             if run_value != command_id:
                 continue
+            processed += 1
             status = row[status_index].strip().lower() if status_index < len(row) else ""
             counts[status] = counts.get(status, 0) + 1
+            if attempts_index >= 0 and attempts_index < len(row):
+                with suppress(ValueError):
+                    attempts += max(0, int(float(row[attempts_index] or 0)))
         return ProgressSnapshot(
             created=counts.get(ItemStatus.DONE.value, 0),
-            captured=counts.get(ItemStatus.CAPTURED.value, 0),
+            captured=(
+                counts.get(ItemStatus.CAPTURED.value, 0)
+                + counts.get(ItemStatus.DONE.value, 0)
+                + counts.get(ItemStatus.DUPLICATE.value, 0)
+            ),
             duplicates=counts.get(ItemStatus.DUPLICATE.value, 0),
             errors=counts.get(ItemStatus.ERROR.value, 0),
             invalid=counts.get(ItemStatus.INVALID.value, 0),
+            inactive=counts.get(ItemStatus.INACTIVE.value, 0),
+            unavailable=counts.get(ItemStatus.UNAVAILABLE.value, 0),
+            phone_failed=counts.get(ItemStatus.NO_PHONE.value, 0),
+            retries=max(0, attempts - processed),
             manual_required=counts.get(ItemStatus.MANUAL_REQUIRED.value, 0),
+            processed=processed,
+            inspected=attempts,
         )
 
     def _worksheet_or_create(self, title: str, *, rows: int, cols: int) -> Any:
@@ -347,7 +518,14 @@ class GoogleControlPanel:
         matrix[4] = ["Остановить", False, "", "Команда ID", "", ""]
         matrix[5] = ["Лимит новых лидов", 10, "", "Прогресс", "0 / 0", ""]
         matrix[6] = ["Лист очереди", self.settings.google_worksheet, "", "Запущено", "", ""]
-        matrix[7] = ["Повторить manual_required", False, "", "Heartbeat", utc_now(), ""]
+        matrix[7] = [
+            "Повторить строки после ручной проверки",
+            False,
+            "",
+            "Последняя связь с компьютером",
+            utc_now(),
+            "",
+        ]
         matrix[8] = ["", "", "", "Сообщение", "Пульт ожидает команду.", ""]
         matrix[10] = [
             "Капча не решается автоматически. По уведомлению нужно зайти на удалённый ПК.",
@@ -360,6 +538,236 @@ class GoogleControlPanel:
         matrix[11][3:] = ["Версия", __version__, ""]
         control.update(matrix, "A1:F12", value_input_option="RAW")
         self._format_control()
+
+    def _upgrade_control_labels(self) -> None:
+        control = self._require_control()
+        with suppress(Exception):
+            control.batch_update(
+                [
+                    {
+                        "range": "A8",
+                        "values": [["Повторить строки после ручной проверки"]],
+                    },
+                    {
+                        "range": "D8",
+                        "values": [["Последняя связь с компьютером"]],
+                    },
+                ],
+                value_input_option="RAW",
+            )
+
+    def _backfill_history_dates(self) -> None:
+        history = self._require_history()
+        with suppress(Exception):
+            rows = history.get_all_values()
+            updates = []
+            date_index = HISTORY_HEADERS.index("Дата завершения")
+            for row_number, row in enumerate(rows[1:], start=2):
+                finished_at = str(row[5] if len(row) > 5 else "").strip()
+                existing_date = str(row[date_index] if len(row) > date_index else "").strip()
+                if finished_at and not existing_date:
+                    updates.append(
+                        {"range": f"V{row_number}", "values": [[finished_at[:10]]]}
+                    )
+            if updates:
+                history.batch_update(updates, value_input_option="USER_ENTERED")
+
+    def _initialize_analytics(self) -> None:
+        analytics = self._require_analytics()
+        history_title = self.settings.google_history_worksheet.replace("'", "''")
+        history_ref = f"'{history_title}'"
+        date_range = f"{history_ref}!$V:$V"
+
+        def current_sum(column: str) -> str:
+            return (
+                f'=SUMIFS({history_ref}!${column}:${column},{date_range},'
+                '">="&TODAY()-$B$4+1)'
+            )
+
+        def previous_sum(column: str) -> str:
+            return (
+                f'=SUMIFS({history_ref}!${column}:${column},{date_range},'
+                '">="&TODAY()-2*$B$4+1,'
+                f'{date_range},"<"&TODAY()-$B$4+1)'
+            )
+
+        rows: list[list[Any]] = [[""] * 8 for _ in range(107)]
+        rows[0][0] = ANALYTICS_MARKER
+        rows[1][0] = (
+            "Показатели удалённых запусков. Период сравнивается с предыдущим "
+            "периодом такой же длины."
+        )
+        rows[3][:5] = ["Период, дней", 30, "", "Обновлено", "=NOW()"]
+        rows[5][:4] = ["Показатель", "Текущий период", "Предыдущий период", "Изменение"]
+
+        current_runs = f'=COUNTIFS({date_range},">="&TODAY()-$B$4+1)'
+        previous_runs = (
+            f'=COUNTIFS({date_range},">="&TODAY()-2*$B$4+1,'
+            f'{date_range},"<"&TODAY()-$B$4+1)'
+        )
+        metrics = [
+            ("Запусков", current_runs, previous_runs),
+            ("Обработано ссылок", current_sum("M"), previous_sum("M")),
+            ("Всего попыток", current_sum("N"), previous_sum("N")),
+            ("Открыто номеров", current_sum("O"), previous_sum("O")),
+            ("Создано лидов", current_sum("H"), previous_sum("H")),
+            (
+                "Неактивных / без кнопки",
+                f'={current_sum("P")[1:]}+{current_sum("Q")[1:]}',
+                f'={previous_sum("P")[1:]}+{previous_sum("Q")[1:]}',
+            ),
+            ("Не открыто после попыток", current_sum("R"), previous_sum("R")),
+            ("Технических ошибок", current_sum("J"), previous_sum("J")),
+            (
+                "Конверсия ссылок в лиды",
+                f'=IFERROR({current_sum("H")[1:]}/{current_sum("M")[1:]},0)',
+                f'=IFERROR({previous_sum("H")[1:]}/{previous_sum("M")[1:]},0)',
+            ),
+        ]
+        for row_index, (label, current, previous) in enumerate(metrics, start=6):
+            spreadsheet_row = row_index + 1
+            rows[row_index][:4] = [
+                label,
+                current,
+                previous,
+                (
+                    f'=IF(C{spreadsheet_row}=0,IF(B{spreadsheet_row}=0,0,1),'
+                    f'(B{spreadsheet_row}-C{spreadsheet_row})/C{spreadsheet_row})'
+                ),
+            ]
+
+        rows[16][:4] = ["Дата", "Создано лидов", "Открыто номеров", "Тех. ошибок"]
+        for row_index in range(17, 107):
+            spreadsheet_row = row_index + 1
+            rows[row_index][:4] = [
+                (
+                    '=IF(ROW()-17<=MIN($B$4,90),'
+                    'TODAY()-MIN($B$4,90)+ROW()-17,"")'
+                ),
+                (
+                    f'=IF($A{spreadsheet_row}="","",SUMIFS('
+                    f'{history_ref}!$H:$H,{date_range},$A{spreadsheet_row}))'
+                ),
+                (
+                    f'=IF($A{spreadsheet_row}="","",SUMIFS('
+                    f'{history_ref}!$O:$O,{date_range},$A{spreadsheet_row}))'
+                ),
+                (
+                    f'=IF($A{spreadsheet_row}="","",SUMIFS('
+                    f'{history_ref}!$J:$J,{date_range},$A{spreadsheet_row}))'
+                ),
+            ]
+
+        with suppress(Exception):
+            analytics.resize(rows=110, cols=8)
+        analytics.update(rows, "A1:H107", value_input_option="USER_ENTERED")
+        self._format_analytics()
+
+    def _format_analytics(self) -> None:
+        analytics = self._require_analytics()
+        with suppress(Exception):
+            analytics.freeze(rows=6)
+            analytics.merge_cells("A1:H1")
+            analytics.merge_cells("A2:H2")
+            analytics.format(
+                "A1:H1",
+                {
+                    "backgroundColor": {"red": 0.05, "green": 0.09, "blue": 0.16},
+                    "textFormat": {
+                        "bold": True,
+                        "fontSize": 17,
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                    },
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                },
+            )
+            analytics.format(
+                "A2:H2",
+                {
+                    "backgroundColor": {"red": 0.92, "green": 0.95, "blue": 1},
+                    "textFormat": {"foregroundColor": {"red": 0.22, "green": 0.3, "blue": 0.45}},
+                    "horizontalAlignment": "CENTER",
+                },
+            )
+            analytics.format(
+                "A6:D6",
+                {
+                    "backgroundColor": {"red": 0.12, "green": 0.24, "blue": 0.42},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                    },
+                },
+            )
+            analytics.format(
+                "A7:D15",
+                {
+                    "backgroundColor": {"red": 0.97, "green": 0.98, "blue": 1},
+                    "verticalAlignment": "MIDDLE",
+                },
+            )
+            analytics.format("A7:A15", {"textFormat": {"bold": True}})
+            analytics.format(
+                "D7:D15",
+                {
+                    "numberFormat": {
+                        "type": "PERCENT",
+                        "pattern": "+0.0%;-0.0%;0.0%",
+                    }
+                },
+            )
+            analytics.format("B15:C15", {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}})
+            analytics.format(
+                "A17:D17",
+                {
+                    "backgroundColor": {"red": 0.12, "green": 0.24, "blue": 0.42},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                    },
+                },
+            )
+            analytics.format(
+                "A18:A107",
+                {"numberFormat": {"type": "DATE", "pattern": "dd.mm.yyyy"}},
+            )
+
+        sheet_id = getattr(analytics, "id", None)
+        if sheet_id is None:
+            return
+        with suppress(Exception):
+            requests: list[dict[str, Any]] = [
+                _hide_gridlines_request(sheet_id),
+                _row_height_request(sheet_id, 0, 1, 50),
+                _row_height_request(sheet_id, 1, 2, 36),
+                _column_width_request(sheet_id, 0, 1, 260),
+                _column_width_request(sheet_id, 1, 4, 135),
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 3,
+                            "endRowIndex": 4,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": 2,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [
+                                    {"userEnteredValue": value}
+                                    for value in ("7", "30", "90", "365")
+                                ],
+                            },
+                            "strict": True,
+                            "showCustomUi": True,
+                        },
+                    }
+                },
+                _analytics_chart_request(sheet_id),
+            ]
+            self.spreadsheet.batch_update({"requests": requests})
 
     def _format_control(self) -> None:
         control = self._require_control()
@@ -413,7 +821,7 @@ class GoogleControlPanel:
             history.freeze(rows=1)
             history.set_basic_filter()
             history.format(
-                "A1:L1",
+                "A1:V1",
                 {
                     "backgroundColor": {"red": 0.05, "green": 0.09, "blue": 0.16},
                     "textFormat": {
@@ -434,12 +842,13 @@ class GoogleControlPanel:
                     (0, 1, 190),
                     (1, 2, 75),
                     (2, 3, 145),
-                    (3, 4, 110),
+                    (3, 4, 220),
                     (4, 6, 170),
                     (6, 7, 170),
                     (7, 10, 95),
                     (10, 11, 320),
                     (11, 12, 170),
+                    (12, 22, 130),
                 ):
                     requests.append(_column_width_request(sheet_id, start, end, size))
                 requests.extend(
@@ -547,6 +956,11 @@ class GoogleControlPanel:
         if self.history is None:
             raise SourceError("Лист истории ещё не подготовлен")
         return self.history
+
+    def _require_analytics(self) -> Any:
+        if self.analytics is None:
+            raise SourceError("Лист аналитики ещё не подготовлен")
+        return self.analytics
 
     @staticmethod
     def _cell(values: list[list[Any]], row: int, column: int) -> str:
@@ -659,6 +1073,7 @@ class RemoteController:
         reserved = {
             self.settings.google_control_worksheet.casefold(),
             self.settings.google_history_worksheet.casefold(),
+            ANALYTICS_WORKSHEET.casefold(),
         }
         if not command.worksheet.strip() or command.worksheet.casefold() in reserved:
             self.panel.reject_start("Укажите отдельный лист очереди, например «Лист1».")
@@ -684,7 +1099,13 @@ class RemoteController:
         state.base_duplicates = recovered.duplicates
         state.base_errors = recovered.errors
         state.base_invalid = recovered.invalid
+        state.base_inactive = recovered.inactive
+        state.base_unavailable = recovered.unavailable
+        state.base_phone_failed = recovered.phone_failed
+        state.base_retries = recovered.retries
         state.base_manual_required = recovered.manual_required
+        state.base_processed = recovered.processed
+        state.base_inspected = recovered.inspected
         self._progress = recovered
         remaining = state.target - recovered.created
         if remaining <= 0:
@@ -749,8 +1170,13 @@ class RemoteController:
                 duplicates=state.base_duplicates + summary.duplicates,
                 errors=state.base_errors + summary.errors,
                 invalid=state.base_invalid + summary.invalid,
+                inactive=state.base_inactive + summary.inactive,
+                unavailable=state.base_unavailable + summary.unavailable,
+                phone_failed=state.base_phone_failed + summary.phone_failed,
+                retries=state.base_retries + summary.retries,
                 manual_required=state.base_manual_required + summary.manual_required,
-                inspected=summary.inspected,
+                processed=state.base_processed + summary.processed,
+                inspected=state.base_inspected + summary.inspected,
                 row_id=row_id,
             )
 
@@ -813,17 +1239,18 @@ class RemoteController:
         progress = self._progress
         if state.stop_requested or "останов" in summary.stopped_reason.casefold():
             status = "ОСТАНОВЛЕНО"
-        elif progress.created >= state.target:
-            status = "ЗАВЕРШЕНО" if progress.errors == 0 else "ЗАВЕРШЕНО С ОШИБКАМИ"
         elif progress.manual_required:
             status = "ТРЕБУЕТ ВНИМАНИЯ"
         elif progress.errors:
-            status = "ЗАВЕРШЕНО С ОШИБКАМИ"
+            status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
         else:
-            status = "НЕДОСТАТОЧНО ССЫЛОК"
+            status = "ЗАВЕРШЕНО"
         message = (
-            f"Создано {progress.created} из {state.target}; "
-            f"дубликатов {progress.duplicates}; ошибок {progress.errors}. "
+            f"Создано {progress.created} из лимита {state.target}; "
+            f"открыто номеров {progress.captured}; "
+            f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
+            f"не открыто после попыток {progress.phone_failed}; "
+            f"технических ошибок {progress.errors}. "
             f"Остановка: {summary.stopped_reason or 'не указана'}."
         )
         return self._result_dict(state, status=status, message=message, progress=progress)
@@ -845,7 +1272,13 @@ class RemoteController:
             "duplicates": progress.duplicates,
             "errors": progress.errors,
             "invalid": progress.invalid,
+            "inactive": progress.inactive,
+            "unavailable": progress.unavailable,
+            "phone_failed": progress.phone_failed,
+            "retries": progress.retries,
             "manual_required": progress.manual_required,
+            "processed": progress.processed,
+            "inspected": progress.inspected,
             "command_id": state.command_id,
         }
 
@@ -892,7 +1325,8 @@ def run_remote_control(settings: Settings, *, setup_only: bool, allow_live: bool
         controller.setup()
         print(
             f"Готово: листы {settings.google_control_worksheet!r} и "
-            f"{settings.google_history_worksheet!r} подготовлены."
+            f"{settings.google_history_worksheet!r}, а также {ANALYTICS_WORKSHEET!r} "
+            "подготовлены."
         )
         return
     if not allow_live:
@@ -903,6 +1337,69 @@ def run_remote_control(settings: Settings, *, setup_only: bool, allow_live: bool
         except KeyboardInterrupt:
             controller.stop()
             LOGGER.info("Удалённый пульт остановлен")
+
+
+def _analytics_chart_request(sheet_id: int) -> dict[str, Any]:
+    def source_range(column: int) -> dict[str, Any]:
+        return {
+            "sourceRange": {
+                "sources": [
+                    {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 16,
+                        "endRowIndex": 107,
+                        "startColumnIndex": column,
+                        "endColumnIndex": column + 1,
+                    }
+                ]
+            }
+        }
+
+    return {
+        "addChart": {
+            "chart": {
+                "spec": {
+                    "title": "Динамика по дням",
+                    "basicChart": {
+                        "chartType": "LINE",
+                        "legendPosition": "BOTTOM_LEGEND",
+                        "headerCount": 1,
+                        "domains": [{"domain": source_range(0)}],
+                        "series": [
+                            {"series": source_range(column), "targetAxis": "LEFT_AXIS"}
+                            for column in (1, 2, 3)
+                        ],
+                        "axis": [
+                            {"position": "BOTTOM_AXIS", "title": "Дата"},
+                            {"position": "LEFT_AXIS", "title": "Количество"},
+                        ],
+                    },
+                },
+                "position": {
+                    "overlayPosition": {
+                        "anchorCell": {
+                            "sheetId": sheet_id,
+                            "rowIndex": 16,
+                            "columnIndex": 5,
+                        },
+                        "widthPixels": 720,
+                        "heightPixels": 380,
+                    }
+                },
+            }
+        }
+    }
+
+
+def _column_letter(number: int) -> str:
+    if number < 1:
+        raise ValueError("Номер колонки должен быть положительным")
+    result = ""
+    value = number
+    while value:
+        value, remainder = divmod(value - 1, 26)
+        result = chr(65 + remainder) + result
+    return result
 
 
 def _checked(value: str) -> bool:

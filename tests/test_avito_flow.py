@@ -221,11 +221,20 @@ def test_captcha_wait_sends_cascade_and_continues_automatically(settings, monkey
         "detected",
         "reminder",
         "reminder",
-        "resolved",
     ]
     assert notifier.events[1][1]["escalate"] is False
     assert notifier.events[2][1]["escalate"] is True
-    assert notifier.events[3][1]["include_backup"] is True
+
+
+def test_inactive_listing_reason_is_detected_before_phone_lookup(settings, monkeypatch):
+    browser = AvitoBrowser(settings, ocr=object())
+    monkeypatch.setattr(
+        browser,
+        "_page_visible_text",
+        lambda *_args: "Это объявление снято с публикации продавцом".lower(),
+    )
+
+    assert browser._inactive_listing_reason(object()) == "объявление снято с публикации"
 
 
 def test_telegram_failure_does_not_interrupt_captcha_wait(settings, monkeypatch):

@@ -6,6 +6,10 @@ import pytest
 
 from avito_crm.models import RunSummary
 from avito_crm.remote_control import (
+    ANALYTICS_MARKER,
+    ANALYTICS_WORKSHEET,
+    HISTORY_HEADERS,
+    LEGACY_HISTORY_HEADERS,
     CommandState,
     GoogleControlPanel,
     PanelCommand,
@@ -147,6 +151,27 @@ def test_existing_user_control_sheet_is_never_overwritten(settings):
     assert existing.values == [["Мои важные данные"]]
 
 
+def test_setup_creates_migrated_history_and_period_analytics(settings):
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    history = MatrixSheet([list(LEGACY_HISTORY_HEADERS)])
+    spreadsheet = FakeSpreadsheet(
+        {
+            settings.google_control_worksheet: control,
+            settings.google_history_worksheet: history,
+        }
+    )
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel.ensure_layout()
+
+    assert tuple(history.values[0]) == HISTORY_HEADERS
+    analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
+    assert analytics.values[0][0] == ANALYTICS_MARKER
+    assert analytics.values[3][1] == 30
+    assert "SUMIFS" in analytics.values[7][1]
+    assert "TODAY" in analytics.values[17][0]
+
+
 def test_history_append_is_idempotent_after_a_crash(settings):
     command_id = "cmd-existing"
     history = MatrixSheet([list(range(12)), [command_id]])
@@ -249,3 +274,38 @@ def test_invalid_remote_limit_is_rejected_before_state_is_created(settings):
 
     assert panel.rejections
     assert not controller.state_path.exists()
+
+
+def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):
+    panel = FakePanel(PanelCommand(False, False, 10, "Лист1", False))
+    controller = InstantController(settings, panel)
+    state = CommandState(
+        command_id="cmd-normal-outcomes",
+        target=10,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-07-19T10:00:00+00:00",
+    )
+    controller._progress = ProgressSnapshot(
+        created=2,
+        inactive=3,
+        unavailable=1,
+        phone_failed=2,
+        errors=0,
+    )
+
+    result = controller._classify_summary(
+        state,
+        RunSummary(
+            run_id=state.command_id,
+            requested=10,
+            inactive=3,
+            unavailable=1,
+            phone_failed=2,
+            stopped_reason="Очередь обработана: все доступные попытки завершены",
+        ),
+    )
+
+    assert result["status"] == "ЗАВЕРШЕНО"
+    assert "технических ошибок 0" in result["message"]

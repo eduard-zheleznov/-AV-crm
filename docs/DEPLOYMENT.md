@@ -9,7 +9,7 @@
 3. Tesseract OCR (Windows build). Путь обычно
    `C:\Program Files\Tesseract-OCR\tesseract.exe`.
 
-Система рассчитана на интерактивную Windows-сессию: Chromium должен быть виден,
+Система рассчитана на интерактивную Windows-сессию: Playwright Chromium / Chrome for Testing должен быть виден,
 чтобы оператор при необходимости мог войти или выйти из Avito и вручную пройти
 проверку. Вход в Avito необязателен. Не запускайте систему как скрытый Windows service.
 
@@ -70,7 +70,7 @@ JSON не должен находиться внутри репозитория.
 .\scripts\doctor.ps1 -Source google -OnlineCrm
 
 # Откройте общий профиль; войдите, выйдите или оставьте гостевой режим,
-# затем закройте синий Chromium. Состояние сохранится в data\browser-profile.
+# затем закройте Playwright-браузер. Состояние сохранится в data\browser-profile.
 .\.venv\Scripts\python.exe -m avito_crm avito-profile
 
 # Получите один номер без записи в CRM

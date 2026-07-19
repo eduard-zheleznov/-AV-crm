@@ -39,8 +39,14 @@ class StateStore:
                 duplicates INTEGER NOT NULL DEFAULT 0,
                 errors INTEGER NOT NULL DEFAULT 0,
                 invalid INTEGER NOT NULL DEFAULT 0,
+                inactive INTEGER NOT NULL DEFAULT 0,
+                unavailable INTEGER NOT NULL DEFAULT 0,
+                phone_failed INTEGER NOT NULL DEFAULT 0,
+                retries INTEGER NOT NULL DEFAULT 0,
                 manual_required INTEGER NOT NULL DEFAULT 0,
                 inspected INTEGER NOT NULL DEFAULT 0,
+                processed INTEGER NOT NULL DEFAULT 0,
+                rounds INTEGER NOT NULL DEFAULT 0,
                 stopped_reason TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS items (
@@ -60,10 +66,18 @@ class StateStore:
             """
         )
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
-        if "captured" not in columns:
-            self.connection.execute(
-                "ALTER TABLE runs ADD COLUMN captured INTEGER NOT NULL DEFAULT 0"
-            )
+        run_columns = {
+            "captured": "INTEGER NOT NULL DEFAULT 0",
+            "inactive": "INTEGER NOT NULL DEFAULT 0",
+            "unavailable": "INTEGER NOT NULL DEFAULT 0",
+            "phone_failed": "INTEGER NOT NULL DEFAULT 0",
+            "retries": "INTEGER NOT NULL DEFAULT 0",
+            "processed": "INTEGER NOT NULL DEFAULT 0",
+            "rounds": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in run_columns.items():
+            if name not in columns:
+                self.connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
         self.connection.commit()
 
     def begin_run(self, summary: RunSummary) -> None:
@@ -129,7 +143,10 @@ class StateStore:
             """
             UPDATE runs SET finished_at=?, captured=captured + ?, created=created + ?,
                 duplicates=duplicates + ?, errors=errors + ?, invalid=invalid + ?,
-                manual_required=manual_required + ?, inspected=inspected + ?, stopped_reason=?
+                inactive=inactive + ?, unavailable=unavailable + ?,
+                phone_failed=phone_failed + ?, retries=retries + ?,
+                manual_required=manual_required + ?, inspected=inspected + ?,
+                processed=processed + ?, rounds=rounds + ?, stopped_reason=?
             WHERE run_id=?
             """,
             (
@@ -139,8 +156,14 @@ class StateStore:
                 summary.duplicates,
                 summary.errors,
                 summary.invalid,
+                summary.inactive,
+                summary.unavailable,
+                summary.phone_failed,
+                summary.retries,
                 summary.manual_required,
                 summary.inspected,
+                summary.processed,
+                summary.rounds,
                 summary.stopped_reason,
                 summary.run_id,
             ),
