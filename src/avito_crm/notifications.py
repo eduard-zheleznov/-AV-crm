@@ -19,11 +19,18 @@ from avito_crm.errors import ConfigurationError, NotificationError
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
 TELEGRAM_MESSAGE_LIMIT = 4096
+MAX_MESSAGE_LIMIT = 4000
 
 
 @dataclass(frozen=True, slots=True)
 class TelegramChat:
     chat_id: str
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
+class MaxRecipient:
+    target: str
     label: str
 
 
@@ -263,6 +270,256 @@ class TelegramNotifier:
         raise NotificationError(f"Telegram API недоступен ({last_error})")
 
 
+class MaxNotifier:
+    """Official MAX Bot API client with token-safe errors and recipient routing."""
+
+    channel_name = "MAX"
+
+    def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
+        self.token = settings.max_bot_token
+        self.primary_recipients = settings.max_primary_recipients
+        self.backup_recipients = settings.max_backup_recipients
+        self.computer_name = settings.notification_computer_name or socket.gethostname()
+        self.send_attempts = settings.max_send_attempts
+        self._owns_client = client is None
+        self.client = client or httpx.Client(
+            base_url=settings.max_api_base_url,
+            timeout=httpx.Timeout(settings.max_request_timeout, connect=10.0),
+            follow_redirects=False,
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.token and self.primary_recipients)
+
+    def close(self) -> None:
+        if self._owns_client:
+            self.client.close()
+
+    def __enter__(self) -> MaxNotifier:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def send(self, text: str, recipients: tuple[str, ...]) -> int:
+        if not self.token:
+            raise ConfigurationError("Не задан MAX_BOT_TOKEN")
+        targets = _deduplicate(recipients)
+        if not targets:
+            raise ConfigurationError("Не указаны получатели MAX")
+
+        sent = 0
+        failures: list[str] = []
+        for target in targets:
+            kind, raw_id = target.split(":", 1)
+            params = {f"{kind}_id": int(raw_id), "disable_link_preview": True}
+            try:
+                for chunk in split_max_text(text):
+                    self._request(
+                        "POST",
+                        "/messages",
+                        params=params,
+                        json_body={"text": chunk, "notify": True},
+                    )
+                sent += 1
+            except NotificationError as exc:
+                failures.append(f"{_mask_max_recipient(target)}: {exc}")
+
+        if failures:
+            raise NotificationError(
+                f"MAX-сообщение доставлено {sent} из {len(targets)} получателей; "
+                + "; ".join(failures)
+            )
+        return sent
+
+    def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
+        return self.send(
+            "\n".join(
+                (
+                    "🚫 Avito остановил очередь для ручной проверки.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Причина: {reason}",
+                    f"Ссылка: {url}",
+                    f"Ожидание: до {_format_duration(wait_seconds)}.",
+                    "Откройте удалённый компьютер и завершите проверку в браузере. "
+                    "После этого программа продолжит работу автоматически.",
+                )
+            ),
+            self.primary_recipients,
+        )
+
+    def send_captcha_reminder(
+        self,
+        *,
+        reason: str,
+        url: str,
+        elapsed_seconds: float,
+        escalate: bool,
+    ) -> int:
+        recipients = self.primary_recipients
+        if escalate and self.backup_recipients:
+            recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "\n".join(
+                (
+                    "⚠️ Капча Avito всё ещё ожидает решения.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Прошло: {_format_duration(elapsed_seconds)}",
+                    f"Причина: {reason}",
+                    f"Ссылка: {url}",
+                )
+            ),
+            recipients,
+        )
+
+    def send_captcha_resolved(
+        self, *, url: str, elapsed_seconds: float, include_backup: bool
+    ) -> int:
+        recipients = self.primary_recipients
+        if include_backup:
+            recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "\n".join(
+                (
+                    "✅ Проверка Avito завершена, очередь продолжает работу.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Пауза заняла: {_format_duration(elapsed_seconds)}",
+                    f"Ссылка: {url}",
+                )
+            ),
+            recipients,
+        )
+
+    def send_captcha_timeout(self, *, reason: str, url: str, wait_seconds: float) -> int:
+        recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "\n".join(
+                (
+                    "🛑 Ожидание ручной проверки Avito завершилось по таймауту.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Ожидали: {_format_duration(wait_seconds)}",
+                    f"Причина: {reason}",
+                    f"Ссылка: {url}",
+                    "Строка сохранена для повторного запуска.",
+                )
+            ),
+            recipients,
+        )
+
+    def send_captcha_stopped(self, *, url: str, include_backup: bool) -> int:
+        recipients = self.primary_recipients
+        if include_backup:
+            recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "\n".join(
+                (
+                    "⏹ Ожидание проверки Avito остановлено оператором.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Ссылка: {url}",
+                    "Текущая строка сохранена для повторного запуска.",
+                )
+            ),
+            recipients,
+        )
+
+    def send_test(self) -> int:
+        recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "\n".join(
+                (
+                    "✅ MAX-уведомления Avito → CRM работают.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Проверено: {datetime.now().astimezone():%d.%m.%Y %H:%M:%S %Z}",
+                )
+            ),
+            recipients,
+        )
+
+    def recent_recipients(self) -> list[MaxRecipient]:
+        if not self.token:
+            raise ConfigurationError("Сначала укажите MAX_BOT_TOKEN")
+        bot = self._request("GET", "/me")
+        bot_id = str(bot.get("user_id", ""))
+        payload = self._request(
+            "GET",
+            "/updates",
+            params=[
+                ("limit", 100),
+                ("timeout", 0),
+                ("types", "bot_started,message_created,bot_added"),
+            ],
+        )
+        updates = payload.get("updates")
+        if not isinstance(updates, list):
+            return []
+        recipients: dict[str, MaxRecipient] = {}
+        for update in updates:
+            if not isinstance(update, dict):
+                continue
+            self._add_max_user(recipients, update.get("user"), bot_id)
+            message = update.get("message")
+            if isinstance(message, dict):
+                self._add_max_user(recipients, message.get("sender"), bot_id)
+            chat_id = update.get("chat_id")
+            if update.get("update_type") == "bot_added" and isinstance(chat_id, int):
+                target = f"chat:{chat_id}"
+                recipients[target] = MaxRecipient(target, f"групповой чат {chat_id}")
+        return list(recipients.values())
+
+    @staticmethod
+    def _add_max_user(recipients: dict[str, MaxRecipient], value: object, bot_id: str) -> None:
+        if not isinstance(value, dict) or "user_id" not in value:
+            return
+        user_id = str(value["user_id"])
+        if not user_id or user_id == bot_id or value.get("is_bot") is True:
+            return
+        full_name = " ".join(
+            part
+            for part in (
+                str(value.get("first_name", "")).strip(),
+                str(value.get("last_name", "")).strip(),
+            )
+            if part
+        )
+        name = full_name or str(value.get("name", "")).strip()
+        username = str(value.get("username", "")).strip()
+        label = name or (f"@{username}" if username else f"пользователь {user_id}")
+        target = f"user:{user_id}"
+        recipients[target] = MaxRecipient(target, label)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: object | None = None,
+        json_body: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        last_error = "неизвестная ошибка"
+        for attempt in range(1, self.send_attempts + 1):
+            try:
+                response = self.client.request(
+                    method,
+                    path,
+                    params=params,
+                    json=json_body,
+                    headers={"Authorization": self.token},
+                )
+                payload = response.json()
+                if 200 <= response.status_code < 300 and isinstance(payload, dict):
+                    return payload
+                description = _max_error_description(payload)
+                if self.token:
+                    description = description.replace(self.token, "***REDACTED***")
+                last_error = f"HTTP {response.status_code}: {description or 'ошибка API'}"
+            except (httpx.HTTPError, ValueError) as exc:
+                last_error = exc.__class__.__name__
+            if attempt < self.send_attempts:
+                time.sleep(min(2**attempt, 5))
+        raise NotificationError(f"MAX API недоступен ({last_error})")
+
+
 class EmailNotifier:
     """SMTP notification backend using an app password stored only in local .env."""
 
@@ -478,7 +735,7 @@ class NotificationRouter:
         self.backends = (
             backends
             if backends is not None
-            else [EmailNotifier(settings), TelegramNotifier(settings)]
+            else [MaxNotifier(settings), EmailNotifier(settings), TelegramNotifier(settings)]
         )
         self._unavailable: set[int] = set()
 
@@ -553,6 +810,10 @@ def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[
     return chunks
 
 
+def split_max_text(text: str) -> list[str]:
+    return split_telegram_text(text, limit=MAX_MESSAGE_LIMIT)
+
+
 def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
 
@@ -569,6 +830,25 @@ def _mask_email(address: str) -> str:
         return "***"
     visible = local[:1] if local else ""
     return f"{visible}***@{domain}"
+
+
+def _mask_max_recipient(target: str) -> str:
+    kind, _, raw_id = target.partition(":")
+    return f"{kind}:***{raw_id[-4:]}"
+
+
+def _max_error_description(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("message", "error", "description", "code"):
+        value = payload.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value).strip()[:240]
+        if isinstance(value, dict):
+            nested = _max_error_description(value)
+            if nested:
+                return nested
+    return ""
 
 
 def _format_duration(seconds: float) -> str:

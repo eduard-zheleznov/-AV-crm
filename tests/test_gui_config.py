@@ -7,6 +7,7 @@ from avito_crm.gui_config import (
     google_sheet_url,
     parse_captcha_wait_hours,
     parse_limit,
+    parse_max_recipient_ids,
     parse_notification_emails,
     parse_smtp_port,
     parse_telegram_chat_ids,
@@ -134,3 +135,16 @@ def test_parse_smtp_port(raw, expected):
 def test_parse_smtp_port_rejects_invalid_values(raw):
     with pytest.raises(ValueError):
         parse_smtp_port(raw)
+
+
+def test_parse_max_recipient_ids_normalizes_people_and_chats():
+    assert parse_max_recipient_ids("123; user:123, chat:456") == (
+        "user:123",
+        "chat:456",
+    )
+
+
+@pytest.mark.parametrize("raw", ["user:", "group:123", "chat:abc", "@name"])
+def test_parse_max_recipient_ids_rejects_invalid_values(raw):
+    with pytest.raises(ValueError):
+        parse_max_recipient_ids(raw)

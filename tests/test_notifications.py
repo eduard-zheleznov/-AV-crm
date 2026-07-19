@@ -7,8 +7,10 @@ import pytest
 from avito_crm.errors import NotificationError
 from avito_crm.notifications import (
     EmailNotifier,
+    MaxNotifier,
     NotificationRouter,
     TelegramNotifier,
+    split_max_text,
     split_telegram_text,
 )
 
@@ -110,6 +112,119 @@ def test_split_telegram_text_respects_api_limit():
 
     assert len(chunks) > 1
     assert all(0 < len(chunk) <= 120 for chunk in chunks)
+
+
+def _max_settings(settings, **overrides):
+    values = {
+        "max_api_base_url": "https://platform-api2.max.ru",
+        "max_bot_token": "max-test-token",
+        "max_primary_recipients": ("user:10001",),
+        "max_backup_recipients": ("chat:20002",),
+        "max_send_attempts": 1,
+    }
+    values.update(overrides)
+    return replace(settings, **values)
+
+
+def test_max_test_is_sent_to_unique_users_and_chats(settings):
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"message": {"body": {"text": "ok"}}})
+
+    configured = _max_settings(
+        settings,
+        max_primary_recipients=("user:10001", "chat:20002"),
+        max_backup_recipients=("chat:20002",),
+    )
+    client = httpx.Client(
+        base_url=configured.max_api_base_url,
+        transport=httpx.MockTransport(handler),
+    )
+    notifier = MaxNotifier(configured, client=client)
+
+    assert notifier.send_test() == 2
+    assert len(requests) == 2
+    assert requests[0].url.params["user_id"] == "10001"
+    assert requests[1].url.params["chat_id"] == "20002"
+    assert all(request.headers["Authorization"] == "max-test-token" for request in requests)
+
+
+def test_max_error_never_exposes_bot_token(settings):
+    token = "max-token-must-never-appear"
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": f"invalid {token}"})
+
+    configured = _max_settings(settings, max_bot_token=token)
+    notifier = MaxNotifier(
+        configured,
+        client=httpx.Client(
+            base_url=configured.max_api_base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    with pytest.raises(NotificationError) as captured:
+        notifier.send_test()
+
+    assert token not in str(captured.value)
+    assert "REDACTED" in str(captured.value)
+
+
+def test_max_recent_recipients_reads_started_users_and_group_chats(settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/me":
+            return httpx.Response(200, json={"user_id": 999, "is_bot": True})
+        return httpx.Response(
+            200,
+            json={
+                "updates": [
+                    {
+                        "update_type": "bot_started",
+                        "chat_id": 10001,
+                        "user": {"user_id": 10001, "first_name": "Иван"},
+                    },
+                    {
+                        "update_type": "message_created",
+                        "message": {
+                            "sender": {
+                                "user_id": 10002,
+                                "first_name": "Анна",
+                                "username": "anna",
+                            }
+                        },
+                    },
+                    {"update_type": "bot_added", "chat_id": 20002},
+                ],
+                "marker": 10,
+            },
+        )
+
+    configured = _max_settings(settings)
+    notifier = MaxNotifier(
+        configured,
+        client=httpx.Client(
+            base_url=configured.max_api_base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    recipients = notifier.recent_recipients()
+
+    assert [(item.target, item.label) for item in recipients] == [
+        ("user:10001", "Иван"),
+        ("user:10002", "Анна"),
+        ("chat:20002", "групповой чат 20002"),
+    ]
+
+
+def test_split_max_text_respects_api_limit():
+    chunks = split_max_text("строка\n" * 1000)
+
+    assert len(chunks) > 1
+    assert all(0 < len(chunk) <= 4000 for chunk in chunks)
 
 
 class FakeSmtp:
@@ -244,3 +359,15 @@ def test_router_keeps_working_channel_and_disables_failed_one(settings):
         == 1
     )
     assert calls == ["Email", "Telegram", "Email"]
+
+
+def test_router_default_delivery_order_is_max_email_telegram(settings):
+    router = NotificationRouter(settings)
+    try:
+        assert [backend.channel_name for backend in router.backends] == [
+            "MAX",
+            "Email",
+            "Telegram",
+        ]
+    finally:
+        router.close()

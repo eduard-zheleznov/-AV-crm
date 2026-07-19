@@ -511,6 +511,7 @@ class AvitoBrowser:
                     and bool(
                         self.settings.telegram_backup_chat_ids
                         or self.settings.email_backup_recipients
+                        or self.settings.max_backup_recipients
                     )
                 )
                 reminder_index += 1

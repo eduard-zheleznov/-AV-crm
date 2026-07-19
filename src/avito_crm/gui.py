@@ -16,6 +16,7 @@ from avito_crm.gui_config import (
     google_sheet_url,
     parse_captcha_wait_hours,
     parse_limit,
+    parse_max_recipient_ids,
     parse_notification_emails,
     parse_smtp_port,
     parse_telegram_chat_ids,
@@ -29,6 +30,8 @@ APP_TITLE = "Avito → CRM"
 GOOGLE_CREDENTIALS_URL = "https://console.cloud.google.com/iam-admin/serviceaccounts"
 GOOGLE_SHEETS_API_URL = "https://console.cloud.google.com/apis/library/sheets.googleapis.com"
 TELEGRAM_BOTFATHER_URL = "https://t.me/BotFather"
+MAX_BUSINESS_URL = "https://business.max.ru"
+MAX_API_DOCS_URL = "https://dev.max.ru/docs-api"
 YANDEX_APP_PASSWORD_URL = "https://id.yandex.ru/security/app-passwords"
 YANDEX_SMTP_HELP_URL = (
     "https://yandex.ru/support/yandex-360/business/mail/ru/mail-clients/shared-mailboxes"
@@ -60,6 +63,9 @@ class DesktopApp:
         self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
         self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
         self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
+        self.max_token_var = tk.StringVar(value=values.get("MAX_BOT_TOKEN", ""))
+        self.max_primary_var = tk.StringVar(value=values.get("MAX_PRIMARY_RECIPIENTS", ""))
+        self.max_backup_var = tk.StringVar(value=values.get("MAX_BACKUP_RECIPIENTS", ""))
         self.telegram_reminders_var = tk.StringVar(
             value=values.get("TELEGRAM_CAPTCHA_REMINDER_MINUTES", "30,60")
         )
@@ -77,6 +83,7 @@ class DesktopApp:
         self.email_backup_var = tk.StringVar(value=values.get("EMAIL_BACKUP_RECIPIENTS", ""))
         self.telegram_summary_var = tk.StringVar()
         self.telegram_dialog: tk.Toplevel | None = None
+        self.max_dialog: tk.Toplevel | None = None
         self.email_dialog: tk.Toplevel | None = None
         self.email_var = tk.StringVar(value="Сервисный email пока не определён")
         self.status_var = tk.StringVar(value="Готово к настройке")
@@ -260,21 +267,28 @@ class DesktopApp:
             notification_row,
             textvariable=self.telegram_summary_var,
             style="Hint.TLabel",
-        ).grid(row=0, column=1, sticky="w")
+        ).grid(row=0, column=1, columnspan=3, sticky="w")
         self.telegram_button = ttk.Button(
             notification_row,
             text="Настроить Telegram",
             command=self._show_telegram_settings,
             style="Secondary.TButton",
         )
-        self.telegram_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.telegram_button.grid(row=1, column=3, sticky="e", padx=(8, 0), pady=(8, 0))
         self.email_button = ttk.Button(
             notification_row,
             text="Настроить Email",
             command=self._show_email_settings,
             style="Secondary.TButton",
         )
-        self.email_button.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        self.email_button.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=(8, 0))
+        self.max_button = ttk.Button(
+            notification_row,
+            text="Настроить MAX",
+            command=self._show_max_settings,
+            style="Secondary.TButton",
+        )
+        self.max_button.grid(row=1, column=1, sticky="e", pady=(8, 0))
 
         controls = ttk.Frame(outer, style="App.TFrame")
         controls.grid(row=2, column=0, sticky="ew", pady=16)
@@ -417,6 +431,8 @@ class DesktopApp:
 
     def _refresh_notification_summary(self) -> None:
         channels: list[str] = []
+        if self.max_token_var.get().strip() and self.max_primary_var.get().strip():
+            channels.append("MAX")
         if (
             self.smtp_username_var.get().strip()
             and self.smtp_password_var.get()
@@ -432,7 +448,11 @@ class DesktopApp:
             return
         reminders = self.telegram_reminders_var.get().strip() or "30,60"
         wait_hours = self.captcha_wait_hours_var.get().strip() or "12"
-        has_backup = self.telegram_backup_var.get().strip() or self.email_backup_var.get().strip()
+        has_backup = (
+            self.max_backup_var.get().strip()
+            or self.telegram_backup_var.get().strip()
+            or self.email_backup_var.get().strip()
+        )
         backup = "; есть резервный получатель" if has_backup else ""
         self.telegram_summary_var.set(
             f"{' + '.join(channels)}: сразу + {reminders} мин; до {wait_hours} ч{backup}"
@@ -561,6 +581,126 @@ class DesktopApp:
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         dialog.grab_set()
 
+    def _show_max_settings(self) -> None:
+        if self.max_dialog and self.max_dialog.winfo_exists():
+            self.max_dialog.lift()
+            self.max_dialog.focus_force()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        self.max_dialog = dialog
+        dialog.title("MAX и ожидание капчи")
+        dialog.geometry("800x470")
+        dialog.minsize(720, 450)
+        dialog.transient(self.root)
+        dialog.configure(bg="#F4F6FA")
+
+        card = ttk.Frame(dialog, style="Card.TFrame", padding=22)
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+        card.columnconfigure(1, weight=1)
+        ttk.Label(card, text="Уведомления в MAX", style="Section.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "MAX отправляется первым, затем срабатывают Email и Telegram. "
+                "Токен хранится только на этом компьютере."
+            ),
+            style="Hint.TLabel",
+            wraplength=720,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 18))
+
+        ttk.Label(card, text="Токен MAX-бота", style="Field.TLabel").grid(
+            row=2, column=0, sticky="w", padx=(0, 14)
+        )
+        ttk.Entry(card, textvariable=self.max_token_var, show="●").grid(
+            row=2, column=1, sticky="ew"
+        )
+        ttk.Button(
+            card,
+            text="MAX для бизнеса",
+            command=lambda: webbrowser.open(MAX_BUSINESS_URL),
+            style="Secondary.TButton",
+        ).grid(row=2, column=2, padx=(10, 0))
+
+        ttk.Label(card, text="Основные ID", style="Field.TLabel").grid(
+            row=3, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.max_primary_var).grid(
+            row=3, column=1, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(card, text="Резервные ID", style="Field.TLabel").grid(
+            row=4, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.max_backup_var).grid(
+            row=4, column=1, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "Личный получатель: user:123; группа: chat:456. Несколько ID — через запятую. "
+                "Сотрудник сначала открывает бота и нажимает «Начать»."
+            ),
+            style="Hint.TLabel",
+            wraplength=650,
+            justify="left",
+        ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
+
+        timings = ttk.Frame(card, style="Card.TFrame")
+        timings.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        timings.columnconfigure(1, weight=1)
+        ttk.Label(timings, text="Напоминания, мин", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        ttk.Entry(timings, textvariable=self.telegram_reminders_var, width=18).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Label(timings, text="Максимально ждать, часов", style="Field.TLabel").grid(
+            row=0, column=2, sticky="e", padx=(24, 12)
+        )
+        ttk.Entry(timings, textvariable=self.captcha_wait_hours_var, width=10).grid(
+            row=0, column=3, sticky="e"
+        )
+
+        buttons = ttk.Frame(card, style="Card.TFrame")
+        buttons.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        buttons.columnconfigure(0, weight=1)
+        ttk.Button(
+            buttons,
+            text="Документация MAX",
+            command=lambda: webbrowser.open(MAX_API_DOCS_URL),
+            style="Secondary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            buttons,
+            text="Найти ID",
+            command=self._start_max_recipients,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Отправить тест",
+            command=self._start_max_test,
+            style="Secondary.TButton",
+        ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Отмена",
+            command=dialog.destroy,
+            style="Secondary.TButton",
+        ).grid(row=0, column=3, padx=(16, 0))
+        ttk.Button(
+            buttons,
+            text="Сохранить",
+            command=self._save_max_dialog,
+            style="Primary.TButton",
+        ).grid(row=0, column=4, padx=(8, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+
     def _show_email_settings(self) -> None:
         if self.email_dialog and self.email_dialog.winfo_exists():
             self.email_dialog.lift()
@@ -584,7 +724,7 @@ class DesktopApp:
         ttk.Label(
             card,
             text=(
-                "На этом сервере почта доступна, поэтому она будет отправлена первой. "
+                "Почта доступна на этом сервере и служит надёжным резервом после MAX. "
                 "Для Яндекса нужен отдельный пароль приложения, а не пароль от аккаунта."
             ),
             style="Hint.TLabel",
@@ -727,6 +867,29 @@ class DesktopApp:
             "TELEGRAM_BACKUP_CHAT_IDS": ",".join(backup),
         }
 
+    def _max_env_values(
+        self, *, require_token: bool = False, require_primary: bool = False
+    ) -> dict[str, str]:
+        token = self.max_token_var.get().strip()
+        if "\r" in token or "\n" in token:
+            raise ValueError("Токен MAX должен занимать одну строку")
+        primary = parse_max_recipient_ids(self.max_primary_var.get())
+        backup = parse_max_recipient_ids(self.max_backup_var.get())
+        if require_token and not token:
+            raise ValueError("Сначала вставьте токен MAX-бота")
+        if (primary or backup) and not token:
+            raise ValueError("Для MAX ID необходимо указать токен бота")
+        if backup and not primary:
+            raise ValueError("Сначала укажите хотя бы один основной MAX ID")
+        if require_primary and not primary:
+            raise ValueError("Укажите хотя бы один основной MAX ID")
+        return {
+            "MAX_API_BASE_URL": "https://platform-api2.max.ru",
+            "MAX_BOT_TOKEN": token,
+            "MAX_PRIMARY_RECIPIENTS": ",".join(primary),
+            "MAX_BACKUP_RECIPIENTS": ",".join(backup),
+        }
+
     def _email_env_values(self, *, require_credentials: bool = False) -> dict[str, str]:
         host = self.smtp_host_var.get().strip()
         port = parse_smtp_port(self.smtp_port_var.get())
@@ -771,6 +934,7 @@ class DesktopApp:
                 require_token=require_token,
                 require_primary=require_primary,
             ),
+            **self._max_env_values(),
             **self._email_env_values(),
             **self._timing_env_values(),
         }
@@ -791,6 +955,19 @@ class DesktopApp:
     def _save_email_settings(self, *, require_credentials: bool = False) -> None:
         updates = {
             **self._email_env_values(require_credentials=require_credentials),
+            **self._timing_env_values(),
+        }
+        update_env_values(self.env_path, updates)
+        self._refresh_notification_summary()
+
+    def _save_max_settings(
+        self, *, require_token: bool = False, require_primary: bool = False
+    ) -> None:
+        updates = {
+            **self._max_env_values(
+                require_token=require_token,
+                require_primary=require_primary,
+            ),
             **self._timing_env_values(),
         }
         update_env_values(self.env_path, updates)
@@ -845,6 +1022,36 @@ class DesktopApp:
         if self.email_dialog:
             self.email_dialog.destroy()
         self._start_process("email-test", ["email-test"])
+
+    def _save_max_dialog(self) -> None:
+        try:
+            self._save_max_settings()
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("MAX", str(exc), parent=self.max_dialog or self.root)
+            return
+        if self.max_dialog:
+            self.max_dialog.destroy()
+        self.status_var.set("Настройки MAX сохранены")
+
+    def _start_max_recipients(self) -> None:
+        try:
+            self._save_max_settings(require_token=True)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("MAX", str(exc), parent=self.max_dialog or self.root)
+            return
+        if self.max_dialog:
+            self.max_dialog.destroy()
+        self._start_process("max-recipients", ["max-recipients"])
+
+    def _start_max_test(self) -> None:
+        try:
+            self._save_max_settings(require_token=True, require_primary=True)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("MAX", str(exc), parent=self.max_dialog or self.root)
+            return
+        if self.max_dialog:
+            self.max_dialog.destroy()
+        self._start_process("max-test", ["max-test"])
 
     def _open_sheet(self) -> None:
         try:
@@ -937,6 +1144,8 @@ class DesktopApp:
             "telegram-chats": ("Ищем Telegram-чаты…", "Поиск Telegram Chat ID\n"),
             "telegram-test": ("Проверяем Telegram…", "Тест Telegram-уведомлений\n"),
             "email-test": ("Проверяем Email…", "Тест email-уведомлений\n"),
+            "max-recipients": ("Ищем MAX ID…", "Поиск получателей MAX\n"),
+            "max-test": ("Проверяем MAX…", "Тест MAX-уведомлений\n"),
         }
         status_text, log_text = labels.get(kind, ("Выполняем…", "Запуск операции\n"))
         self.process_kind = kind
@@ -1007,6 +1216,8 @@ class DesktopApp:
                 "telegram-chats": "Поиск Chat ID завершён",
                 "telegram-test": "Telegram работает",
                 "email-test": "Email работает",
+                "max-recipients": "Поиск MAX ID завершён",
+                "max-test": "MAX работает",
             }
             self.status_var.set(success_status.get(kind, "Готово"))
             self._append_log("Готово.\n", "success")
@@ -1046,6 +1257,7 @@ class DesktopApp:
         self.verify_button.configure(state=state)
         self.telegram_button.configure(state=state)
         self.email_button.configure(state=state)
+        self.max_button.configure(state=state)
         self.stop_button.configure(state="normal" if running else "disabled")
         if running:
             self.progress.grid()
@@ -1079,8 +1291,12 @@ class DesktopApp:
             self.status_var.set("Telegram работает")
         elif "email-сообщение доставлено" in lowered:
             self.status_var.set("Email работает")
+        elif "max-сообщение доставлено" in lowered:
+            self.status_var.set("MAX работает")
         elif "найденные telegram-чаты" in lowered:
             self.status_var.set("Скопируйте Chat ID из журнала")
+        elif "найденные получатели max" in lowered:
+            self.status_var.set("Скопируйте MAX ID из журнала")
         elif "ручное действие завершено" in lowered:
             self.status_var.set("Проверка пройдена, продолжаем…")
         elif "открываем объявление" in lowered:

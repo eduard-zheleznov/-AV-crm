@@ -5,6 +5,7 @@ import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -45,6 +46,7 @@ def _float(name: str, default: float) -> float:
 
 CHAT_ID_RE = re.compile(r"(?:-?\d+|@[A-Za-z0-9_]{5,})")
 EMAIL_ADDRESS_RE = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
+MAX_RECIPIENT_RE = re.compile(r"(?:(?:user|chat):)?-?\d+", re.IGNORECASE)
 
 
 def parse_chat_ids(value: str) -> tuple[str, ...]:
@@ -78,6 +80,20 @@ def parse_email_addresses(value: str) -> tuple[str, ...]:
     if invalid:
         raise ConfigurationError("Некорректный email: " + ", ".join(invalid[:3]))
     return tuple(dict.fromkeys(candidate.casefold() for candidate in candidates))
+
+
+def parse_max_recipients(value: str) -> tuple[str, ...]:
+    candidates = [part.strip() for part in re.split(r"[,;\s]+", value) if part.strip()]
+    invalid = [candidate for candidate in candidates if not MAX_RECIPIENT_RE.fullmatch(candidate)]
+    if invalid:
+        raise ConfigurationError(
+            "Некорректный MAX ID: " + ", ".join(invalid[:3]) + ". Формат: user:123 или chat:456"
+        )
+    normalized = []
+    for candidate in candidates:
+        lowered = candidate.lower()
+        normalized.append(lowered if ":" in lowered else f"user:{lowered}")
+    return tuple(dict.fromkeys(normalized))
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,6 +153,12 @@ class Settings:
     telegram_reminder_minutes: tuple[float, ...]
     telegram_request_timeout: float
     telegram_send_attempts: int
+    max_api_base_url: str
+    max_bot_token: str
+    max_primary_recipients: tuple[str, ...]
+    max_backup_recipients: tuple[str, ...]
+    max_request_timeout: float
+    max_send_attempts: int
     smtp_host: str
     smtp_port: int
     smtp_security: str
@@ -232,6 +254,14 @@ class Settings:
             ),
             telegram_request_timeout=_float("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 15.0),
             telegram_send_attempts=_int("TELEGRAM_SEND_ATTEMPTS", 3) or 3,
+            max_api_base_url=os.getenv("MAX_API_BASE_URL", "https://platform-api2.max.ru")
+            .strip()
+            .rstrip("/"),
+            max_bot_token=os.getenv("MAX_BOT_TOKEN", "").strip(),
+            max_primary_recipients=parse_max_recipients(os.getenv("MAX_PRIMARY_RECIPIENTS", "")),
+            max_backup_recipients=parse_max_recipients(os.getenv("MAX_BACKUP_RECIPIENTS", "")),
+            max_request_timeout=_float("MAX_REQUEST_TIMEOUT_SECONDS", 15.0),
+            max_send_attempts=_int("MAX_SEND_ATTEMPTS", 3) or 3,
             smtp_host=os.getenv("SMTP_HOST", "smtp.yandex.ru").strip(),
             smtp_port=int(_int("SMTP_PORT", 465) or 465),
             smtp_security=os.getenv("SMTP_SECURITY", "ssl").strip().lower(),
@@ -304,6 +334,27 @@ class Settings:
             raise ConfigurationError("TELEGRAM_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
         if self.telegram_send_attempts < 1 or self.telegram_send_attempts > 10:
             raise ConfigurationError("TELEGRAM_SEND_ATTEMPTS должен быть от 1 до 10")
+        max_api_url = urlsplit(self.max_api_base_url)
+        if (
+            max_api_url.scheme != "https"
+            or max_api_url.hostname != "platform-api2.max.ru"
+            or max_api_url.path not in {"", "/"}
+        ):
+            raise ConfigurationError("MAX_API_BASE_URL должен быть https://platform-api2.max.ru")
+        if self.max_bot_token and (
+            len(self.max_bot_token) < 20 or any(char.isspace() for char in self.max_bot_token)
+        ):
+            raise ConfigurationError("MAX_BOT_TOKEN имеет некорректный формат")
+        if self.max_primary_recipients and not self.max_bot_token:
+            raise ConfigurationError("Для MAX_PRIMARY_RECIPIENTS нужен MAX_BOT_TOKEN")
+        if self.max_backup_recipients and not self.max_primary_recipients:
+            raise ConfigurationError(
+                "MAX_BACKUP_RECIPIENTS требует хотя бы одного основного получателя"
+            )
+        if self.max_request_timeout <= 0:
+            raise ConfigurationError("MAX_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
+        if self.max_send_attempts < 1 or self.max_send_attempts > 10:
+            raise ConfigurationError("MAX_SEND_ATTEMPTS должен быть от 1 до 10")
         if not 1 <= self.smtp_port <= 65_535:
             raise ConfigurationError("SMTP_PORT должен быть от 1 до 65535")
         if self.smtp_security not in {"ssl", "starttls"}:
@@ -321,7 +372,9 @@ class Settings:
             and self.email_primary_recipients
         )
         if (
-            (self.telegram_bot_token and self.telegram_primary_chat_ids) or email_enabled
+            (self.telegram_bot_token and self.telegram_primary_chat_ids)
+            or (self.max_bot_token and self.max_primary_recipients)
+            or email_enabled
         ) and self.telegram_reminder_minutes:
             last_reminder_seconds = self.telegram_reminder_minutes[-1] * 60
             if last_reminder_seconds >= self.avito_manual_timeout:

@@ -9,7 +9,12 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from avito_crm.config import parse_chat_ids, parse_email_addresses, parse_reminder_minutes
+from avito_crm.config import (
+    parse_chat_ids,
+    parse_email_addresses,
+    parse_max_recipients,
+    parse_reminder_minutes,
+)
 from avito_crm.errors import ConfigurationError
 
 SPREADSHEET_URL_RE = re.compile(
@@ -137,6 +142,13 @@ def parse_smtp_port(value: str) -> int:
     if not 1 <= port <= 65_535:
         raise ValueError("SMTP-порт должен быть от 1 до 65535")
     return port
+
+
+def parse_max_recipient_ids(value: str) -> tuple[str, ...]:
+    try:
+        return parse_max_recipients(value)
+    except ConfigurationError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def parse_captcha_wait_hours(value: str) -> float:

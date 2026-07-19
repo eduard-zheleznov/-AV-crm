@@ -14,7 +14,7 @@ from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError
 from avito_crm.logging_utils import configure_logging
-from avito_crm.notifications import EmailNotifier, TelegramNotifier
+from avito_crm.notifications import EmailNotifier, MaxNotifier, TelegramNotifier
 from avito_crm.ocr import PhoneOcr
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import QueueColumns, build_queue_source
@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("telegram-test", help="Отправить тест основным и резервным получателям")
     subparsers.add_parser("telegram-chats", help="Показать Chat ID людей, написавших боту")
     subparsers.add_parser("email-test", help="Отправить тестовое SMTP-письмо")
+    subparsers.add_parser("max-test", help="Отправить тестовое сообщение в MAX")
+    subparsers.add_parser("max-recipients", help="Показать ID людей и чатов MAX")
 
     capture = subparsers.add_parser(
         "capture", help="Только открыть/распознать номера и записать status=captured"
@@ -144,6 +146,10 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _telegram_chats(settings)
     if args.command == "email-test":
         return _email_test(settings)
+    if args.command == "max-test":
+        return _max_test(settings)
+    if args.command == "max-recipients":
+        return _max_recipients(settings)
     if args.command == "status":
         return _status(settings)
     if args.command == "stop":
@@ -309,6 +315,30 @@ def _email_test(settings: Settings) -> int:
             )
         sent = notifier.send_test()
     print(f"OK: тестовое email-сообщение доставлено, получателей: {sent}.")
+    return 0
+
+
+def _max_test(settings: Settings) -> int:
+    with MaxNotifier(settings) as notifier:
+        if not notifier.enabled:
+            raise ConfigurationError("Для проверки укажите MAX_BOT_TOKEN и MAX_PRIMARY_RECIPIENTS")
+        sent = notifier.send_test()
+    print(f"OK: тестовое MAX-сообщение доставлено, получателей: {sent}.")
+    return 0
+
+
+def _max_recipients(settings: Settings) -> int:
+    with MaxNotifier(settings) as notifier:
+        recipients = notifier.recent_recipients()
+    if not recipients:
+        print(
+            "MAX ID пока не найдены. Каждый получатель должен открыть бота, "
+            "нажать «Начать» или отправить сообщение, затем повторить поиск."
+        )
+        return 0
+    print("Найденные получатели MAX (скопируйте ID в настройки):")
+    for recipient in recipients:
+        print(f"  {recipient.target} — {recipient.label}")
     return 0
 
 

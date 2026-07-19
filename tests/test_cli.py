@@ -40,3 +40,9 @@ def test_first_test_commands_are_available():
         ]
     )
     assert sync.require_goal is True
+
+
+def test_notification_setup_commands_are_available():
+    assert build_parser().parse_args(["max-test"]).command == "max-test"
+    assert build_parser().parse_args(["max-recipients"]).command == "max-recipients"
+    assert build_parser().parse_args(["email-test"]).command == "email-test"
