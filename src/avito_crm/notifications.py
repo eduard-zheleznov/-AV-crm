@@ -447,6 +447,7 @@ class MaxNotifier:
             params=[
                 ("limit", 100),
                 ("timeout", 0),
+                ("marker", 0),
                 ("types", "bot_started,message_created,bot_added"),
             ],
         )

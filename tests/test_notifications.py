@@ -174,9 +174,12 @@ def test_max_error_never_exposes_bot_token(settings):
 
 
 def test_max_recent_recipients_reads_started_users_and_group_chats(settings):
+    update_requests = []
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/me":
             return httpx.Response(200, json={"user_id": 999, "is_bot": True})
+        update_requests.append(request)
         return httpx.Response(
             200,
             json={
@@ -213,6 +216,7 @@ def test_max_recent_recipients_reads_started_users_and_group_chats(settings):
 
     recipients = notifier.recent_recipients()
 
+    assert update_requests[0].url.params["marker"] == "0"
     assert [(item.target, item.label) for item in recipients] == [
         ("user:10001", "Иван"),
         ("user:10002", "Анна"),
