@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import json
 import logging
+import smtplib
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import datetime
+from email.message import EmailMessage
+from email.utils import formataddr
 
 import httpx
 
@@ -25,6 +29,8 @@ class TelegramChat:
 
 class TelegramNotifier:
     """Small Telegram Bot API client that never exposes the bot token in errors."""
+
+    channel_name = "Telegram"
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self.token = settings.telegram_bot_token
@@ -257,6 +263,279 @@ class TelegramNotifier:
         raise NotificationError(f"Telegram API недоступен ({last_error})")
 
 
+class EmailNotifier:
+    """SMTP notification backend using an app password stored only in local .env."""
+
+    channel_name = "Email"
+
+    def __init__(self, settings: Settings) -> None:
+        self.host = settings.smtp_host
+        self.port = settings.smtp_port
+        self.security = settings.smtp_security
+        self.username = settings.smtp_username
+        self.password = settings.smtp_password
+        self.from_address = settings.smtp_from_address or settings.smtp_username
+        self.primary_recipients = settings.email_primary_recipients
+        self.backup_recipients = settings.email_backup_recipients
+        self.computer_name = settings.notification_computer_name or socket.gethostname()
+        self.timeout = settings.email_request_timeout
+        self.send_attempts = settings.email_send_attempts
+
+    @property
+    def enabled(self) -> bool:
+        return bool(
+            self.host
+            and self.username
+            and self.password
+            and self.from_address
+            and self.primary_recipients
+        )
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> EmailNotifier:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def send(self, subject: str, text: str, recipients: tuple[str, ...]) -> int:
+        if not self.enabled:
+            raise ConfigurationError(
+                "Для email нужны SMTP-сервер, логин, пароль приложения и получатель"
+            )
+        pending = list(_deduplicate(recipients))
+        if not pending:
+            raise ConfigurationError("Не указаны получатели email")
+
+        sent = 0
+        last_error = "неизвестная ошибка"
+        for attempt in range(1, self.send_attempts + 1):
+            try:
+                with self._connect() as smtp:
+                    smtp.login(self.username, self.password)
+                    for recipient in tuple(pending):
+                        message = EmailMessage()
+                        message["Subject"] = subject
+                        message["From"] = formataddr(("Avito CRM", self.from_address))
+                        message["To"] = recipient
+                        message.set_content(text)
+                        refused = smtp.send_message(message)
+                        if refused:
+                            last_error = "SMTP отклонил получателя"
+                            continue
+                        pending.remove(recipient)
+                        sent += 1
+            except (OSError, TimeoutError, smtplib.SMTPException) as exc:
+                last_error = exc.__class__.__name__
+
+            if not pending:
+                return sent
+            if attempt < self.send_attempts:
+                time.sleep(min(2**attempt, 5))
+
+        masked = ", ".join(_mask_email(value) for value in pending)
+        raise NotificationError(
+            f"email доставлен {sent} из {sent + len(pending)} получателей; "
+            f"не доставлено: {masked} ({last_error})"
+        )
+
+    def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
+        return self.send(
+            "[Avito CRM] Требуется решить капчу",
+            "\n".join(
+                (
+                    "Avito остановил очередь для ручной проверки.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Причина: {reason}",
+                    f"Ссылка: {url}",
+                    f"Ожидание: до {_format_duration(wait_seconds)}.",
+                    "Откройте удалённый компьютер и завершите проверку в браузере. "
+                    "После этого программа продолжит работу автоматически.",
+                )
+            ),
+            self.primary_recipients,
+        )
+
+    def send_captcha_reminder(
+        self,
+        *,
+        reason: str,
+        url: str,
+        elapsed_seconds: float,
+        escalate: bool,
+    ) -> int:
+        recipients = self.primary_recipients
+        if escalate and self.backup_recipients:
+            recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "[Avito CRM] Капча всё ещё ожидает решения",
+            "\n".join(
+                (
+                    "Капча Avito всё ещё ожидает решения.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Прошло: {_format_duration(elapsed_seconds)}",
+                    f"Причина: {reason}",
+                    f"Ссылка: {url}",
+                )
+            ),
+            recipients,
+        )
+
+    def send_captcha_resolved(
+        self, *, url: str, elapsed_seconds: float, include_backup: bool
+    ) -> int:
+        recipients = self.primary_recipients
+        if include_backup:
+            recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "[Avito CRM] Капча решена, работа продолжена",
+            "\n".join(
+                (
+                    "Проверка Avito завершена, очередь продолжает работу.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Пауза заняла: {_format_duration(elapsed_seconds)}",
+                    f"Ссылка: {url}",
+                )
+            ),
+            recipients,
+        )
+
+    def send_captcha_timeout(self, *, reason: str, url: str, wait_seconds: float) -> int:
+        recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "[Avito CRM] Ожидание капчи завершилось",
+            "\n".join(
+                (
+                    "Ожидание ручной проверки Avito завершилось по таймауту.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Ожидали: {_format_duration(wait_seconds)}",
+                    f"Причина: {reason}",
+                    f"Ссылка: {url}",
+                    "Строка сохранена для повторного запуска.",
+                )
+            ),
+            recipients,
+        )
+
+    def send_captcha_stopped(self, *, url: str, include_backup: bool) -> int:
+        recipients = self.primary_recipients
+        if include_backup:
+            recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "[Avito CRM] Ожидание остановлено оператором",
+            "\n".join(
+                (
+                    "Ожидание проверки Avito остановлено оператором.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Ссылка: {url}",
+                    "Текущая строка сохранена для повторного запуска.",
+                )
+            ),
+            recipients,
+        )
+
+    def send_test(self) -> int:
+        recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "[Avito CRM] Проверка email-уведомлений",
+            "\n".join(
+                (
+                    "Email-уведомления Avito → CRM работают.",
+                    f"Компьютер: {self.computer_name}",
+                    f"Проверено: {datetime.now().astimezone():%d.%m.%Y %H:%M:%S %Z}",
+                )
+            ),
+            recipients,
+        )
+
+    def _connect(self):
+        context = ssl.create_default_context()
+        if self.security == "ssl":
+            return smtplib.SMTP_SSL(
+                self.host,
+                self.port,
+                timeout=self.timeout,
+                context=context,
+            )
+        smtp = smtplib.SMTP(self.host, self.port, timeout=self.timeout)
+        try:
+            smtp.ehlo()
+            smtp.starttls(context=context)
+            smtp.ehlo()
+        except Exception:
+            smtp.close()
+            raise
+        return smtp
+
+
+class NotificationRouter:
+    """Send through every configured channel and disable failed channels for this run."""
+
+    def __init__(self, settings: Settings, backends: list[object] | None = None) -> None:
+        # Email goes first so a blocked Telegram endpoint cannot delay the useful alert.
+        self.backends = (
+            backends
+            if backends is not None
+            else [EmailNotifier(settings), TelegramNotifier(settings)]
+        )
+        self._unavailable: set[int] = set()
+
+    @property
+    def enabled(self) -> bool:
+        return any(
+            bool(getattr(backend, "enabled", False)) and id(backend) not in self._unavailable
+            for backend in self.backends
+        )
+
+    def close(self) -> None:
+        for backend in self.backends:
+            close = getattr(backend, "close", None)
+            if close:
+                close()
+
+    def _dispatch(self, method: str, **kwargs: object) -> int:
+        delivered = 0
+        failures: list[str] = []
+        for backend in self.backends:
+            if not getattr(backend, "enabled", False) or id(backend) in self._unavailable:
+                continue
+            channel = str(getattr(backend, "channel_name", backend.__class__.__name__))
+            try:
+                delivered += int(getattr(backend, method)(**kwargs))
+            except (ConfigurationError, NotificationError) as exc:
+                self._unavailable.add(id(backend))
+                failures.append(f"{channel}: {exc}")
+                LOGGER.warning("Канал %s отключён до конца запуска: %s", channel, exc)
+            except Exception as exc:
+                self._unavailable.add(id(backend))
+                failures.append(f"{channel}: {exc.__class__.__name__}")
+                LOGGER.warning(
+                    "Канал %s отключён до конца запуска (%s)",
+                    channel,
+                    exc.__class__.__name__,
+                )
+        if delivered == 0 and failures:
+            raise NotificationError("; ".join(failures))
+        return delivered
+
+    def send_captcha_detected(self, **kwargs: object) -> int:
+        return self._dispatch("send_captcha_detected", **kwargs)
+
+    def send_captcha_reminder(self, **kwargs: object) -> int:
+        return self._dispatch("send_captcha_reminder", **kwargs)
+
+    def send_captcha_resolved(self, **kwargs: object) -> int:
+        return self._dispatch("send_captcha_resolved", **kwargs)
+
+    def send_captcha_timeout(self, **kwargs: object) -> int:
+        return self._dispatch("send_captcha_timeout", **kwargs)
+
+    def send_captcha_stopped(self, **kwargs: object) -> int:
+        return self._dispatch("send_captcha_stopped", **kwargs)
+
+
 def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
     value = str(text or "").strip()
     if not value:
@@ -282,6 +561,14 @@ def _mask_chat_id(chat_id: str) -> str:
     if len(chat_id) <= 4:
         return "***"
     return f"***{chat_id[-4:]}"
+
+
+def _mask_email(address: str) -> str:
+    local, separator, domain = address.partition("@")
+    if not separator:
+        return "***"
+    visible = local[:1] if local else ""
+    return f"{visible}***@{domain}"
 
 
 def _format_duration(seconds: float) -> str:

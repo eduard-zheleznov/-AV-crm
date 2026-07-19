@@ -44,6 +44,7 @@ def _float(name: str, default: float) -> float:
 
 
 CHAT_ID_RE = re.compile(r"(?:-?\d+|@[A-Za-z0-9_]{5,})")
+EMAIL_ADDRESS_RE = re.compile(r"[^@\s,;]+@[^@\s,;]+\.[^@\s,;]+")
 
 
 def parse_chat_ids(value: str) -> tuple[str, ...]:
@@ -69,6 +70,14 @@ def parse_reminder_minutes(value: str) -> tuple[float, ...]:
     if tuple(sorted(set(result))) != result:
         raise ConfigurationError("Интервалы Telegram должны возрастать и не повторяться")
     return result
+
+
+def parse_email_addresses(value: str) -> tuple[str, ...]:
+    candidates = [part.strip() for part in re.split(r"[,;\s]+", value) if part.strip()]
+    invalid = [candidate for candidate in candidates if not EMAIL_ADDRESS_RE.fullmatch(candidate)]
+    if invalid:
+        raise ConfigurationError("Некорректный email: " + ", ".join(invalid[:3]))
+    return tuple(dict.fromkeys(candidate.casefold() for candidate in candidates))
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +137,16 @@ class Settings:
     telegram_reminder_minutes: tuple[float, ...]
     telegram_request_timeout: float
     telegram_send_attempts: int
+    smtp_host: str
+    smtp_port: int
+    smtp_security: str
+    smtp_username: str
+    smtp_password: str
+    smtp_from_address: str
+    email_primary_recipients: tuple[str, ...]
+    email_backup_recipients: tuple[str, ...]
+    email_request_timeout: float
+    email_send_attempts: int
     notification_computer_name: str
     tesseract_cmd: str
     ocr_min_agreement: int
@@ -213,6 +232,18 @@ class Settings:
             ),
             telegram_request_timeout=_float("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 15.0),
             telegram_send_attempts=_int("TELEGRAM_SEND_ATTEMPTS", 3) or 3,
+            smtp_host=os.getenv("SMTP_HOST", "smtp.yandex.ru").strip(),
+            smtp_port=int(_int("SMTP_PORT", 465) or 465),
+            smtp_security=os.getenv("SMTP_SECURITY", "ssl").strip().lower(),
+            smtp_username=os.getenv("SMTP_USERNAME", "").strip(),
+            smtp_password=os.getenv("SMTP_PASSWORD", ""),
+            smtp_from_address=os.getenv("SMTP_FROM_ADDRESS", "").strip(),
+            email_primary_recipients=parse_email_addresses(
+                os.getenv("EMAIL_PRIMARY_RECIPIENTS", "")
+            ),
+            email_backup_recipients=parse_email_addresses(os.getenv("EMAIL_BACKUP_RECIPIENTS", "")),
+            email_request_timeout=_float("EMAIL_REQUEST_TIMEOUT_SECONDS", 20.0),
+            email_send_attempts=_int("EMAIL_SEND_ATTEMPTS", 2) or 2,
             notification_computer_name=os.getenv(
                 "NOTIFICATION_COMPUTER_NAME", os.getenv("COMPUTERNAME", socket.gethostname())
             ).strip(),
@@ -273,16 +304,28 @@ class Settings:
             raise ConfigurationError("TELEGRAM_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
         if self.telegram_send_attempts < 1 or self.telegram_send_attempts > 10:
             raise ConfigurationError("TELEGRAM_SEND_ATTEMPTS должен быть от 1 до 10")
+        if not 1 <= self.smtp_port <= 65_535:
+            raise ConfigurationError("SMTP_PORT должен быть от 1 до 65535")
+        if self.smtp_security not in {"ssl", "starttls"}:
+            raise ConfigurationError("SMTP_SECURITY: допустимо ssl или starttls")
+        if self.smtp_from_address and not EMAIL_ADDRESS_RE.fullmatch(self.smtp_from_address):
+            raise ConfigurationError("SMTP_FROM_ADDRESS содержит некорректный email")
+        if self.email_request_timeout <= 0:
+            raise ConfigurationError("EMAIL_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
+        if self.email_send_attempts < 1 or self.email_send_attempts > 10:
+            raise ConfigurationError("EMAIL_SEND_ATTEMPTS должен быть от 1 до 10")
+        email_enabled = bool(
+            self.smtp_host
+            and self.smtp_username
+            and self.smtp_password
+            and self.email_primary_recipients
+        )
         if (
-            self.telegram_bot_token
-            and self.telegram_primary_chat_ids
-            and self.telegram_reminder_minutes
-        ):
+            (self.telegram_bot_token and self.telegram_primary_chat_ids) or email_enabled
+        ) and self.telegram_reminder_minutes:
             last_reminder_seconds = self.telegram_reminder_minutes[-1] * 60
             if last_reminder_seconds >= self.avito_manual_timeout:
-                raise ConfigurationError(
-                    "Последнее Telegram-напоминание должно быть раньше таймаута капчи"
-                )
+                raise ConfigurationError("Последнее напоминание должно быть раньше таймаута капчи")
         if self.duplicate_policy not in {"skip", "create_lead"}:
             raise ConfigurationError("CRM_DUPLICATE_POLICY: допустимо skip или create_lead")
 

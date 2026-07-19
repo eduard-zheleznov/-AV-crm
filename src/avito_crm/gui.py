@@ -16,6 +16,8 @@ from avito_crm.gui_config import (
     google_sheet_url,
     parse_captcha_wait_hours,
     parse_limit,
+    parse_notification_emails,
+    parse_smtp_port,
     parse_telegram_chat_ids,
     parse_telegram_reminders,
     read_env_values,
@@ -27,6 +29,10 @@ APP_TITLE = "Avito → CRM"
 GOOGLE_CREDENTIALS_URL = "https://console.cloud.google.com/iam-admin/serviceaccounts"
 GOOGLE_SHEETS_API_URL = "https://console.cloud.google.com/apis/library/sheets.googleapis.com"
 TELEGRAM_BOTFATHER_URL = "https://t.me/BotFather"
+YANDEX_APP_PASSWORD_URL = "https://id.yandex.ru/security/app-passwords"
+YANDEX_SMTP_HELP_URL = (
+    "https://yandex.ru/support/yandex-360/business/mail/ru/mail-clients/shared-mailboxes"
+)
 
 
 class DesktopApp:
@@ -60,15 +66,25 @@ class DesktopApp:
         self.captcha_wait_hours_var = tk.StringVar(
             value=self._initial_wait_hours(values.get("AVITO_MANUAL_TIMEOUT_SECONDS", ""))
         )
+        self.smtp_host_var = tk.StringVar(value=values.get("SMTP_HOST", "smtp.yandex.ru"))
+        self.smtp_port_var = tk.StringVar(value=values.get("SMTP_PORT", "465"))
+        self.smtp_security_var = tk.StringVar(
+            value=values.get("SMTP_SECURITY", "ssl").strip().upper()
+        )
+        self.smtp_username_var = tk.StringVar(value=values.get("SMTP_USERNAME", ""))
+        self.smtp_password_var = tk.StringVar(value=values.get("SMTP_PASSWORD", ""))
+        self.email_primary_var = tk.StringVar(value=values.get("EMAIL_PRIMARY_RECIPIENTS", ""))
+        self.email_backup_var = tk.StringVar(value=values.get("EMAIL_BACKUP_RECIPIENTS", ""))
         self.telegram_summary_var = tk.StringVar()
         self.telegram_dialog: tk.Toplevel | None = None
+        self.email_dialog: tk.Toplevel | None = None
         self.email_var = tk.StringVar(value="Сервисный email пока не определён")
         self.status_var = tk.StringVar(value="Готово к настройке")
 
         self._configure_window()
         self._configure_styles()
         self._build_layout()
-        self._refresh_telegram_summary()
+        self._refresh_notification_summary()
         self._refresh_service_email(show_error=False)
         self.root.after(100, self._poll_events)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -251,7 +267,14 @@ class DesktopApp:
             command=self._show_telegram_settings,
             style="Secondary.TButton",
         )
-        self.telegram_button.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        self.telegram_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.email_button = ttk.Button(
+            notification_row,
+            text="Настроить Email",
+            command=self._show_email_settings,
+            style="Secondary.TButton",
+        )
+        self.email_button.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
         controls = ttk.Frame(outer, style="App.TFrame")
         controls.grid(row=2, column=0, sticky="ew", pady=16)
@@ -392,16 +415,28 @@ class DesktopApp:
             hours = 12.0
         return f"{hours:g}"
 
-    def _refresh_telegram_summary(self) -> None:
-        if not self.telegram_token_var.get().strip() or not self.telegram_primary_var.get().strip():
+    def _refresh_notification_summary(self) -> None:
+        channels: list[str] = []
+        if (
+            self.smtp_username_var.get().strip()
+            and self.smtp_password_var.get()
+            and self.email_primary_var.get().strip()
+        ):
+            channels.append("Email")
+        if self.telegram_token_var.get().strip() and self.telegram_primary_var.get().strip():
+            channels.append("Telegram")
+        if not channels:
             self.telegram_summary_var.set(
                 "не настроено — ожидание работает, сообщения не отправляются"
             )
             return
         reminders = self.telegram_reminders_var.get().strip() or "30,60"
         wait_hours = self.captcha_wait_hours_var.get().strip() or "12"
-        backup = "; есть резервный получатель" if self.telegram_backup_var.get().strip() else ""
-        self.telegram_summary_var.set(f"сразу + {reminders} мин; ждём до {wait_hours} ч{backup}")
+        has_backup = self.telegram_backup_var.get().strip() or self.email_backup_var.get().strip()
+        backup = "; есть резервный получатель" if has_backup else ""
+        self.telegram_summary_var.set(
+            f"{' + '.join(channels)}: сразу + {reminders} мин; до {wait_hours} ч{backup}"
+        )
 
     def _show_telegram_settings(self) -> None:
         if self.telegram_dialog and self.telegram_dialog.winfo_exists():
@@ -526,7 +561,153 @@ class DesktopApp:
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         dialog.grab_set()
 
-    def _notification_env_values(
+    def _show_email_settings(self) -> None:
+        if self.email_dialog and self.email_dialog.winfo_exists():
+            self.email_dialog.lift()
+            self.email_dialog.focus_force()
+            return
+
+        dialog = tk.Toplevel(self.root)
+        self.email_dialog = dialog
+        dialog.title("Email и ожидание капчи")
+        dialog.geometry("820x560")
+        dialog.minsize(760, 540)
+        dialog.transient(self.root)
+        dialog.configure(bg="#F4F6FA")
+
+        card = ttk.Frame(dialog, style="Card.TFrame", padding=22)
+        card.pack(fill="both", expand=True, padx=20, pady=20)
+        card.columnconfigure(1, weight=1)
+        ttk.Label(card, text="Email-уведомления о капче", style="Section.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(
+            card,
+            text=(
+                "На этом сервере почта доступна, поэтому она будет отправлена первой. "
+                "Для Яндекса нужен отдельный пароль приложения, а не пароль от аккаунта."
+            ),
+            style="Hint.TLabel",
+            wraplength=740,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 18))
+
+        ttk.Label(card, text="SMTP-сервер", style="Field.TLabel").grid(
+            row=2, column=0, sticky="w", padx=(0, 14)
+        )
+        ttk.Entry(card, textvariable=self.smtp_host_var).grid(row=2, column=1, sticky="ew")
+        ttk.Label(card, text="Порт", style="Field.TLabel").grid(
+            row=2, column=2, sticky="e", padx=(18, 10)
+        )
+        ttk.Entry(card, textvariable=self.smtp_port_var, width=8).grid(row=2, column=3, sticky="e")
+
+        ttk.Label(card, text="Защита", style="Field.TLabel").grid(
+            row=3, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Combobox(
+            card,
+            textvariable=self.smtp_security_var,
+            values=("SSL", "STARTTLS"),
+            state="readonly",
+            width=14,
+        ).grid(row=3, column=1, sticky="w", pady=(12, 0))
+
+        ttk.Label(card, text="Логин / email", style="Field.TLabel").grid(
+            row=4, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.smtp_username_var).grid(
+            row=4, column=1, columnspan=3, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(card, text="Пароль приложения", style="Field.TLabel").grid(
+            row=5, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.smtp_password_var, show="●").grid(
+            row=5, column=1, columnspan=2, sticky="ew", pady=(12, 0)
+        )
+        ttk.Button(
+            card,
+            text="Создать пароль",
+            command=lambda: webbrowser.open(YANDEX_APP_PASSWORD_URL),
+            style="Secondary.TButton",
+        ).grid(row=5, column=3, sticky="e", padx=(10, 0), pady=(12, 0))
+
+        ttk.Label(card, text="Основные получатели", style="Field.TLabel").grid(
+            row=6, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.email_primary_var).grid(
+            row=6, column=1, columnspan=3, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(card, text="Резервные получатели", style="Field.TLabel").grid(
+            row=7, column=0, sticky="w", padx=(0, 14), pady=(12, 0)
+        )
+        ttk.Entry(card, textvariable=self.email_backup_var).grid(
+            row=7, column=1, columnspan=3, sticky="ew", pady=(12, 0)
+        )
+        ttk.Label(
+            card,
+            text="Несколько адресов можно указать через запятую.",
+            style="Hint.TLabel",
+        ).grid(row=8, column=1, columnspan=3, sticky="w", pady=(5, 0))
+
+        timings = ttk.Frame(card, style="Card.TFrame")
+        timings.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(16, 0))
+        timings.columnconfigure(1, weight=1)
+        ttk.Label(timings, text="Напоминания, мин", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        ttk.Entry(timings, textvariable=self.telegram_reminders_var, width=18).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Label(timings, text="Максимально ждать, часов", style="Field.TLabel").grid(
+            row=0, column=2, sticky="e", padx=(24, 12)
+        )
+        ttk.Entry(timings, textvariable=self.captcha_wait_hours_var, width=10).grid(
+            row=0, column=3, sticky="e"
+        )
+
+        buttons = ttk.Frame(card, style="Card.TFrame")
+        buttons.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(22, 0))
+        buttons.columnconfigure(1, weight=1)
+        ttk.Button(
+            buttons,
+            text="Инструкция Яндекса",
+            command=lambda: webbrowser.open(YANDEX_SMTP_HELP_URL),
+            style="Secondary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            buttons,
+            text="Отправить тест",
+            command=self._start_email_test,
+            style="Secondary.TButton",
+        ).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(
+            buttons,
+            text="Отмена",
+            command=dialog.destroy,
+            style="Secondary.TButton",
+        ).grid(row=0, column=3, padx=(16, 0))
+        ttk.Button(
+            buttons,
+            text="Сохранить",
+            command=self._save_email_dialog,
+            style="Primary.TButton",
+        ).grid(row=0, column=4, padx=(8, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+
+    def _timing_env_values(self) -> dict[str, str]:
+        reminders = parse_telegram_reminders(self.telegram_reminders_var.get())
+        wait_hours = parse_captcha_wait_hours(self.captcha_wait_hours_var.get())
+        wait_seconds = wait_hours * 3600
+        if reminders[-1] * 60 >= wait_seconds:
+            raise ValueError("Последнее напоминание должно быть раньше окончания ожидания")
+        return {
+            "TELEGRAM_CAPTCHA_REMINDER_MINUTES": ",".join(f"{item:g}" for item in reminders),
+            "AVITO_MANUAL_TIMEOUT_SECONDS": f"{wait_seconds:g}",
+        }
+
+    def _telegram_env_values(
         self, *, require_token: bool = False, require_primary: bool = False
     ) -> dict[str, str]:
         token = self.telegram_token_var.get().strip()
@@ -534,33 +715,86 @@ class DesktopApp:
             raise ValueError("Токен Telegram должен занимать одну строку")
         primary = parse_telegram_chat_ids(self.telegram_primary_var.get())
         backup = parse_telegram_chat_ids(self.telegram_backup_var.get())
-        reminders = parse_telegram_reminders(self.telegram_reminders_var.get())
-        wait_hours = parse_captcha_wait_hours(self.captcha_wait_hours_var.get())
         if require_token and not token:
             raise ValueError("Сначала вставьте токен бота от BotFather")
         if (primary or backup) and not token:
             raise ValueError("Для Telegram Chat ID необходимо указать токен бота")
         if require_primary and not primary:
             raise ValueError("Укажите хотя бы один основной Chat ID")
-        wait_seconds = wait_hours * 3600
-        if reminders[-1] * 60 >= wait_seconds:
-            raise ValueError("Последнее напоминание должно быть раньше окончания ожидания")
         return {
             "TELEGRAM_BOT_TOKEN": token,
             "TELEGRAM_PRIMARY_CHAT_IDS": ",".join(primary),
             "TELEGRAM_BACKUP_CHAT_IDS": ",".join(backup),
-            "TELEGRAM_CAPTCHA_REMINDER_MINUTES": ",".join(f"{item:g}" for item in reminders),
-            "AVITO_MANUAL_TIMEOUT_SECONDS": f"{wait_seconds:g}",
+        }
+
+    def _email_env_values(self, *, require_credentials: bool = False) -> dict[str, str]:
+        host = self.smtp_host_var.get().strip()
+        port = parse_smtp_port(self.smtp_port_var.get())
+        security = self.smtp_security_var.get().strip().lower()
+        if security not in {"ssl", "starttls"}:
+            raise ValueError("Выберите SSL или STARTTLS")
+        username = self.smtp_username_var.get().strip()
+        password = self.smtp_password_var.get()
+        if "\r" in password or "\n" in password:
+            raise ValueError("Пароль приложения должен занимать одну строку")
+        primary = parse_notification_emails(self.email_primary_var.get())
+        backup = parse_notification_emails(self.email_backup_var.get())
+        configured = bool(username or password or primary or backup)
+        if require_credentials or configured:
+            if not host:
+                raise ValueError("Укажите SMTP-сервер")
+            if not username:
+                raise ValueError("Укажите полный email в поле «Логин / email»")
+            usernames = parse_notification_emails(username)
+            if len(usernames) != 1:
+                raise ValueError("SMTP-логин должен быть одним полным email")
+            if not password:
+                raise ValueError("Укажите пароль приложения для почты")
+            if not primary:
+                raise ValueError("Укажите хотя бы одного основного получателя email")
+        return {
+            "SMTP_HOST": host,
+            "SMTP_PORT": str(port),
+            "SMTP_SECURITY": security,
+            "SMTP_USERNAME": username,
+            "SMTP_PASSWORD": password,
+            "SMTP_FROM_ADDRESS": username,
+            "EMAIL_PRIMARY_RECIPIENTS": ",".join(primary),
+            "EMAIL_BACKUP_RECIPIENTS": ",".join(backup),
+        }
+
+    def _notification_env_values(
+        self, *, require_token: bool = False, require_primary: bool = False
+    ) -> dict[str, str]:
+        return {
+            **self._telegram_env_values(
+                require_token=require_token,
+                require_primary=require_primary,
+            ),
+            **self._email_env_values(),
+            **self._timing_env_values(),
         }
 
     def _save_telegram_settings(
         self, *, require_token: bool = False, require_primary: bool = False
     ) -> None:
-        updates = self._notification_env_values(
-            require_token=require_token, require_primary=require_primary
-        )
+        updates = {
+            **self._telegram_env_values(
+                require_token=require_token,
+                require_primary=require_primary,
+            ),
+            **self._timing_env_values(),
+        }
         update_env_values(self.env_path, updates)
-        self._refresh_telegram_summary()
+        self._refresh_notification_summary()
+
+    def _save_email_settings(self, *, require_credentials: bool = False) -> None:
+        updates = {
+            **self._email_env_values(require_credentials=require_credentials),
+            **self._timing_env_values(),
+        }
+        update_env_values(self.env_path, updates)
+        self._refresh_notification_summary()
 
     def _save_telegram_dialog(self) -> None:
         try:
@@ -591,6 +825,26 @@ class DesktopApp:
         if self.telegram_dialog:
             self.telegram_dialog.destroy()
         self._start_process("telegram-test", ["telegram-test"])
+
+    def _save_email_dialog(self) -> None:
+        try:
+            self._save_email_settings()
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Email", str(exc), parent=self.email_dialog or self.root)
+            return
+        if self.email_dialog:
+            self.email_dialog.destroy()
+        self.status_var.set("Настройки Email сохранены")
+
+    def _start_email_test(self) -> None:
+        try:
+            self._save_email_settings(require_credentials=True)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Email", str(exc), parent=self.email_dialog or self.root)
+            return
+        if self.email_dialog:
+            self.email_dialog.destroy()
+        self._start_process("email-test", ["email-test"])
 
     def _open_sheet(self) -> None:
         try:
@@ -682,6 +936,7 @@ class DesktopApp:
             "live": ("Запускаем…", "Запуск очереди в CRM\n"),
             "telegram-chats": ("Ищем Telegram-чаты…", "Поиск Telegram Chat ID\n"),
             "telegram-test": ("Проверяем Telegram…", "Тест Telegram-уведомлений\n"),
+            "email-test": ("Проверяем Email…", "Тест email-уведомлений\n"),
         }
         status_text, log_text = labels.get(kind, ("Выполняем…", "Запуск операции\n"))
         self.process_kind = kind
@@ -751,6 +1006,7 @@ class DesktopApp:
                 "live": "Очередь завершена",
                 "telegram-chats": "Поиск Chat ID завершён",
                 "telegram-test": "Telegram работает",
+                "email-test": "Email работает",
             }
             self.status_var.set(success_status.get(kind, "Готово"))
             self._append_log("Готово.\n", "success")
@@ -789,6 +1045,7 @@ class DesktopApp:
         self.start_button.configure(state=state)
         self.verify_button.configure(state=state)
         self.telegram_button.configure(state=state)
+        self.email_button.configure(state=state)
         self.stop_button.configure(state="normal" if running else "disabled")
         if running:
             self.progress.grid()
@@ -820,6 +1077,8 @@ class DesktopApp:
             self.status_var.set("Завершите проверку в браузере")
         elif "telegram-сообщение доставлено" in lowered:
             self.status_var.set("Telegram работает")
+        elif "email-сообщение доставлено" in lowered:
+            self.status_var.set("Email работает")
         elif "найденные telegram-чаты" in lowered:
             self.status_var.set("Скопируйте Chat ID из журнала")
         elif "ручное действие завершено" in lowered:

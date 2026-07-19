@@ -20,7 +20,7 @@ from playwright.sync_api import (
 from avito_crm.config import Settings
 from avito_crm.errors import ManualActionRequired, NotificationError, PhoneNotFoundError
 from avito_crm.models import PhoneResult
-from avito_crm.notifications import TelegramNotifier
+from avito_crm.notifications import NotificationRouter
 from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url, extract_phones
 
@@ -67,11 +67,11 @@ class AvitoBrowser:
         self,
         settings: Settings,
         ocr: PhoneOcr,
-        notifier: TelegramNotifier | None = None,
+        notifier: NotificationRouter | None = None,
     ) -> None:
         self.settings = settings
         self.ocr = ocr
-        self.notifier = notifier or TelegramNotifier(settings)
+        self.notifier = notifier or NotificationRouter(settings)
         self._owns_notifier = notifier is None
         self.playwright: Playwright | None = None
         self.context: BrowserContext | None = None
@@ -507,7 +507,11 @@ class AvitoBrowser:
                     escalate=escalate,
                 )
                 backup_alerted = backup_alerted or (
-                    escalate and bool(self.settings.telegram_backup_chat_ids)
+                    escalate
+                    and bool(
+                        self.settings.telegram_backup_chat_ids
+                        or self.settings.email_backup_recipients
+                    )
                 )
                 reminder_index += 1
 
@@ -548,9 +552,9 @@ class AvitoBrowser:
             getattr(self.notifier, method)(**kwargs)
             return True
         except NotificationError as exc:
-            LOGGER.warning("Telegram-уведомление не доставлено: %s", exc)
+            LOGGER.warning("Уведомление не доставлено: %s", exc)
         except Exception as exc:
-            LOGGER.warning("Telegram-уведомление не доставлено (%s)", exc.__class__.__name__)
+            LOGGER.warning("Уведомление не доставлено (%s)", exc.__class__.__name__)
         return False
 
     @staticmethod

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from avito_crm.config import parse_chat_ids, parse_reminder_minutes
+from avito_crm.config import parse_chat_ids, parse_email_addresses, parse_reminder_minutes
 from avito_crm.errors import ConfigurationError
 
 SPREADSHEET_URL_RE = re.compile(
@@ -120,6 +120,23 @@ def parse_telegram_reminders(value: str) -> tuple[float, ...]:
     if not reminders:
         raise ValueError("Укажите хотя бы одно Telegram-напоминание")
     return reminders
+
+
+def parse_notification_emails(value: str) -> tuple[str, ...]:
+    try:
+        return parse_email_addresses(value)
+    except ConfigurationError as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def parse_smtp_port(value: str) -> int:
+    try:
+        port = int(value.strip())
+    except ValueError as exc:
+        raise ValueError("SMTP-порт должен быть целым числом") from exc
+    if not 1 <= port <= 65_535:
+        raise ValueError("SMTP-порт должен быть от 1 до 65535")
+    return port
 
 
 def parse_captcha_wait_hours(value: str) -> float:

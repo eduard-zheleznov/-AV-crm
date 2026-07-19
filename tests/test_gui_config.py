@@ -7,6 +7,8 @@ from avito_crm.gui_config import (
     google_sheet_url,
     parse_captcha_wait_hours,
     parse_limit,
+    parse_notification_emails,
+    parse_smtp_port,
     parse_telegram_chat_ids,
     parse_telegram_reminders,
     read_env_values,
@@ -108,3 +110,27 @@ def test_parse_telegram_reminders_requires_increasing_values():
 @pytest.mark.parametrize(("raw", "expected"), [("1", 1.0), ("12", 12.0), ("24,5", 24.5)])
 def test_parse_captcha_wait_hours(raw, expected):
     assert parse_captcha_wait_hours(raw) == expected
+
+
+def test_parse_notification_emails_accepts_unique_addresses():
+    assert parse_notification_emails("MAIN@example.com; backup@example.com main@example.com") == (
+        "main@example.com",
+        "backup@example.com",
+    )
+
+
+@pytest.mark.parametrize("raw", ["wrong", "a@", "a@example.com,broken"])
+def test_parse_notification_emails_rejects_invalid_values(raw):
+    with pytest.raises(ValueError):
+        parse_notification_emails(raw)
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("465", 465), ("587", 587)])
+def test_parse_smtp_port(raw, expected):
+    assert parse_smtp_port(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "0", "65536", "4.65"])
+def test_parse_smtp_port_rejects_invalid_values(raw):
+    with pytest.raises(ValueError):
+        parse_smtp_port(raw)

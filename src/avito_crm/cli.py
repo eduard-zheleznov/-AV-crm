@@ -14,7 +14,7 @@ from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError
 from avito_crm.logging_utils import configure_logging
-from avito_crm.notifications import TelegramNotifier
+from avito_crm.notifications import EmailNotifier, TelegramNotifier
 from avito_crm.ocr import PhoneOcr
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import QueueColumns, build_queue_source
@@ -49,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("telegram-test", help="Отправить тест основным и резервным получателям")
     subparsers.add_parser("telegram-chats", help="Показать Chat ID людей, написавших боту")
+    subparsers.add_parser("email-test", help="Отправить тестовое SMTP-письмо")
 
     capture = subparsers.add_parser(
         "capture", help="Только открыть/распознать номера и записать status=captured"
@@ -141,6 +142,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _telegram_test(settings)
     if args.command == "telegram-chats":
         return _telegram_chats(settings)
+    if args.command == "email-test":
+        return _email_test(settings)
     if args.command == "status":
         return _status(settings)
     if args.command == "stop":
@@ -295,6 +298,17 @@ def _telegram_chats(settings: Settings) -> int:
     print("Найденные Telegram-чаты (скопируйте нужный Chat ID в настройки):")
     for chat in chats:
         print(f"  {chat.chat_id} — {chat.label}")
+    return 0
+
+
+def _email_test(settings: Settings) -> int:
+    with EmailNotifier(settings) as notifier:
+        if not notifier.enabled:
+            raise ConfigurationError(
+                "Для проверки укажите SMTP-логин, пароль приложения и основной email"
+            )
+        sent = notifier.send_test()
+    print(f"OK: тестовое email-сообщение доставлено, получателей: {sent}.")
     return 0
 
 
