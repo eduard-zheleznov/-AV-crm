@@ -49,6 +49,28 @@ def read_env_values(path: Path) -> dict[str, str]:
     }
 
 
+def browser_profile_dir(project_root: Path, values: Mapping[str, str]) -> Path:
+    """Resolve the Chromium profile like Settings does, but from the GUI's current .env."""
+    root = project_root.resolve()
+    raw_data_dir = values.get("APP_DATA_DIR", "").strip()
+    data_dir = Path(raw_data_dir).expanduser() if raw_data_dir else root / "data"
+    if not data_dir.is_absolute():
+        data_dir = root / data_dir
+
+    raw_profile_dir = values.get("AVITO_PROFILE_DIR", "").strip()
+    profile_dir = (
+        Path(raw_profile_dir).expanduser() if raw_profile_dir else data_dir / "browser-profile"
+    )
+    if not profile_dir.is_absolute():
+        profile_dir = root / profile_dir
+    return profile_dir.resolve()
+
+
+def browser_profile_is_initialized(path: Path) -> bool:
+    """Detect profile metadata without trying to infer whether Avito is logged in."""
+    return (path / "Local State").is_file() or (path / "Default" / "Preferences").is_file()
+
+
 def update_env_values(path: Path, updates: Mapping[str, str]) -> None:
     """Atomically update selected .env keys without exposing or replacing secrets."""
     path.parent.mkdir(parents=True, exist_ok=True)

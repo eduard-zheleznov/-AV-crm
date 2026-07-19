@@ -10,6 +10,7 @@ from openpyxl import Workbook
 from playwright.sync_api import sync_playwright
 
 from avito_crm import __version__
+from avito_crm.avito import open_avito_profile
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError
@@ -52,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("email-test", help="Отправить тестовое SMTP-письмо")
     subparsers.add_parser("max-test", help="Отправить тестовое сообщение в MAX")
     subparsers.add_parser("max-recipients", help="Показать ID людей и чатов MAX")
+    subparsers.add_parser(
+        "avito-profile",
+        help="Открыть постоянный Chromium для необязательного входа или выхода из Avito",
+    )
 
     capture = subparsers.add_parser(
         "capture", help="Только открыть/распознать номера и записать status=captured"
@@ -150,6 +155,11 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _max_test(settings)
     if args.command == "max-recipients":
         return _max_recipients(settings)
+    if args.command == "avito-profile":
+        with SingleInstanceLock(settings.data_dir / "worker.lock"):
+            open_avito_profile(settings)
+        print("Профиль браузера сохранён. Следующий запуск использует это состояние.")
+        return 0
     if args.command == "status":
         return _status(settings)
     if args.command == "stop":

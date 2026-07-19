@@ -3,6 +3,8 @@ import json
 import pytest
 
 from avito_crm.gui_config import (
+    browser_profile_dir,
+    browser_profile_is_initialized,
     extract_spreadsheet_id,
     google_sheet_url,
     parse_captcha_wait_hours,
@@ -142,6 +144,23 @@ def test_parse_max_recipient_ids_normalizes_people_and_chats():
         "user:123",
         "chat:456",
     )
+
+
+def test_browser_profile_dir_uses_data_dir_and_supports_guest_profile(tmp_path):
+    project_root = tmp_path / "project"
+    path = browser_profile_dir(project_root, {"APP_DATA_DIR": "runtime"})
+
+    assert path == (project_root / "runtime" / "browser-profile").resolve()
+    assert browser_profile_is_initialized(path) is False
+
+
+def test_browser_profile_status_only_reports_saved_browser_metadata(tmp_path):
+    profile = tmp_path / "profile"
+    preferences = profile / "Default" / "Preferences"
+    preferences.parent.mkdir(parents=True)
+    preferences.write_text("{}", encoding="utf-8")
+
+    assert browser_profile_is_initialized(profile) is True
 
 
 @pytest.mark.parametrize("raw", ["user:", "group:123", "chat:abc", "@name"])

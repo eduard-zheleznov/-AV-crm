@@ -12,6 +12,8 @@ from pathlib import Path
 from tkinter import END, filedialog, messagebox, ttk
 
 from avito_crm.gui_config import (
+    browser_profile_dir,
+    browser_profile_is_initialized,
     extract_spreadsheet_id,
     google_sheet_url,
     parse_captcha_wait_hours,
@@ -82,6 +84,7 @@ class DesktopApp:
         self.email_primary_var = tk.StringVar(value=values.get("EMAIL_PRIMARY_RECIPIENTS", ""))
         self.email_backup_var = tk.StringVar(value=values.get("EMAIL_BACKUP_RECIPIENTS", ""))
         self.telegram_summary_var = tk.StringVar()
+        self.avito_profile_var = tk.StringVar()
         self.telegram_dialog: tk.Toplevel | None = None
         self.max_dialog: tk.Toplevel | None = None
         self.email_dialog: tk.Toplevel | None = None
@@ -91,6 +94,7 @@ class DesktopApp:
         self._configure_window()
         self._configure_styles()
         self._build_layout()
+        self._refresh_avito_profile_status()
         self._refresh_notification_summary()
         self._refresh_service_email(show_error=False)
         self.root.after(100, self._poll_events)
@@ -255,8 +259,27 @@ class DesktopApp:
             style="Secondary.TButton",
         ).grid(row=0, column=2, padx=(8, 0))
 
+        profile_row = ttk.Frame(settings_card, style="Card.TFrame")
+        profile_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        profile_row.columnconfigure(1, weight=1)
+        ttk.Label(profile_row, text="Профиль Avito", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 12)
+        )
+        ttk.Label(
+            profile_row,
+            textvariable=self.avito_profile_var,
+            style="Hint.TLabel",
+        ).grid(row=0, column=1, sticky="w")
+        self.avito_profile_button = ttk.Button(
+            profile_row,
+            text="Открыть профиль",
+            command=self._open_avito_profile,
+            style="Secondary.TButton",
+        )
+        self.avito_profile_button.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
         notification_row = ttk.Frame(settings_card, style="Card.TFrame")
-        notification_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        notification_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         notification_row.columnconfigure(1, weight=1)
         ttk.Label(
             notification_row,
@@ -365,9 +388,20 @@ class DesktopApp:
         self.log.tag_configure("warning", foreground="#FEC84B")
         self.log.tag_configure("success", foreground="#6CE9A6")
         self._append_log(
-            "1. Укажите таблицу и JSON.  2. Дайте сервисному email права "
-            "редактора.  3. Проверьте доступ и запускайте.\n"
+            "1. При желании откройте профиль Avito и войдите или выйдите.  "
+            "2. Укажите таблицу и JSON.  3. Проверьте доступ и запускайте.\n"
         )
+
+    def _refresh_avito_profile_status(self) -> None:
+        values = read_env_values(self.env_path)
+        path = browser_profile_dir(self.project_root, values)
+        if browser_profile_is_initialized(path):
+            self.avito_profile_var.set("сохранён; вход в аккаунт необязателен")
+        else:
+            self.avito_profile_var.set("ещё не создан; можно работать без входа")
+
+    def _open_avito_profile(self) -> None:
+        self._start_process("avito-profile", ["avito-profile"])
 
     def _select_credentials(self) -> None:
         selected = filedialog.askopenfilename(
@@ -1146,6 +1180,10 @@ class DesktopApp:
             "email-test": ("Проверяем Email…", "Тест email-уведомлений\n"),
             "max-recipients": ("Ищем MAX ID…", "Поиск получателей MAX\n"),
             "max-test": ("Проверяем MAX…", "Тест MAX-уведомлений\n"),
+            "avito-profile": (
+                "Профиль Avito открыт…",
+                "Управление профилем Avito\n",
+            ),
         }
         status_text, log_text = labels.get(kind, ("Выполняем…", "Запуск операции\n"))
         self.process_kind = kind
@@ -1218,6 +1256,7 @@ class DesktopApp:
                 "email-test": "Email работает",
                 "max-recipients": "Поиск MAX ID завершён",
                 "max-test": "MAX работает",
+                "avito-profile": "Профиль Avito сохранён",
             }
             self.status_var.set(success_status.get(kind, "Готово"))
             self._append_log("Готово.\n", "success")
@@ -1227,11 +1266,20 @@ class DesktopApp:
                 f"Процесс завершён с кодом {return_code}. Смотрите ошибку выше.\n",
                 "error",
             )
+        if kind == "avito-profile":
+            self._refresh_avito_profile_status()
         if self.close_requested:
             self.root.destroy()
 
     def _request_stop(self) -> None:
         if not self.process or self.process.poll() is not None:
+            return
+        if self.process_kind == "avito-profile":
+            messagebox.showinfo(
+                "Профиль Avito",
+                "Закройте все окна синего Chromium. Профиль сохранится автоматически.",
+                parent=self.root,
+            )
             return
         values = read_env_values(self.env_path)
         raw_data_dir = values.get("APP_DATA_DIR", "").strip()
@@ -1258,7 +1306,9 @@ class DesktopApp:
         self.telegram_button.configure(state=state)
         self.email_button.configure(state=state)
         self.max_button.configure(state=state)
-        self.stop_button.configure(state="normal" if running else "disabled")
+        self.avito_profile_button.configure(state=state)
+        can_stop = running and self.process_kind != "avito-profile"
+        self.stop_button.configure(state="normal" if can_stop else "disabled")
         if running:
             self.progress.grid()
             self.progress.start(12)
@@ -1287,6 +1337,10 @@ class DesktopApp:
         lowered = line.lower()
         if "ручную проверку" in lowered:
             self.status_var.set("Завершите проверку в браузере")
+        elif "браузер avito открыт" in lowered:
+            self.status_var.set("Войдите, выйдите или оставьте гостевой режим")
+        elif "профиль браузера сохранён" in lowered:
+            self.status_var.set("Профиль Avito сохранён")
         elif "telegram-сообщение доставлено" in lowered:
             self.status_var.set("Telegram работает")
         elif "email-сообщение доставлено" in lowered:
@@ -1310,6 +1364,13 @@ class DesktopApp:
 
     def _on_close(self) -> None:
         if self.process and self.process.poll() is None:
+            if self.process_kind == "avito-profile":
+                messagebox.showinfo(
+                    "Профиль Avito открыт",
+                    "Сначала закройте все окна синего Chromium, чтобы безопасно сохранить профиль.",
+                    parent=self.root,
+                )
+                return
             confirmed = messagebox.askyesno(
                 "Идёт обработка",
                 "Запросить мягкую остановку и закрыть окно после текущей строки?",

@@ -5,12 +5,14 @@ import logging
 import random
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from playwright.sync_api import (
     BrowserContext,
+    Error,
     Locator,
     Page,
     Playwright,
@@ -25,6 +27,7 @@ from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url, extract_phones
 
 LOGGER = logging.getLogger(__name__)
+AVITO_HOME_URL = "https://www.avito.ru/"
 
 CHALLENGE_PATTERNS = (
     "доступ временно ограничен",
@@ -60,6 +63,67 @@ class RevealRoundResult:
     button_found: bool
 
 
+def launch_avito_context(
+    playwright: Playwright,
+    settings: Settings,
+    *,
+    force_visible: bool = False,
+) -> BrowserContext:
+    """Launch the one persistent Chromium profile used by every Avito operation."""
+    return playwright.chromium.launch_persistent_context(
+        user_data_dir=str(settings.browser_profile_dir),
+        headless=False if force_visible else settings.avito_headless,
+        locale="ru-RU",
+        viewport={"width": 1440, "height": 900},
+        accept_downloads=False,
+    )
+
+
+def open_avito_profile(settings: Settings) -> None:
+    """Open the shared profile for optional login/logout and wait for the window to close."""
+    playwright = sync_playwright().start()
+    context: BrowserContext | None = None
+    try:
+        context = launch_avito_context(playwright, settings, force_visible=True)
+        page = context.pages[0] if context.pages else context.new_page()
+        page.set_default_timeout(settings.avito_page_timeout * 1000)
+        try:
+            page.goto(
+                AVITO_HOME_URL,
+                wait_until="domcontentloaded",
+                timeout=settings.avito_page_timeout * 1000,
+            )
+        except Error as exc:
+            # The window remains useful for manual navigation even if the first request times out.
+            LOGGER.warning("Avito не открылся автоматически: %s", exc.__class__.__name__)
+        LOGGER.info(
+            "Браузер Avito открыт. Вход необязателен: войдите, выйдите из аккаунта "
+            "или оставьте гостевой режим. Для сохранения профиля закройте окно Chromium."
+        )
+        _wait_until_profile_window_closes(context)
+    finally:
+        if context is not None:
+            with suppress(Error):
+                context.close()
+        playwright.stop()
+
+
+def _wait_until_profile_window_closes(context: BrowserContext) -> None:
+    """Pump Playwright events until the operator closes every Chromium window."""
+    while True:
+        try:
+            pages = context.pages
+        except Error:
+            return
+        if not pages:
+            return
+        try:
+            pages[0].wait_for_timeout(500)
+        except Error:
+            # The active tab may have been closed while another tab remains open.
+            continue
+
+
 class AvitoBrowser:
     """Visible, persistent and intentionally sequential Avito browser session."""
 
@@ -82,13 +146,7 @@ class AvitoBrowser:
     def __enter__(self) -> AvitoBrowser:
         self.playwright = sync_playwright().start()
         try:
-            self.context = self.playwright.chromium.launch_persistent_context(
-                user_data_dir=str(self.settings.browser_profile_dir),
-                headless=self.settings.avito_headless,
-                locale="ru-RU",
-                viewport={"width": 1440, "height": 900},
-                accept_downloads=False,
-            )
+            self.context = launch_avito_context(self.playwright, self.settings)
         except Exception:
             self.playwright.stop()
             self.playwright = None

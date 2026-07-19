@@ -1,8 +1,74 @@
 from dataclasses import replace
 
 import pytest
+from playwright.sync_api import Error
 
-from avito_crm.avito import AvitoBrowser
+from avito_crm.avito import (
+    AvitoBrowser,
+    _wait_until_profile_window_closes,
+    launch_avito_context,
+)
+
+
+class FakeChromium:
+    def __init__(self):
+        self.calls = []
+        self.context = object()
+
+    def launch_persistent_context(self, **kwargs):
+        self.calls.append(kwargs)
+        return self.context
+
+
+class FakePlaywright:
+    def __init__(self):
+        self.chromium = FakeChromium()
+
+
+def test_profile_manager_and_worker_share_profile_without_requiring_login(settings):
+    configured = replace(settings, avito_headless=True)
+    playwright = FakePlaywright()
+
+    context = launch_avito_context(playwright, configured, force_visible=True)
+    launch_avito_context(playwright, configured)
+
+    assert context is playwright.chromium.context
+    assert [call["user_data_dir"] for call in playwright.chromium.calls] == [
+        str(configured.browser_profile_dir),
+        str(configured.browser_profile_dir),
+    ]
+    assert [call["headless"] for call in playwright.chromium.calls] == [False, True]
+    assert all(
+        "username" not in call and "password" not in call for call in playwright.chromium.calls
+    )
+
+
+def test_profile_window_wait_survives_a_closed_tab():
+    class ClosingPage:
+        def wait_for_timeout(self, _milliseconds):
+            raise Error("tab closed")
+
+    class LastPage:
+        def __init__(self):
+            self.waits = 0
+
+        def wait_for_timeout(self, _milliseconds):
+            self.waits += 1
+
+    class ClosingContext:
+        def __init__(self):
+            self.last_page = LastPage()
+            self.states = iter([[ClosingPage()], [self.last_page], []])
+
+        @property
+        def pages(self):
+            return next(self.states)
+
+    context = ClosingContext()
+
+    _wait_until_profile_window_closes(context)
+
+    assert context.last_page.waits == 1
 
 
 class FakeButton:
