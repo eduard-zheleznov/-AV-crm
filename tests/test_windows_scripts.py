@@ -7,3 +7,23 @@ def test_windows_powershell_scripts_have_utf8_bom():
 
     for path in scripts.glob("*.ps1"):
         assert path.read_bytes().startswith(b"\xef\xbb\xbf"), path.name
+
+
+def test_remote_control_task_is_interactive_and_explicitly_live():
+    path = Path(__file__).parents[1] / "scripts" / "install-remote-control.ps1"
+    script = path.read_text(encoding="utf-8-sig")
+
+    assert "--allow-live-crm" in script
+    assert "-LogonType Interactive" in script
+    assert "-AtLogOn" in script
+    assert "pythonw.exe" in script
+    assert "Test-Path $WorkerLock" in script
+
+
+def test_remote_control_uninstall_waits_for_a_safe_worker_stop():
+    path = Path(__file__).parents[1] / "scripts" / "uninstall-remote-control.ps1"
+    script = path.read_text(encoding="utf-8-sig")
+
+    assert "SafeStopTimeoutSeconds" in script
+    assert "while ((Test-Path $WorkerLock)" in script
+    assert script.index("while ((Test-Path $WorkerLock)") < script.index("Stop-ScheduledTask")

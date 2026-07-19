@@ -26,6 +26,7 @@ class FakeQueue(QueueSource):
 
 def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings):
     source = FakeQueue(settings)
+    progress = []
     with StateStore(tmp_path / "state.sqlite3") as state:
         summary = Pipeline(
             settings,
@@ -34,9 +35,17 @@ def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings
             source_name="test",
             mode="full",
             live=False,
-        ).run(1)
+        ).run(
+            1,
+            run_id="remote-command-1",
+            progress=lambda current, row_id: progress.append(
+                (current.run_id, current.captured, row_id)
+            ),
+        )
 
+    assert summary.run_id == "remote-command-1"
     assert summary.captured == 1
     assert summary.created == 0
     assert source.patches[-1].status == ItemStatus.CAPTURED
     assert source.patches[-1].phone == "+79991234567"
+    assert progress[-1] == ("remote-command-1", 1, "")

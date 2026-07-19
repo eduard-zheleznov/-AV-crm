@@ -119,6 +119,10 @@ class Settings:
     google_credentials_file: Path | None
     google_spreadsheet_id: str
     google_worksheet: str
+    google_control_worksheet: str
+    google_history_worksheet: str
+    remote_control_poll_seconds: float
+    remote_control_max_limit: int
 
     url_column: str
     status_column: str
@@ -218,6 +222,14 @@ class Settings:
             else None,
             google_spreadsheet_id=os.getenv("GOOGLE_SPREADSHEET_ID", "").strip(),
             google_worksheet=os.getenv("GOOGLE_WORKSHEET", "Лист1").strip(),
+            google_control_worksheet=os.getenv(
+                "GOOGLE_CONTROL_WORKSHEET", "Управление"
+            ).strip(),
+            google_history_worksheet=os.getenv(
+                "GOOGLE_HISTORY_WORKSHEET", "История запусков"
+            ).strip(),
+            remote_control_poll_seconds=_float("REMOTE_CONTROL_POLL_SECONDS", 20.0),
+            remote_control_max_limit=int(_int("REMOTE_CONTROL_MAX_LIMIT", 100) or 0),
             url_column=os.getenv("QUEUE_URL_COLUMN", "Ссылка").strip(),
             status_column=os.getenv("QUEUE_STATUS_COLUMN", "Статус").strip(),
             phone_column=os.getenv("QUEUE_PHONE_COLUMN", "Телефон").strip(),
@@ -381,6 +393,22 @@ class Settings:
                 raise ConfigurationError("Последнее напоминание должно быть раньше таймаута капчи")
         if self.duplicate_policy not in {"skip", "create_lead"}:
             raise ConfigurationError("CRM_DUPLICATE_POLICY: допустимо skip или create_lead")
+        if not self.google_control_worksheet:
+            raise ConfigurationError("GOOGLE_CONTROL_WORKSHEET не может быть пустым")
+        if not self.google_history_worksheet:
+            raise ConfigurationError("GOOGLE_HISTORY_WORKSHEET не может быть пустым")
+        remote_tabs = {
+            self.google_control_worksheet.casefold(),
+            self.google_history_worksheet.casefold(),
+        }
+        if len(remote_tabs) != 2 or self.google_worksheet.casefold() in remote_tabs:
+            raise ConfigurationError(
+                "Лист очереди, пульт и история должны иметь разные имена"
+            )
+        if not 5 <= self.remote_control_poll_seconds <= 300:
+            raise ConfigurationError("REMOTE_CONTROL_POLL_SECONDS должен быть от 5 до 300")
+        if not 1 <= self.remote_control_max_limit <= 1000:
+            raise ConfigurationError("REMOTE_CONTROL_MAX_LIMIT должен быть от 1 до 1000")
 
     def ensure_runtime_dirs(self) -> None:
         for path in (

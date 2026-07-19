@@ -58,6 +58,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Открыть постоянный Chromium для необязательного входа или выхода из Avito",
     )
 
+    remote = subparsers.add_parser(
+        "remote-control",
+        help="Запустить Google Sheets-пульт для удалённых live-запусков",
+    )
+    remote.add_argument(
+        "--setup-only",
+        action="store_true",
+        help="Только создать/проверить листы пульта и завершиться",
+    )
+    remote.add_argument(
+        "--allow-live-crm",
+        action="store_true",
+        help="Явно разрешить пульту создавать лиды в CRM",
+    )
+
     capture = subparsers.add_parser(
         "capture", help="Только открыть/распознать номера и записать status=captured"
     )
@@ -159,6 +174,15 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         with SingleInstanceLock(settings.data_dir / "worker.lock"):
             open_avito_profile(settings)
         print("Профиль браузера сохранён. Следующий запуск использует это состояние.")
+        return 0
+    if args.command == "remote-control":
+        from avito_crm.remote_control import run_remote_control
+
+        run_remote_control(
+            settings,
+            setup_only=bool(args.setup_only),
+            allow_live=bool(args.allow_live_crm),
+        )
         return 0
     if args.command == "status":
         return _status(settings)

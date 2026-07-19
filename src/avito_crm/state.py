@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from avito_crm.errors import AppError
+from avito_crm.errors import InstanceAlreadyRunning
 from avito_crm.models import QueueItem, QueuePatch, RunSummary
 
 
@@ -68,7 +68,13 @@ class StateStore:
 
     def begin_run(self, summary: RunSummary) -> None:
         self.connection.execute(
-            "INSERT INTO runs(run_id, started_at, requested) VALUES (?, ?, ?)",
+            """
+            INSERT INTO runs(run_id, started_at, requested) VALUES (?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                finished_at=NULL,
+                requested=MAX(runs.requested, excluded.requested),
+                stopped_reason=''
+            """,
             (summary.run_id, utc_now(), summary.requested),
         )
         self.connection.commit()
@@ -121,8 +127,9 @@ class StateStore:
     def finish_run(self, summary: RunSummary) -> None:
         self.connection.execute(
             """
-            UPDATE runs SET finished_at=?, captured=?, created=?, duplicates=?, errors=?,
-                invalid=?, manual_required=?, inspected=?, stopped_reason=?
+            UPDATE runs SET finished_at=?, captured=captured + ?, created=created + ?,
+                duplicates=duplicates + ?, errors=errors + ?, invalid=invalid + ?,
+                manual_required=manual_required + ?, inspected=inspected + ?, stopped_reason=?
             WHERE run_id=?
             """,
             (
@@ -175,7 +182,7 @@ class SingleInstanceLock(AbstractContextManager["SingleInstanceLock"]):
             if self._clear_stale():
                 descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             else:
-                raise AppError(
+                raise InstanceAlreadyRunning(
                     "Другой процесс avito-crm уже работает. Используйте `avito-crm status`."
                 ) from None
         payload = json.dumps({"pid": os.getpid(), "started_at": utc_now()}).encode()

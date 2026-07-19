@@ -2,6 +2,10 @@ class AppError(RuntimeError):
     """Expected operational error safe to show to an operator."""
 
 
+class InstanceAlreadyRunning(AppError):
+    """A mutually exclusive worker or controller is already active."""
+
+
 class ConfigurationError(AppError):
     """Configuration is missing or inconsistent."""
 

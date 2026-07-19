@@ -69,3 +69,4 @@ Write-Host "1. Заполните CRM-секреты в .env (не коммит�
 Write-Host "2. Запустите ярлык 'Авито в CRM' на рабочем столе."
 Write-Host "3. Выберите Google JSON, вставьте ссылку таблицы и нажмите 'Проверить доступ'."
 Write-Host "4. В строке 'Капча и уведомления' настройте MAX и резервный Email."
+Write-Host "5. Для запуска из Google Sheets выполните .\scripts\install-remote-control.ps1"

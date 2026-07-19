@@ -20,6 +20,23 @@ def test_state_store_records_resumable_item(tmp_path):
         assert state.latest_run()["captured"] == 1
 
 
+def test_state_store_accumulates_a_resumed_run(tmp_path):
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        first = RunSummary(run_id="remote-1", requested=3, created=1, captured=1)
+        state.begin_run(first)
+        state.finish_run(first)
+
+        resumed = RunSummary(run_id="remote-1", requested=2, created=2, captured=2)
+        state.begin_run(resumed)
+        state.finish_run(resumed)
+
+        run = state.latest_run()
+
+    assert run["requested"] == 3
+    assert run["created"] == 3
+    assert run["captured"] == 3
+
+
 def test_single_instance_lock_cleans_up(tmp_path):
     lock_path = tmp_path / "worker.lock"
     with SingleInstanceLock(lock_path):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -28,10 +29,13 @@ def configure_logging(log_dir: Path, verbose: bool = False) -> None:
     root.handlers.clear()
     root.setLevel(level)
 
-    console = logging.StreamHandler()
-    console.setLevel(level)
-    console.setFormatter(console_formatter)
-    root.addHandler(console)
+    # pythonw.exe has no stderr. Skipping this handler avoids repeated logging
+    # errors in the Windows background controller while preserving the file log.
+    if sys.stderr is not None:
+        console = logging.StreamHandler()
+        console.setLevel(level)
+        console.setFormatter(console_formatter)
+        root.addHandler(console)
 
     file_handler = RotatingFileHandler(
         log_dir / "avito-crm.log",

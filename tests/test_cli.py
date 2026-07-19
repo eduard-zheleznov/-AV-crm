@@ -52,3 +52,12 @@ def test_avito_profile_command_is_available_without_login_arguments():
     args = build_parser().parse_args(["avito-profile"])
 
     assert args.command == "avito-profile"
+
+
+def test_remote_control_requires_an_explicit_live_flag_at_runtime():
+    setup = build_parser().parse_args(["remote-control", "--setup-only"])
+    live = build_parser().parse_args(["remote-control", "--allow-live-crm"])
+
+    assert setup.setup_only is True
+    assert setup.allow_live_crm is False
+    assert live.allow_live_crm is True

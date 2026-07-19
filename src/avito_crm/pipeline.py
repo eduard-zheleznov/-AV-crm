@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from collections.abc import Callable
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -49,12 +50,19 @@ class Pipeline:
         self.interactive_phone_check = interactive_phone_check
         self.stop_file = settings.data_dir / "STOP"
 
-    def run(self, limit: int) -> RunSummary:
+    def run(
+        self,
+        limit: int,
+        *,
+        run_id: str | None = None,
+        progress: Callable[[RunSummary, str], None] | None = None,
+    ) -> RunSummary:
         if limit < 1:
             raise ValueError("Лимит должен быть больше нуля")
         self.stop_file.unlink(missing_ok=True)
-        summary = RunSummary(run_id=uuid.uuid4().hex[:12], requested=limit)
+        summary = RunSummary(run_id=run_id or uuid.uuid4().hex[:12], requested=limit)
         self.state.begin_run(summary)
+        self._report_progress(progress, summary, "")
         consecutive_failures = 0
 
         try:
@@ -104,6 +112,7 @@ class Pipeline:
                         continue
 
                     summary.inspected += 1
+                    self._report_progress(progress, summary, item.row_id)
                     try:
                         canonical_url = canonical_avito_url(item.url)
                     except InvalidListingError as exc:
@@ -120,6 +129,7 @@ class Pipeline:
                         )
                         summary.invalid += 1
                         consecutive_failures += 1
+                        self._report_progress(progress, summary, item.row_id)
                         continue
 
                     if self._reconcile_from_state(canonical_url, item, summary.run_id):
@@ -178,6 +188,7 @@ class Pipeline:
                             )
                             self._finalize(canonical_url, item, patch)
                             consecutive_failures = 0
+                            self._report_progress(progress, summary, item.row_id)
                             continue
 
                         if crm is None or destination is None:
@@ -200,6 +211,7 @@ class Pipeline:
                             summary.duplicates += 1
                             LOGGER.info("Строка %s: дубликат, создание пропущено", item.row_id)
                         consecutive_failures = 0
+                        self._report_progress(progress, summary, item.row_id)
                     except ManualActionRequired as exc:
                         self._finalize(
                             canonical_url,
@@ -215,6 +227,7 @@ class Pipeline:
                         )
                         summary.manual_required += 1
                         summary.stopped_reason = str(exc)
+                        self._report_progress(progress, summary, item.row_id)
                         break
                     except Exception as exc:
                         error = _safe_error(exc)
@@ -233,6 +246,7 @@ class Pipeline:
                         summary.errors += 1
                         consecutive_failures += 1
                         LOGGER.error("Строка %s: %s", item.row_id, error)
+                        self._report_progress(progress, summary, item.row_id)
                         if consecutive_failures >= self.settings.max_consecutive_failures:
                             summary.stopped_reason = (
                                 "Аварийная остановка после "
@@ -250,7 +264,21 @@ class Pipeline:
             raise
         finally:
             self.state.finish_run(summary)
+            self._report_progress(progress, summary, "")
         return summary
+
+    @staticmethod
+    def _report_progress(
+        callback: Callable[[RunSummary, str], None] | None,
+        summary: RunSummary,
+        row_id: str,
+    ) -> None:
+        if callback is None:
+            return
+        try:
+            callback(summary, row_id)
+        except Exception as exc:
+            LOGGER.warning("Не удалось обновить прогресс пульта: %s", exc)
 
     def _eligible_for_mode(self, item: QueueItem) -> bool:
         phone = normalize_phone(str(item.values.get(self.source.columns.phone, "") or ""))
