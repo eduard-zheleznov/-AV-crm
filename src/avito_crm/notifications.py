@@ -485,12 +485,19 @@ class MaxNotifier:
             params=[
                 ("limit", 100),
                 ("timeout", 0),
-                ("marker", 0),
                 ("types", "bot_started,message_created,bot_added"),
             ],
         )
         updates = payload.get("updates")
-        if not isinstance(updates, list):
+        if not isinstance(updates, list) or not updates:
+            subscriptions_payload = self._request("GET", "/subscriptions")
+            subscriptions = subscriptions_payload.get("subscriptions")
+            if isinstance(subscriptions, list) and subscriptions:
+                raise ConfigurationError(
+                    "У MAX-бота включён Webhook, поэтому MAX не отдаёт события "
+                    "через кнопку «Найти ID». Возьмите user_id из текущего "
+                    "Webhook-сервиса или используйте отдельного MAX-бота."
+                )
             return []
         recipients: dict[str, MaxRecipient] = {}
         for update in updates:

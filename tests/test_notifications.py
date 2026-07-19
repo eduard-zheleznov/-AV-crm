@@ -6,7 +6,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from avito_crm.errors import NotificationError
+from avito_crm.errors import ConfigurationError, NotificationError
 from avito_crm.notifications import (
     EmailNotifier,
     MaxNotifier,
@@ -252,12 +252,64 @@ def test_max_recent_recipients_reads_started_users_and_group_chats(settings):
 
     recipients = notifier.recent_recipients()
 
-    assert update_requests[0].url.params["marker"] == "0"
+    assert "marker" not in update_requests[0].url.params
     assert [(item.target, item.label) for item in recipients] == [
         ("user:10001", "Иван"),
         ("user:10002", "Анна"),
         ("chat:20002", "групповой чат 20002"),
     ]
+
+
+def test_max_recent_recipients_explains_active_webhook(settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/me":
+            return httpx.Response(200, json={"user_id": 999, "is_bot": True})
+        if request.url.path == "/updates":
+            return httpx.Response(200, json={"updates": [], "marker": 10})
+        if request.url.path == "/subscriptions":
+            return httpx.Response(
+                200,
+                json={"subscriptions": [{"url": "https://example.invalid/max-hook"}]},
+            )
+        raise AssertionError(f"Неожиданный путь: {request.url.path}")
+
+    configured = _max_settings(settings)
+    notifier = MaxNotifier(
+        configured,
+        client=httpx.Client(
+            base_url=configured.max_api_base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    with pytest.raises(ConfigurationError, match="Webhook"):
+        notifier.recent_recipients()
+
+
+def test_max_recent_recipients_returns_empty_without_updates_or_webhook(settings):
+    requested_paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_paths.append(request.url.path)
+        if request.url.path == "/me":
+            return httpx.Response(200, json={"user_id": 999, "is_bot": True})
+        if request.url.path == "/updates":
+            return httpx.Response(200, json={"updates": [], "marker": 10})
+        if request.url.path == "/subscriptions":
+            return httpx.Response(200, json={"subscriptions": []})
+        raise AssertionError(f"Неожиданный путь: {request.url.path}")
+
+    configured = _max_settings(settings)
+    notifier = MaxNotifier(
+        configured,
+        client=httpx.Client(
+            base_url=configured.max_api_base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    assert notifier.recent_recipients() == []
+    assert requested_paths == ["/me", "/updates", "/subscriptions"]
 
 
 def test_split_max_text_respects_api_limit():
