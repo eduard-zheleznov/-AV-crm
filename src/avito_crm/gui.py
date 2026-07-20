@@ -40,6 +40,17 @@ YANDEX_SMTP_HELP_URL = (
 )
 
 
+def _env_flag(values: dict[str, str], name: str, default: bool) -> bool:
+    raw = values.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
 class DesktopApp:
     def __init__(self, root: tk.Tk, project_root: Path) -> None:
         self.root = root
@@ -65,9 +76,21 @@ class DesktopApp:
         self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
         self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
         self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
+        self.telegram_completion_primary_var = tk.BooleanVar(
+            value=_env_flag(values, "TELEGRAM_COMPLETION_PRIMARY", True)
+        )
+        self.telegram_completion_backup_var = tk.BooleanVar(
+            value=_env_flag(values, "TELEGRAM_COMPLETION_BACKUP", True)
+        )
         self.max_token_var = tk.StringVar(value=values.get("MAX_BOT_TOKEN", ""))
         self.max_primary_var = tk.StringVar(value=values.get("MAX_PRIMARY_RECIPIENTS", ""))
         self.max_backup_var = tk.StringVar(value=values.get("MAX_BACKUP_RECIPIENTS", ""))
+        self.max_completion_primary_var = tk.BooleanVar(
+            value=_env_flag(values, "MAX_COMPLETION_PRIMARY", True)
+        )
+        self.max_completion_backup_var = tk.BooleanVar(
+            value=_env_flag(values, "MAX_COMPLETION_BACKUP", True)
+        )
         self.telegram_reminders_var = tk.StringVar(
             value=values.get("TELEGRAM_CAPTCHA_REMINDER_MINUTES", "30,60")
         )
@@ -83,6 +106,12 @@ class DesktopApp:
         self.smtp_password_var = tk.StringVar(value=values.get("SMTP_PASSWORD", ""))
         self.email_primary_var = tk.StringVar(value=values.get("EMAIL_PRIMARY_RECIPIENTS", ""))
         self.email_backup_var = tk.StringVar(value=values.get("EMAIL_BACKUP_RECIPIENTS", ""))
+        self.email_completion_primary_var = tk.BooleanVar(
+            value=_env_flag(values, "EMAIL_COMPLETION_PRIMARY", True)
+        )
+        self.email_completion_backup_var = tk.BooleanVar(
+            value=_env_flag(values, "EMAIL_COMPLETION_BACKUP", True)
+        )
         self.telegram_summary_var = tk.StringVar()
         self.avito_profile_var = tk.StringVar()
         self.telegram_dialog: tk.Toplevel | None = None
@@ -116,6 +145,12 @@ class DesktopApp:
 
         style.configure("App.TFrame", background="#F4F6FA")
         style.configure("Card.TFrame", background="#FFFFFF")
+        style.configure(
+            "Card.TCheckbutton",
+            background="#FFFFFF",
+            foreground="#344054",
+            font=("Segoe UI", 9),
+        )
         style.configure(
             "Title.TLabel",
             background="#F4F6FA",
@@ -501,8 +536,8 @@ class DesktopApp:
         dialog = tk.Toplevel(self.root)
         self.telegram_dialog = dialog
         dialog.title("Telegram и ожидание капчи")
-        dialog.geometry("780x430")
-        dialog.minsize(700, 420)
+        dialog.geometry("780x480")
+        dialog.minsize(700, 460)
         dialog.transient(self.root)
         dialog.configure(bg="#F4F6FA")
 
@@ -557,8 +592,26 @@ class DesktopApp:
             style="Hint.TLabel",
         ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
 
+        completion = ttk.Frame(card, style="Card.TFrame")
+        completion.grid(row=6, column=0, columnspan=3, sticky="w", pady=(14, 0))
+        ttk.Label(completion, text="Итоги запуска", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 14)
+        )
+        ttk.Checkbutton(
+            completion,
+            text="основным",
+            variable=self.telegram_completion_primary_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            completion,
+            text="резервным",
+            variable=self.telegram_completion_backup_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=2, sticky="w", padx=(16, 0))
+
         timings = ttk.Frame(card, style="Card.TFrame")
-        timings.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        timings.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(16, 0))
         timings.columnconfigure(1, weight=1)
         ttk.Label(timings, text="Напоминания, мин", style="Field.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 12)
@@ -583,10 +636,10 @@ class DesktopApp:
             style="Hint.TLabel",
             wraplength=700,
             justify="left",
-        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(16, 0))
+        ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(16, 0))
 
         buttons = ttk.Frame(card, style="Card.TFrame")
-        buttons.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        buttons.grid(row=9, column=0, columnspan=3, sticky="ew", pady=(22, 0))
         buttons.columnconfigure(0, weight=1)
         ttk.Button(
             buttons,
@@ -625,8 +678,8 @@ class DesktopApp:
         dialog = tk.Toplevel(self.root)
         self.max_dialog = dialog
         dialog.title("MAX и ожидание капчи")
-        dialog.geometry("800x470")
-        dialog.minsize(720, 450)
+        dialog.geometry("800x520")
+        dialog.minsize(720, 500)
         dialog.transient(self.root)
         dialog.configure(bg="#F4F6FA")
 
@@ -683,8 +736,26 @@ class DesktopApp:
             justify="left",
         ).grid(row=5, column=1, columnspan=2, sticky="w", pady=(5, 0))
 
+        completion = ttk.Frame(card, style="Card.TFrame")
+        completion.grid(row=6, column=0, columnspan=3, sticky="w", pady=(14, 0))
+        ttk.Label(completion, text="Итоги запуска", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 14)
+        )
+        ttk.Checkbutton(
+            completion,
+            text="основным",
+            variable=self.max_completion_primary_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            completion,
+            text="резервным",
+            variable=self.max_completion_backup_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=2, sticky="w", padx=(16, 0))
+
         timings = ttk.Frame(card, style="Card.TFrame")
-        timings.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(16, 0))
+        timings.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(16, 0))
         timings.columnconfigure(1, weight=1)
         ttk.Label(timings, text="Напоминания, мин", style="Field.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 12)
@@ -700,7 +771,7 @@ class DesktopApp:
         )
 
         buttons = ttk.Frame(card, style="Card.TFrame")
-        buttons.grid(row=7, column=0, columnspan=3, sticky="ew", pady=(22, 0))
+        buttons.grid(row=8, column=0, columnspan=3, sticky="ew", pady=(22, 0))
         buttons.columnconfigure(0, weight=1)
         ttk.Button(
             buttons,
@@ -745,8 +816,8 @@ class DesktopApp:
         dialog = tk.Toplevel(self.root)
         self.email_dialog = dialog
         dialog.title("Email и ожидание капчи")
-        dialog.geometry("820x560")
-        dialog.minsize(760, 540)
+        dialog.geometry("820x610")
+        dialog.minsize(760, 590)
         dialog.transient(self.root)
         dialog.configure(bg="#F4F6FA")
 
@@ -824,8 +895,26 @@ class DesktopApp:
             style="Hint.TLabel",
         ).grid(row=8, column=1, columnspan=3, sticky="w", pady=(5, 0))
 
+        completion = ttk.Frame(card, style="Card.TFrame")
+        completion.grid(row=9, column=0, columnspan=4, sticky="w", pady=(14, 0))
+        ttk.Label(completion, text="Итоги запуска", style="Field.TLabel").grid(
+            row=0, column=0, sticky="w", padx=(0, 14)
+        )
+        ttk.Checkbutton(
+            completion,
+            text="основным",
+            variable=self.email_completion_primary_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Checkbutton(
+            completion,
+            text="резервным",
+            variable=self.email_completion_backup_var,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=2, sticky="w", padx=(16, 0))
+
         timings = ttk.Frame(card, style="Card.TFrame")
-        timings.grid(row=9, column=0, columnspan=4, sticky="ew", pady=(16, 0))
+        timings.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(16, 0))
         timings.columnconfigure(1, weight=1)
         ttk.Label(timings, text="Напоминания, мин", style="Field.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 12)
@@ -841,7 +930,7 @@ class DesktopApp:
         )
 
         buttons = ttk.Frame(card, style="Card.TFrame")
-        buttons.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(22, 0))
+        buttons.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(22, 0))
         buttons.columnconfigure(1, weight=1)
         ttk.Button(
             buttons,
@@ -900,6 +989,8 @@ class DesktopApp:
             "TELEGRAM_BOT_TOKEN": token,
             "TELEGRAM_PRIMARY_CHAT_IDS": ",".join(primary),
             "TELEGRAM_BACKUP_CHAT_IDS": ",".join(backup),
+            "TELEGRAM_COMPLETION_PRIMARY": _bool_text(self.telegram_completion_primary_var.get()),
+            "TELEGRAM_COMPLETION_BACKUP": _bool_text(self.telegram_completion_backup_var.get()),
         }
 
     def _max_env_values(
@@ -923,6 +1014,8 @@ class DesktopApp:
             "MAX_BOT_TOKEN": token,
             "MAX_PRIMARY_RECIPIENTS": ",".join(primary),
             "MAX_BACKUP_RECIPIENTS": ",".join(backup),
+            "MAX_COMPLETION_PRIMARY": _bool_text(self.max_completion_primary_var.get()),
+            "MAX_COMPLETION_BACKUP": _bool_text(self.max_completion_backup_var.get()),
         }
 
     def _email_env_values(self, *, require_credentials: bool = False) -> dict[str, str]:
@@ -959,6 +1052,8 @@ class DesktopApp:
             "SMTP_FROM_ADDRESS": username,
             "EMAIL_PRIMARY_RECIPIENTS": ",".join(primary),
             "EMAIL_BACKUP_RECIPIENTS": ",".join(backup),
+            "EMAIL_COMPLETION_PRIMARY": _bool_text(self.email_completion_primary_var.get()),
+            "EMAIL_COMPLETION_BACKUP": _bool_text(self.email_completion_backup_var.get()),
         }
 
     def _notification_env_values(

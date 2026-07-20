@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -24,17 +25,64 @@ class MatrixSheet:
         self.values = values or []
         self.batch = []
 
-    def get(self, _range_name):
-        return [row[:] for row in self.values]
+    def get(self, range_name):
+        start_row, start_col, end_row, end_col = _range_bounds(range_name)
+        end_row = end_row or len(self.values)
+        end_col = end_col or max((len(row) for row in self.values), default=0)
+        result = [
+            [
+                self.values[row][column]
+                if row < len(self.values) and column < len(self.values[row])
+                else ""
+                for column in range(start_col, end_col)
+            ]
+            for row in range(start_row, end_row)
+        ]
+        for row in result:
+            while row and row[-1] == "":
+                row.pop()
+        while result and not result[-1]:
+            result.pop()
+        return result
 
     def batch_update(self, data, **_kwargs):
         self.batch.extend(data)
+        for item in data:
+            if isinstance(item, dict) and "range" in item and "values" in item:
+                self.update(item["values"], item["range"])
 
-    def update(self, values, _range_name, **_kwargs):
-        self.values = [row[:] for row in values]
+    def update(self, values, range_name, **_kwargs):
+        start_row, start_col, _end_row, _end_col = _range_bounds(range_name)
+        required_rows = start_row + len(values)
+        while len(self.values) < required_rows:
+            self.values.append([])
+        for row_offset, row_values in enumerate(values):
+            target = self.values[start_row + row_offset]
+            required_cols = start_col + len(row_values)
+            if len(target) < required_cols:
+                target.extend([""] * (required_cols - len(target)))
+            target[start_col:required_cols] = list(row_values)
 
     def get_all_values(self):
         return [row[:] for row in self.values]
+
+
+def _range_bounds(value):
+    matches = re.findall(r"([A-Z]+)(\d+)", value.upper())
+    if not matches:
+        return 0, 0, None, None
+
+    def column_number(letters):
+        result = 0
+        for letter in letters:
+            result = result * 26 + ord(letter) - 64
+        return result - 1
+
+    start_col, start_row = column_number(matches[0][0]), int(matches[0][1]) - 1
+    if len(matches) == 1:
+        return start_row, start_col, start_row + 1, start_col + 1
+    end_col, end_row = column_number(matches[1][0]) + 1, int(matches[1][1])
+    return start_row, start_col, end_row, end_col
 
 
 class MissingWorksheet(Exception):
@@ -168,8 +216,9 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
     analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
     assert analytics.values[0][0] == ANALYTICS_MARKER
     assert analytics.values[3][1] == 30
-    assert "SUMIFS" in analytics.values[7][1]
-    assert "TODAY" in analytics.values[17][0]
+    assert analytics.values[6][0] == "Запусков"
+    assert analytics.values[6][1] == 0
+    assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", analytics.values[17][0])
 
 
 def test_history_append_is_idempotent_after_a_crash(settings):

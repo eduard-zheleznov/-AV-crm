@@ -74,8 +74,6 @@ class Pipeline:
         notifier = NotificationRouter(self.settings)
 
         try:
-            initial_items = self.source.list_actionable(include_manual=self.include_manual)
-            initial_row_ids = {item.row_id for item in initial_items}
             with ExitStack() as stack:
                 crm: LpTrackerClient | None = None
                 destination = None
@@ -90,15 +88,19 @@ class Pipeline:
                         destination.field_name,
                         self.settings.lptracker_field_value,
                     )
-                needs_browser = self.mode == "capture" or (
-                    self.mode == "full"
-                    and any(
-                        not normalize_phone(
+                    self._sync_crm_rows(crm, destination.project_id, summary)
+                initial_items = self.source.list_actionable(include_manual=self.include_manual)
+                initial_row_ids = {item.row_id for item in initial_items}
+                needs_browser = self.mode == "capture" or any(
+                    self._is_repeat_flow(item)
+                    or (
+                        self.mode == "full"
+                        and not normalize_phone(
                             str(item.values.get(self.source.columns.phone, "") or "")
                         )
-                        for item in initial_items
-                        if self._eligible_for_mode(item)
                     )
+                    for item in initial_items
+                    if self._eligible_for_mode(item)
                 )
                 if needs_browser:
                     ocr = PhoneOcr(self.settings.tesseract_cmd, self.settings.ocr_min_agreement)
@@ -141,7 +143,8 @@ class Pipeline:
                             summary.stopped_reason = "Достигнут заданный лимит"
                             should_stop = True
                             break
-                        needs_phone = not normalize_phone(
+                        repeat_flow = self._is_repeat_flow(item)
+                        needs_phone = repeat_flow or not normalize_phone(
                             str(item.values.get(self.source.columns.phone, "") or "")
                         )
                         if browser and needs_phone and browser.session_limit_reached:
@@ -173,23 +176,36 @@ class Pipeline:
                             )
                             summary.invalid += 1
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             consecutive_failures = 0
                             self._report_progress(progress, summary, item.row_id)
                             continue
 
-                        if self._reconcile_from_state(canonical_url, item, summary.run_id):
+                        if not repeat_flow and self._reconcile_from_state(
+                            canonical_url, item, summary.run_id
+                        ):
                             LOGGER.info(
                                 "Строка %s восстановлена из локального журнала", item.row_id
                             )
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             continue
 
                         attempts = item.attempts + 1
-                        phone = normalize_phone(
+                        stored_phone = normalize_phone(
                             str(item.values.get(self.source.columns.phone, "") or "")
+                        )
+                        phone = None if repeat_flow else stored_phone
+                        repeat_phone_attempts = self._int_value(
+                            item.values.get(self.source.columns.repeat_phone_attempts)
+                        )
+                        existing_crm_lead_id = str(
+                            item.values.get(self.source.columns.crm_lead_id, "") or ""
                         )
                         self._finalize(
                             canonical_url,
@@ -197,8 +213,12 @@ class Pipeline:
                             QueuePatch(
                                 status=ItemStatus.PROCESSING,
                                 attempts=attempts,
-                                phone=phone or "",
+                                phone=stored_phone or "",
+                                crm_lead_id=existing_crm_lead_id,
                                 run_id=summary.run_id,
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
                             ),
                         )
 
@@ -231,6 +251,26 @@ class Pipeline:
                             if item.row_id not in captured_rows:
                                 captured_rows.add(item.row_id)
                                 summary.captured += 1
+
+                            # Persist the exact revealed number before the CRM request.
+                            # If the process stops after LPTracker creates a lead, the
+                            # next run can recover it even when Avito later changes its
+                            # temporary forwarding number.
+                            if self.live and self.mode in {"crm", "full"}:
+                                self._finalize(
+                                    canonical_url,
+                                    item,
+                                    QueuePatch(
+                                        status=ItemStatus.PROCESSING,
+                                        attempts=attempts,
+                                        phone=phone,
+                                        crm_lead_id=existing_crm_lead_id,
+                                        run_id=summary.run_id,
+                                        repeat_phone_attempts=(
+                                            repeat_phone_attempts if repeat_flow else None
+                                        ),
+                                    ),
+                                )
                             if self.mode == "capture" or not self.live:
                                 self._finalize(
                                     canonical_url,
@@ -245,13 +285,30 @@ class Pipeline:
                                 )
                                 consecutive_failures = 0
                                 unresolved_technical_rows.discard(item.row_id)
-                                summary.errors = len(unresolved_technical_rows)
+                                summary.errors = summary.crm_sync_errors + len(
+                                    unresolved_technical_rows
+                                )
                                 self._report_progress(progress, summary, item.row_id)
                                 continue
 
                             if crm is None or destination is None:
                                 raise RuntimeError("CRM client was not initialized")
-                            write = crm.create_for_phone(phone, canonical_url, destination)
+                            repeat_funnel_id = (
+                                getattr(self, "_repeat_funnel_id", None) if repeat_flow else None
+                            )
+                            if repeat_flow and repeat_funnel_id is None:
+                                repeat_funnel_id = crm.resolve_funnel_step_id(
+                                    destination.project_id,
+                                    self.settings.lptracker_repeat_funnel_name,
+                                )
+                            write = crm.create_for_phone(
+                                phone,
+                                canonical_url,
+                                destination,
+                                force_create=repeat_flow,
+                                funnel_id=repeat_funnel_id,
+                                repeat=repeat_flow,
+                            )
                             self._finalize(
                                 canonical_url,
                                 item,
@@ -259,27 +316,65 @@ class Pipeline:
                                     status=write.status,
                                     attempts=attempts,
                                     phone=phone,
-                                    crm_lead_id=write.lead_id or "",
+                                    crm_lead_id=(
+                                        str(
+                                            item.values.get(self.source.columns.crm_lead_id, "")
+                                            or ""
+                                        )
+                                        if repeat_flow
+                                        else write.lead_id or ""
+                                    ),
                                     error=(
-                                        "" if write.status == ItemStatus.DONE else write.detail
+                                        write.detail
+                                        if "не удалось" in write.detail.casefold()
+                                        else ""
+                                        if write.status == ItemStatus.DONE
+                                        else write.detail
                                     ),
                                     processed_at=utc_now(),
                                     run_id=summary.run_id,
+                                    funnel_stage=(
+                                        self.settings.lptracker_repeat_funnel_name
+                                        if repeat_flow and write.status == ItemStatus.DONE
+                                        else None
+                                    ),
+                                    crm_create_count=(
+                                        2
+                                        if repeat_flow and write.status == ItemStatus.DONE
+                                        else 1
+                                        if not repeat_flow and write.status == ItemStatus.DONE
+                                        else None
+                                    ),
+                                    repeat_crm_lead_id=(
+                                        write.lead_id or "" if repeat_flow else None
+                                    ),
+                                    repeat_phone_attempts=(
+                                        repeat_phone_attempts if repeat_flow else None
+                                    ),
                                 ),
                             )
                             if write.status == ItemStatus.DONE:
-                                summary.created += 1
-                                LOGGER.info(
-                                    "Строка %s: лид %s создан", item.row_id, write.lead_id
-                                )
+                                if write.created:
+                                    summary.created += 1
+                                    if repeat_flow:
+                                        summary.repeat_created += 1
+                                    LOGGER.info(
+                                        "Строка %s: лид %s создан", item.row_id, write.lead_id
+                                    )
+                                else:
+                                    LOGGER.info(
+                                        "Строка %s: восстановлен ранее созданный лид %s",
+                                        item.row_id,
+                                        write.lead_id,
+                                    )
                             else:
                                 summary.duplicates += 1
-                                LOGGER.info(
-                                    "Строка %s: дубликат, создание пропущено", item.row_id
-                                )
+                                LOGGER.info("Строка %s: дубликат, создание пропущено", item.row_id)
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             self._report_progress(progress, summary, item.row_id)
                         except InactiveListingError as exc:
                             self._finalize_expected(
@@ -289,11 +384,17 @@ class Pipeline:
                                 ItemStatus.INACTIVE,
                                 str(exc),
                                 summary.run_id,
+                                phone=stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
                             )
                             summary.inactive += 1
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             LOGGER.info("Строка %s: %s", item.row_id, exc)
                             self._report_progress(progress, summary, item.row_id)
                         except PhoneButtonUnavailableError as exc:
@@ -304,18 +405,37 @@ class Pipeline:
                                 ItemStatus.UNAVAILABLE,
                                 str(exc),
                                 summary.run_id,
+                                phone=stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
                             )
                             summary.unavailable += 1
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             LOGGER.info("Строка %s: %s", item.row_id, exc)
                             self._report_progress(progress, summary, item.row_id)
                         except PhoneNotFoundError as exc:
-                            final_attempt = attempts >= self.source.max_attempts
-                            status = (
-                                ItemStatus.NO_PHONE if final_attempt else ItemStatus.RETRY_PHONE
+                            if repeat_flow:
+                                repeat_phone_attempts += 1
+                            final_attempt = (
+                                repeat_phone_attempts >= self.settings.repeat_phone_max_attempts
+                                if repeat_flow
+                                else attempts >= self.source.max_attempts
                             )
+                            if repeat_flow:
+                                status = (
+                                    ItemStatus.REPEAT_EXHAUSTED
+                                    if final_attempt
+                                    else ItemStatus.REPEAT_RETRY_PHONE
+                                )
+                            else:
+                                status = (
+                                    ItemStatus.NO_PHONE if final_attempt else ItemStatus.RETRY_PHONE
+                                )
                             self._finalize_expected(
                                 canonical_url,
                                 item,
@@ -323,9 +443,15 @@ class Pipeline:
                                 status,
                                 str(exc),
                                 summary.run_id,
+                                phone=stored_phone or "" if repeat_flow else "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
                             )
                             if final_attempt:
                                 summary.phone_failed += 1
+                                if repeat_flow:
+                                    summary.repeat_exhausted += 1
                                 LOGGER.info(
                                     "Строка %s: номер не открыт после %s попыток",
                                     item.row_id,
@@ -341,7 +467,9 @@ class Pipeline:
                                 )
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             self._report_progress(progress, summary, item.row_id)
                         except ManualActionRequired as exc:
                             self._finalize_expected(
@@ -351,21 +479,39 @@ class Pipeline:
                                 ItemStatus.MANUAL_REQUIRED,
                                 str(exc),
                                 summary.run_id,
-                                phone=phone or "",
+                                phone=phone or stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
                             )
                             summary.manual_required += 1
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             summary.stopped_reason = str(exc)
                             should_stop = True
                             self._report_progress(progress, summary, item.row_id)
                             break
                         except Exception as exc:
                             error = _safe_error(exc)
-                            final_attempt = attempts >= self.source.max_attempts
+                            repeat_reveal_failed = repeat_flow and not phone
+                            if repeat_reveal_failed:
+                                repeat_phone_attempts += 1
+                            repeat_reveal_exhausted = (
+                                repeat_reveal_failed
+                                and repeat_phone_attempts >= self.settings.repeat_phone_max_attempts
+                            )
+                            final_attempt = (
+                                repeat_reveal_exhausted or attempts >= self.source.max_attempts
+                            )
                             status = (
-                                ItemStatus.ERROR
+                                ItemStatus.REPEAT_EXHAUSTED
+                                if repeat_reveal_exhausted
+                                else ItemStatus.ERROR
                                 if final_attempt
+                                else ItemStatus.REPEAT_RETRY_TECHNICAL
+                                if repeat_flow
                                 else ItemStatus.RETRY_TECHNICAL
                             )
                             self._finalize_expected(
@@ -375,20 +521,25 @@ class Pipeline:
                                 status,
                                 error,
                                 summary.run_id,
-                                phone=phone or "",
+                                phone=phone or stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
                             )
                             if not final_attempt:
                                 summary.retries += 1
+                            if repeat_reveal_exhausted:
+                                summary.phone_failed += 1
+                                summary.repeat_exhausted += 1
                             unresolved_technical_rows.add(item.row_id)
-                            summary.errors = len(unresolved_technical_rows)
+                            summary.errors = summary.crm_sync_errors + len(
+                                unresolved_technical_rows
+                            )
                             consecutive_failures += 1
                             level = logging.ERROR if final_attempt else logging.WARNING
                             LOGGER.log(level, "Строка %s: %s", item.row_id, error)
                             self._report_progress(progress, summary, item.row_id)
-                            if (
-                                consecutive_failures
-                                >= self.settings.max_consecutive_failures
-                            ):
+                            if consecutive_failures >= self.settings.max_consecutive_failures:
                                 summary.stopped_reason = (
                                     "Аварийная остановка после "
                                     f"{consecutive_failures} последовательных "
@@ -403,9 +554,7 @@ class Pipeline:
                         break
 
                 if not summary.stopped_reason:
-                    summary.stopped_reason = (
-                        "Очередь обработана: все доступные попытки завершены"
-                    )
+                    summary.stopped_reason = "Очередь обработана: все доступные попытки завершены"
         except KeyboardInterrupt:
             summary.stopped_reason = "Остановлено с клавиатуры"
             LOGGER.warning(summary.stopped_reason)
@@ -421,9 +570,281 @@ class Pipeline:
                 notifier.close()
         return summary
 
-    def _notify_completion(
-        self, notifier: NotificationRouter, summary: RunSummary
+    def _sync_crm_rows(
+        self,
+        crm: LpTrackerClient,
+        project_id: int,
+        summary: RunSummary,
     ) -> None:
+        """Refresh funnel stages and schedule only bounded autoresponder repeats."""
+        all_items = self.source.list_all()
+        sync_items: list[QueueItem] = []
+        self._repeat_funnel_id = None
+
+        for item in all_items:
+            count = self._int_value(item.values.get(self.source.columns.crm_create_count))
+            first_lead_id = str(item.values.get(self.source.columns.crm_lead_id, "") or "").strip()
+            repeat_lead_id = str(
+                item.values.get(self.source.columns.repeat_crm_lead_id, "") or ""
+            ).strip()
+
+            # Safe migration for rows created before the two new columns existed.
+            if count == 0 and repeat_lead_id:
+                count = 2
+                self._update_metadata(item, crm_create_count=2)
+            elif (
+                count == 0
+                and first_lead_id
+                and self._normalized_text(item.status) == ItemStatus.DONE
+            ):
+                count = 1
+                self._update_metadata(item, crm_create_count=1)
+
+            # A lead can be committed by LPTracker while the follow-up comment
+            # temporarily fails. Retry only that missing comment on the next run;
+            # never create another lead merely to repair the URL field.
+            current_error = str(item.values.get(self.source.columns.error, "") or "")
+            if count in {1, 2} and "комментар" in self._normalized_text(current_error):
+                comment_lead_id = repeat_lead_id if count == 2 else first_lead_id
+                if comment_lead_id:
+                    try:
+                        crm.add_listing_comment(comment_lead_id, item.url)
+                        self._update_metadata(item, error="")
+                    except Exception as exc:
+                        summary.crm_sync_errors += 1
+                        summary.errors += 1
+                        LOGGER.warning(
+                            "Строка %s: не удалось дописать ссылку в комментарий CRM: %s",
+                            item.row_id,
+                            exc,
+                        )
+
+            if count == 1:
+                sync_items.append(item)
+
+        if not sync_items:
+            return
+
+        steps = crm.list_funnel_steps(project_id)
+        repeat_matches = [
+            step
+            for step in steps
+            if self._normalized_text(str(step.get("name", "")))
+            == self._normalized_text(self.settings.lptracker_repeat_funnel_name)
+        ]
+        if len(repeat_matches) == 1:
+            try:
+                self._repeat_funnel_id = int(repeat_matches[0]["id"])
+            except (KeyError, TypeError, ValueError):
+                self._repeat_funnel_id = None
+
+        autoresponder = self._normalized_text(self.settings.lptracker_autoresponder_funnel_name)
+        for item in sync_items:
+            count = self._int_value(item.values.get(self.source.columns.crm_create_count))
+            first_lead_id = str(item.values.get(self.source.columns.crm_lead_id, "") or "").strip()
+            repeat_lead_id = str(
+                item.values.get(self.source.columns.repeat_crm_lead_id, "") or ""
+            ).strip()
+
+            if count != 1:
+                continue
+
+            try:
+                lead_id = first_lead_id
+                if not lead_id:
+                    phone = str(item.values.get(self.source.columns.phone, "") or "").strip()
+                    lead = crm.find_lead_for_listing(
+                        project_id,
+                        phone,
+                        item.url,
+                        repeat=False,
+                    )
+                    if not lead or not lead.get("id"):
+                        raise SourceError("Не найден первый лид по CRM ID, телефону и ссылке")
+                    lead_id = str(lead["id"])
+                stage = crm.get_lead_stage_name(
+                    lead_id,
+                    project_id=project_id,
+                    funnel_steps=steps,
+                )
+                if not stage:
+                    raise SourceError("LPTracker не вернул текущий шаг воронки лида")
+                summary.stage_synced += 1
+                repeat_attempts = self._int_value(
+                    item.values.get(self.source.columns.repeat_phone_attempts)
+                )
+
+                # If the previous process stopped after LPTracker accepted the
+                # second lead, recover it by the phone persisted immediately before
+                # the API request. This wins over both the current stage and the
+                # three-attempt cap because the repeat already exists.
+                stored_phone = str(item.values.get(self.source.columns.phone, "") or "").strip()
+                if not repeat_lead_id and stored_phone:
+                    recovered_repeat = crm.find_lead_for_listing(
+                        project_id,
+                        stored_phone,
+                        item.url,
+                        repeat=True,
+                    )
+                    if recovered_repeat and recovered_repeat.get("id"):
+                        self._update_metadata(
+                            item,
+                            status=ItemStatus.DONE,
+                            funnel_stage=self.settings.lptracker_repeat_funnel_name,
+                            crm_create_count=2,
+                            repeat_crm_lead_id=str(recovered_repeat["id"]),
+                            error="",
+                            crm_lead_id=lead_id,
+                        )
+                        LOGGER.info(
+                            "Строка %s: восстановлен повторный лид %s после прерывания",
+                            item.row_id,
+                            recovered_repeat["id"],
+                        )
+                        continue
+                if self._normalized_text(item.status) in {
+                    ItemStatus.INACTIVE.value,
+                    ItemStatus.UNAVAILABLE.value,
+                    ItemStatus.INVALID.value,
+                }:
+                    self._update_metadata(
+                        item,
+                        funnel_stage=stage,
+                        crm_create_count=1,
+                        crm_lead_id=lead_id,
+                    )
+                    continue
+                if self._normalized_text(stage) != autoresponder:
+                    self._update_metadata(
+                        item,
+                        status=ItemStatus.DONE,
+                        funnel_stage=stage,
+                        crm_create_count=1,
+                        error="",
+                        crm_lead_id=lead_id,
+                    )
+                    continue
+                if repeat_attempts >= self.settings.repeat_phone_max_attempts:
+                    already_exhausted = (
+                        self._normalized_text(item.status) == ItemStatus.REPEAT_EXHAUSTED.value
+                    )
+                    self._update_metadata(
+                        item,
+                        status=ItemStatus.REPEAT_EXHAUSTED,
+                        funnel_stage=stage,
+                        crm_create_count=1,
+                        error=(
+                            "Повторное открытие номера прекращено: использованы "
+                            f"все {self.settings.repeat_phone_max_attempts} попытки"
+                        ),
+                        crm_lead_id=lead_id,
+                    )
+                    # Count only the transition in this run. Rows remain terminal
+                    # forever, but must not inflate completion analytics on every
+                    # later launch while their CRM stage is still autoresponder.
+                    if not already_exhausted:
+                        summary.repeat_exhausted += 1
+                    continue
+                if self._repeat_funnel_id is None:
+                    available = ", ".join(str(step.get("name", "")) for step in steps[:30])
+                    raise SourceError(
+                        f"Шаг воронки {self.settings.lptracker_repeat_funnel_name!r} "
+                        f"не найден однозначно. Доступно: {available}"
+                    )
+                current_status = self._normalized_text(item.status)
+                attempts = (
+                    item.attempts
+                    if current_status
+                    in {
+                        ItemStatus.REPEAT_PENDING.value,
+                        ItemStatus.REPEAT_RETRY_PHONE.value,
+                        ItemStatus.REPEAT_RETRY_TECHNICAL.value,
+                    }
+                    else 0
+                )
+                self._update_metadata(
+                    item,
+                    status=ItemStatus.REPEAT_PENDING,
+                    attempts=attempts,
+                    funnel_stage=stage,
+                    crm_create_count=1,
+                    error="",
+                    crm_lead_id=lead_id,
+                )
+            except Exception as exc:
+                summary.crm_sync_errors += 1
+                summary.errors += 1
+                LOGGER.error("Строка %s: не удалось обновить шаг CRM: %s", item.row_id, exc)
+                self._update_metadata(
+                    item,
+                    status=item.status or ItemStatus.DONE,
+                    crm_create_count=1,
+                    error=f"Синхронизация CRM: {_safe_error(exc)}",
+                )
+
+    def _update_metadata(
+        self,
+        item: QueueItem,
+        *,
+        status: ItemStatus | str | None = None,
+        attempts: int | None = None,
+        phone: str | None = None,
+        crm_lead_id: str | None = None,
+        error: str | None = None,
+        funnel_stage: str | None = None,
+        crm_create_count: int | None = None,
+        repeat_crm_lead_id: str | None = None,
+        repeat_phone_attempts: int | None = None,
+    ) -> None:
+        patch = QueuePatch(
+            status=str(status if status is not None else item.status),
+            attempts=item.attempts if attempts is None else attempts,
+            phone=(
+                str(item.values.get(self.source.columns.phone, "") or "")
+                if phone is None
+                else phone
+            ),
+            crm_lead_id=(
+                str(item.values.get(self.source.columns.crm_lead_id, "") or "")
+                if crm_lead_id is None
+                else crm_lead_id
+            ),
+            error=(
+                str(item.values.get(self.source.columns.error, "") or "")
+                if error is None
+                else error
+            ),
+            processed_at=utc_now(),
+            run_id="crm-sync",
+            funnel_stage=funnel_stage,
+            crm_create_count=crm_create_count,
+            repeat_crm_lead_id=repeat_crm_lead_id,
+            repeat_phone_attempts=repeat_phone_attempts,
+        )
+        canonical_url = canonical_avito_url(item.url)
+        self._finalize(canonical_url, item, patch)
+
+    def _is_repeat_flow(self, item: QueueItem) -> bool:
+        return self._int_value(
+            item.values.get(self.source.columns.crm_create_count)
+        ) == 1 and self._normalized_text(item.status) in {
+            ItemStatus.REPEAT_PENDING.value,
+            ItemStatus.REPEAT_RETRY_PHONE.value,
+            ItemStatus.REPEAT_RETRY_TECHNICAL.value,
+        }
+
+    @staticmethod
+    def _normalized_text(value: object) -> str:
+        return " ".join(str(value or "").split()).casefold()
+
+    @staticmethod
+    def _int_value(value: object) -> int:
+        try:
+            return int(float(str(value or "0").strip()))
+        except (TypeError, ValueError):
+            return 0
+
+    def _notify_completion(self, notifier: NotificationRouter, summary: RunSummary) -> None:
         if not notifier.enabled:
             return
         try:
@@ -436,9 +857,7 @@ class Pipeline:
         except NotificationError as exc:
             LOGGER.warning("Итоговое уведомление не доставлено: %s", exc)
         except Exception as exc:
-            LOGGER.warning(
-                "Итоговое уведомление не доставлено (%s)", exc.__class__.__name__
-            )
+            LOGGER.warning("Итоговое уведомление не доставлено (%s)", exc.__class__.__name__)
 
     @staticmethod
     def _report_progress(
@@ -461,7 +880,7 @@ class Pipeline:
         if self.mode == "capture":
             return not phone and status != ItemStatus.CAPTURED
         if self.mode == "crm":
-            return bool(phone)
+            return self._is_repeat_flow(item) or bool(phone)
         return True
 
     def _goal_reached(self, summary: RunSummary, limit: int) -> bool:
@@ -483,6 +902,10 @@ class Pipeline:
                 error=str(existing.get("error", "")),
                 processed_at=str(existing.get("updated_at", utc_now())),
                 run_id=run_id,
+                funnel_stage=str(existing.get("funnel_stage", "")),
+                crm_create_count=int(existing.get("crm_create_count", 0) or 0),
+                repeat_crm_lead_id=str(existing.get("repeat_crm_lead_id", "")),
+                repeat_phone_attempts=int(existing.get("repeat_phone_attempts", 0) or 0),
             ),
         )
         return True
@@ -494,6 +917,16 @@ class Pipeline:
         item.attempts = patch.attempts
         item.values[self.source.columns.status] = str(patch.status)
         item.values[self.source.columns.phone] = patch.phone
+        item.values[self.source.columns.crm_lead_id] = patch.crm_lead_id
+        item.values[self.source.columns.error] = patch.error
+        if patch.funnel_stage is not None:
+            item.values[self.source.columns.funnel_stage] = patch.funnel_stage
+        if patch.crm_create_count is not None:
+            item.values[self.source.columns.crm_create_count] = patch.crm_create_count
+        if patch.repeat_crm_lead_id is not None:
+            item.values[self.source.columns.repeat_crm_lead_id] = patch.repeat_crm_lead_id
+        if patch.repeat_phone_attempts is not None:
+            item.values[self.source.columns.repeat_phone_attempts] = patch.repeat_phone_attempts
 
     def _finalize_expected(
         self,
@@ -505,6 +938,7 @@ class Pipeline:
         run_id: str,
         *,
         phone: str = "",
+        repeat_phone_attempts: int | None = None,
     ) -> None:
         self._finalize(
             canonical_url,
@@ -513,9 +947,11 @@ class Pipeline:
                 status=status,
                 attempts=attempts,
                 phone=phone,
+                crm_lead_id=str(item.values.get(self.source.columns.crm_lead_id, "") or ""),
                 error=detail[:500],
                 processed_at=utc_now(),
                 run_id=run_id,
+                repeat_phone_attempts=repeat_phone_attempts,
             ),
         )
 

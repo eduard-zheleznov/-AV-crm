@@ -18,6 +18,10 @@ class ItemStatus(StrEnum):
     NO_PHONE = "no_phone"
     ERROR = "error"
     MANUAL_REQUIRED = "manual_required"
+    REPEAT_PENDING = "repeat_pending"
+    REPEAT_RETRY_PHONE = "repeat_retry_phone"
+    REPEAT_RETRY_TECHNICAL = "repeat_retry_technical"
+    REPEAT_EXHAUSTED = "repeat_exhausted"
     INVALID = "invalid"
 
 
@@ -27,6 +31,7 @@ TERMINAL_STATUSES = {
     ItemStatus.INACTIVE.value,
     ItemStatus.UNAVAILABLE.value,
     ItemStatus.NO_PHONE.value,
+    ItemStatus.REPEAT_EXHAUSTED.value,
     ItemStatus.INVALID.value,
 }
 
@@ -64,6 +69,7 @@ class CrmWriteResult:
     contact_id: str | None = None
     lead_id: str | None = None
     detail: str = ""
+    created: bool = True
 
 
 @dataclass(slots=True)
@@ -83,6 +89,10 @@ class RunSummary:
     inspected: int = 0
     processed: int = 0
     rounds: int = 0
+    stage_synced: int = 0
+    repeat_created: int = 0
+    repeat_exhausted: int = 0
+    crm_sync_errors: int = 0
     stopped_reason: str = ""
 
 
@@ -95,3 +105,7 @@ class QueuePatch:
     error: str = ""
     processed_at: str = ""
     run_id: str = ""
+    funnel_stage: str | None = None
+    crm_create_count: int | None = None
+    repeat_crm_lead_id: str | None = None
+    repeat_phone_attempts: int | None = None

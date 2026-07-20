@@ -168,45 +168,165 @@ class LpTrackerClient:
         result = self._request("GET", f"/contact/{contact_id}/leads")
         return _ensure_list(result, "список лидов контакта")
 
+    def list_funnel_steps(self, project_id: int) -> list[dict[str, Any]]:
+        result = self._request("GET", f"/project/{project_id}/funnel")
+        if isinstance(result, dict):
+            for key in ("funnels", "stages", "items"):
+                if isinstance(result.get(key), list):
+                    result = result[key]
+                    break
+        return _ensure_list(result, "список шагов воронки")
+
+    def resolve_funnel_step_id(self, project_id: int, name: str) -> int:
+        wanted = _normalized_name(name)
+        steps = self.list_funnel_steps(project_id)
+        matches = [step for step in steps if _normalized_name(str(step.get("name", ""))) == wanted]
+        if len(matches) != 1:
+            available = ", ".join(str(step.get("name", "")) for step in steps[:30])
+            if not matches:
+                raise ConfigurationError(f"Шаг воронки {name!r} не найден. Доступно: {available}")
+            raise ConfigurationError(f"Найдено несколько шагов воронки {name!r}")
+        try:
+            return int(matches[0]["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CrmError(f"Шаг воронки {name!r} не содержит корректный ID") from exc
+
+    def get_lead(self, lead_id: str | int) -> dict[str, Any]:
+        result = self._request("GET", f"/lead/{lead_id}")
+        if not isinstance(result, dict):
+            raise CrmError("LPTracker вернул неожиданные данные лида")
+        return result
+
+    def get_lead_stage_name(
+        self,
+        lead_id: str | int,
+        *,
+        project_id: int,
+        funnel_steps: list[dict[str, Any]] | None = None,
+    ) -> str:
+        lead = self.get_lead(lead_id)
+        steps = funnel_steps if funnel_steps is not None else self.list_funnel_steps(project_id)
+        stage_map = {
+            str(step.get("id", "")): str(step.get("name", "")).strip()
+            for step in steps
+            if step.get("id") is not None
+        }
+        stage_id, direct_name = _extract_funnel_stage(lead)
+        if direct_name:
+            return direct_name
+        if stage_id and stage_id in stage_map:
+            return stage_map[stage_id]
+        return ""
+
+    def find_lead_for_listing(
+        self,
+        project_id: int,
+        phone: str,
+        listing_url: str,
+        *,
+        repeat: bool | None = None,
+    ) -> dict[str, Any] | None:
+        normalized = normalize_phone(phone)
+        if not normalized:
+            return None
+        base_name = f"Авито — {_listing_id(canonical_avito_url(listing_url))}"
+        lead_names = (
+            {f"{base_name} — повторный лид"}
+            if repeat is True
+            else {base_name}
+            if repeat is False
+            else {base_name, f"{base_name} — повторный лид"}
+        )
+        for contact in self.search_contacts(project_id, normalized):
+            contact_id = contact.get("id")
+            if contact_id is None:
+                continue
+            for lead in self.contact_leads(contact_id):
+                if str(lead.get("name", "")).strip() in lead_names:
+                    return lead
+        return None
+
+    def add_listing_comment(self, lead_id: str | int, listing_url: str) -> None:
+        canonical_url = canonical_avito_url(listing_url)
+        self._request("POST", f"/lead/{lead_id}/comment", json={"text": canonical_url})
+
     def create_for_phone(
         self,
         phone: str,
         listing_url: str,
         destination: CrmDestination,
+        *,
+        force_create: bool = False,
+        funnel_id: int | None = None,
+        repeat: bool = False,
     ) -> CrmWriteResult:
         normalized = normalize_phone(phone)
         if not normalized:
             raise CrmError("Нельзя создать лид: номер имеет неверный формат")
         canonical_url = canonical_avito_url(listing_url)
-        contacts = self.search_contacts(destination.project_id, normalized)
-        if contacts and self.settings.duplicate_policy == "skip":
-            return CrmWriteResult(
-                status=ItemStatus.DUPLICATE,
-                contact_id=str(contacts[0].get("id", "")) or None,
-                detail="Контакт с таким номером уже существует; новый лид не создан",
-            )
-
         listing_id = _listing_id(canonical_url)
         lead_name = f"Авито — {listing_id}"
+        if repeat:
+            lead_name += " — повторный лид"
+        contacts = self.search_contacts(destination.project_id, normalized)
+        contact_ids = [
+            str(contact.get("id", "")).strip()
+            for contact in contacts
+            if str(contact.get("id", "")).strip()
+        ]
+
+        # Crash-safe recovery: the API may have created the lead while the process
+        # stopped before its ID reached Google Sheets.  The deterministic listing
+        # name lets the next run recover that exact lead instead of creating another.
+        for existing_contact_id in contact_ids:
+            existing = self._find_existing_lead(
+                existing_contact_id,
+                lead_name,
+                destination.field_id,
+            )
+            if not existing:
+                continue
+            existing_lead_id = str(existing.get("id", "")).strip()
+            if not existing_lead_id:
+                continue
+            detail = "Ранее созданный лид для объявления восстановлен"
+            try:
+                self.add_listing_comment(existing_lead_id, canonical_url)
+            except CrmError as exc:
+                detail += f"; ссылку в комментарий записать не удалось: {exc}"
+                LOGGER.warning(
+                    "Не удалось восстановить комментарий лида %s: %s",
+                    existing_lead_id,
+                    exc,
+                )
+            return CrmWriteResult(
+                status=ItemStatus.DONE,
+                contact_id=existing_contact_id,
+                lead_id=existing_lead_id,
+                detail=detail,
+                created=False,
+            )
+
+        if contacts and self.settings.duplicate_policy == "skip" and not force_create:
+            return CrmWriteResult(
+                status=ItemStatus.DUPLICATE,
+                contact_id=contact_ids[0] if contact_ids else None,
+                detail="Контакт с таким номером уже существует; новый лид не создан",
+                created=False,
+            )
         payload: dict[str, Any] = {
             "name": lead_name,
             "callback": False,
             "custom": {str(destination.field_id): destination.field_value},
             "view": {"source": "Avito", "campaign": "Avito CRM Pipeline"},
         }
+        if funnel_id is not None:
+            payload["funnel"] = int(funnel_id)
         contact_id: str | None = None
         if contacts:
-            contact_id = str(contacts[0].get("id", ""))
-            if not contact_id:
+            if not contact_ids:
                 raise CrmError("LPTracker вернул контакт без ID")
-            existing = self._find_existing_lead(contact_id, lead_name, destination.field_id)
-            if existing:
-                return CrmWriteResult(
-                    status=ItemStatus.DUPLICATE,
-                    contact_id=contact_id,
-                    lead_id=str(existing.get("id", "")) or None,
-                    detail="Лид для этого объявления уже существует",
-                )
+            contact_id = contact_ids[0]
             payload["contact_id"] = contact_id
         else:
             payload["contact"] = {
@@ -219,6 +339,12 @@ class LpTrackerClient:
         result = self._request("POST", "/lead", json=payload)
         if not isinstance(result, dict) or not result.get("id"):
             raise CrmError("LPTracker создал лид, но не вернул его ID")
+        detail = "Лид создан"
+        try:
+            self.add_listing_comment(result["id"], canonical_url)
+        except CrmError as exc:
+            detail = f"Лид создан; ссылку в комментарий записать не удалось: {exc}"
+            LOGGER.warning("Лид %s создан без комментария со ссылкой: %s", result["id"], exc)
         returned_contact = result.get("contact_id")
         if not returned_contact and isinstance(result.get("contact"), dict):
             returned_contact = result["contact"].get("id")
@@ -226,16 +352,25 @@ class LpTrackerClient:
             status=ItemStatus.DONE,
             contact_id=str(returned_contact or contact_id or "") or None,
             lead_id=str(result["id"]),
-            detail="Лид создан",
+            detail=detail,
         )
 
     def _find_existing_lead(
         self, contact_id: str, lead_name: str, field_id: int
     ) -> dict[str, Any] | None:
         for lead in self.contact_leads(contact_id):
-            if str(lead.get("name", "")) != lead_name:
+            if _normalized_name(str(lead.get("name", ""))) != _normalized_name(lead_name):
                 continue
             custom = lead.get("custom") or []
+            # Some LPTracker list responses omit custom fields even though the
+            # detailed lead contains them. The listing-derived name is unique to
+            # this worker, so an exact name is already a safe recovery key.
+            if not custom:
+                return lead
+            if isinstance(custom, dict):
+                if str(field_id) in {str(key) for key in custom}:
+                    return lead
+                custom = [custom] if "id" in custom else list(custom.values())
             if any(
                 str(field.get("id", "")) == str(field_id)
                 for field in custom
@@ -315,6 +450,39 @@ def _truthy(value: Any) -> bool:
 def _listing_id(url: str) -> str:
     numbers = re.findall(r"\d{5,}", url)
     return numbers[-1] if numbers else url.rstrip("/").rsplit("/", 1)[-1][:80]
+
+
+def _extract_funnel_stage(lead: dict[str, Any]) -> tuple[str, str]:
+    """Return (stage id, direct stage name) across known LPTracker response shapes."""
+    for key in ("funnel", "stage", "funnel_stage"):
+        value = lead.get(key)
+        if isinstance(value, dict):
+            stage_id = str(value.get("id", value.get("value", "")) or "").strip()
+            name = str(value.get("name", value.get("title", "")) or "").strip()
+            if stage_id or name:
+                return stage_id, name
+        elif value not in (None, ""):
+            return str(value).strip(), ""
+    for key in ("funnel_id", "stage_id"):
+        if lead.get(key) not in (None, ""):
+            return str(lead[key]).strip(), ""
+    custom = lead.get("custom") or []
+    if isinstance(custom, dict):
+        custom = list(custom.values())
+    for field in custom:
+        if not isinstance(field, dict):
+            continue
+        if str(field.get("type", "")).casefold() not in {"funnel", "conv_funnel"}:
+            continue
+        value = field.get("value")
+        if isinstance(value, dict):
+            return (
+                str(value.get("id", "") or "").strip(),
+                str(value.get("name", "") or "").strip(),
+            )
+        if value not in (None, ""):
+            return str(value).strip(), ""
+    return "", ""
 
 
 def _error_codes(payload: dict[str, Any]) -> set[int]:

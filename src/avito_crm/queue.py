@@ -24,6 +24,10 @@ class QueueColumns:
     status: str
     phone: str
     crm_lead_id: str
+    funnel_stage: str
+    crm_create_count: str
+    repeat_crm_lead_id: str
+    repeat_phone_attempts: str
     error: str
     attempts: str
     processed_at: str
@@ -36,6 +40,10 @@ class QueueColumns:
             status=settings.status_column,
             phone=settings.phone_column,
             crm_lead_id=settings.crm_lead_column,
+            funnel_stage=settings.funnel_stage_column,
+            crm_create_count=settings.crm_create_count_column,
+            repeat_crm_lead_id=settings.repeat_crm_lead_column,
+            repeat_phone_attempts=settings.repeat_phone_attempts_column,
             error=settings.error_column,
             attempts=settings.attempts_column,
             processed_at=settings.processed_at_column,
@@ -48,6 +56,10 @@ class QueueColumns:
             self.status,
             self.phone,
             self.crm_lead_id,
+            self.funnel_stage,
+            self.crm_create_count,
+            self.repeat_crm_lead_id,
+            self.repeat_phone_attempts,
             self.error,
             self.attempts,
             self.processed_at,
@@ -56,9 +68,15 @@ class QueueColumns:
 
 
 class QueueSource(ABC):
-    def __init__(self, columns: QueueColumns, max_attempts: int) -> None:
+    def __init__(
+        self, columns: QueueColumns, max_attempts: int, repeat_phone_max_attempts: int = 3
+    ) -> None:
         self.columns = columns
         self.max_attempts = max_attempts
+        self.repeat_phone_max_attempts = repeat_phone_max_attempts
+
+    def list_all(self) -> list[QueueItem]:
+        raise NotImplementedError
 
     @abstractmethod
     def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
@@ -68,8 +86,28 @@ class QueueSource(ABC):
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         raise NotImplementedError
 
-    def _is_actionable(self, status: str, attempts: int, include_manual: bool) -> bool:
+    def _is_actionable(
+        self,
+        status: str,
+        attempts: int,
+        include_manual: bool,
+        crm_create_count: int = 0,
+        repeat_phone_attempts: int = 0,
+    ) -> bool:
         normalized = (status or "").strip().lower()
+        if crm_create_count >= 2 or crm_create_count not in {0, 1}:
+            return False
+        if crm_create_count == 1:
+            return (
+                normalized
+                in {
+                    ItemStatus.REPEAT_PENDING.value,
+                    ItemStatus.REPEAT_RETRY_PHONE.value,
+                    ItemStatus.REPEAT_RETRY_TECHNICAL.value,
+                }
+                and repeat_phone_attempts < self.repeat_phone_max_attempts
+                and attempts < self.max_attempts
+            )
         if normalized in TERMINAL_STATUSES:
             return False
         if normalized == ItemStatus.MANUAL_REQUIRED and not include_manual:
@@ -85,8 +123,9 @@ class XlsxQueueSource(QueueSource):
         columns: QueueColumns,
         max_attempts: int,
         backup_dir: Path,
+        repeat_phone_max_attempts: int = 3,
     ) -> None:
-        super().__init__(columns, max_attempts)
+        super().__init__(columns, max_attempts, repeat_phone_max_attempts)
         self.path = path.resolve()
         self.worksheet = worksheet
         self.backup_dir = backup_dir
@@ -145,7 +184,7 @@ class XlsxQueueSource(QueueSource):
             temp_path.unlink(missing_ok=True)
             raise SourceError(f"Не удалось сохранить Excel-файл: {exc}") from exc
 
-    def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
+    def list_all(self) -> list[QueueItem]:
         workbook, sheet = self._load()
         try:
             original_headers = {str(cell.value or "").strip() for cell in sheet[1]}
@@ -158,16 +197,26 @@ class XlsxQueueSource(QueueSource):
                     continue
                 status = str(sheet.cell(row, headers[self.columns.status]).value or "").strip()
                 attempts = _safe_int(sheet.cell(row, headers[self.columns.attempts]).value)
-                if self._is_actionable(status, attempts, include_manual):
-                    values = {
-                        name: sheet.cell(row, column).value for name, column in headers.items()
-                    }
-                    items.append(QueueItem(str(row), url, status, attempts, values))
+                values = {name: sheet.cell(row, column).value for name, column in headers.items()}
+                items.append(QueueItem(str(row), url, status, attempts, values))
             if headers_changed:
                 self._atomic_save(workbook)
             return items
         finally:
             workbook.close()
+
+    def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
+        return [
+            item
+            for item in self.list_all()
+            if self._is_actionable(
+                item.status,
+                item.attempts,
+                include_manual,
+                _safe_int(item.values.get(self.columns.crm_create_count)),
+                _safe_int(item.values.get(self.columns.repeat_phone_attempts)),
+            )
+        ]
 
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         workbook, sheet = self._load()
@@ -196,8 +245,9 @@ class CsvQueueSource(QueueSource):
         columns: QueueColumns,
         max_attempts: int,
         backup_dir: Path,
+        repeat_phone_max_attempts: int = 3,
     ) -> None:
-        super().__init__(columns, max_attempts)
+        super().__init__(columns, max_attempts, repeat_phone_max_attempts)
         self.path = path.resolve()
         self.backup_dir = backup_dir
         self._backup_done = False
@@ -240,7 +290,7 @@ class CsvQueueSource(QueueSource):
             temp_path.unlink(missing_ok=True)
             raise SourceError(f"Не удалось сохранить CSV: {exc}") from exc
 
-    def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
+    def list_all(self) -> list[QueueItem]:
         headers, rows, headers_changed = self._read()
         if headers_changed:
             self._write(headers, rows)
@@ -251,9 +301,21 @@ class CsvQueueSource(QueueSource):
                 continue
             status = str(row.get(self.columns.status, "") or "").strip()
             attempts = _safe_int(row.get(self.columns.attempts))
-            if self._is_actionable(status, attempts, include_manual):
-                items.append(QueueItem(str(index), url, status, attempts, row))
+            items.append(QueueItem(str(index), url, status, attempts, row))
         return items
+
+    def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
+        return [
+            item
+            for item in self.list_all()
+            if self._is_actionable(
+                item.status,
+                item.attempts,
+                include_manual,
+                _safe_int(item.values.get(self.columns.crm_create_count)),
+                _safe_int(item.values.get(self.columns.repeat_phone_attempts)),
+            )
+        ]
 
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         headers, rows, _headers_changed = self._read()
@@ -274,8 +336,9 @@ class GoogleSheetsQueueSource(QueueSource):
         worksheet: str,
         columns: QueueColumns,
         max_attempts: int,
+        repeat_phone_max_attempts: int = 3,
     ) -> None:
-        super().__init__(columns, max_attempts)
+        super().__init__(columns, max_attempts, repeat_phone_max_attempts)
         if not credentials_file.is_file():
             raise ConfigurationError(
                 f"Файл сервисного аккаунта Google не найден: {credentials_file}"
@@ -376,7 +439,7 @@ class GoogleSheetsQueueSource(QueueSource):
                 }
             )
 
-    def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
+    def list_all(self) -> list[QueueItem]:
         headers, rows = self._read()
         index = {name: position for position, name in enumerate(headers)}
         items = []
@@ -386,10 +449,22 @@ class GoogleSheetsQueueSource(QueueSource):
                 continue
             status = row[index[self.columns.status]].strip()
             attempts = _safe_int(row[index[self.columns.attempts]])
-            if self._is_actionable(status, attempts, include_manual):
-                values = {name: row[position] for name, position in index.items()}
-                items.append(QueueItem(str(row_number), url, status, attempts, values))
+            values = {name: row[position] for name, position in index.items()}
+            items.append(QueueItem(str(row_number), url, status, attempts, values))
         return items
+
+    def list_actionable(self, *, include_manual: bool = False) -> list[QueueItem]:
+        return [
+            item
+            for item in self.list_all()
+            if self._is_actionable(
+                item.status,
+                item.attempts,
+                include_manual,
+                _safe_int(item.values.get(self.columns.crm_create_count)),
+                _safe_int(item.values.get(self.columns.repeat_phone_attempts)),
+            )
+        ]
 
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         from gspread.utils import rowcol_to_a1
@@ -425,21 +500,36 @@ def build_queue_source(
     if source_type == "xlsx":
         if file_path is None:
             raise ConfigurationError("Для source=xlsx нужен параметр --file")
-        return XlsxQueueSource(file_path, sheet_name, columns, settings.max_attempts, backup_dir)
+        return XlsxQueueSource(
+            file_path,
+            sheet_name,
+            columns,
+            settings.max_attempts,
+            backup_dir,
+            settings.repeat_phone_max_attempts,
+        )
     if source_type == "csv":
         if file_path is None:
             raise ConfigurationError("Для source=csv нужен параметр --file")
-        return CsvQueueSource(file_path, columns, settings.max_attempts, backup_dir)
+        return CsvQueueSource(
+            file_path,
+            columns,
+            settings.max_attempts,
+            backup_dir,
+            settings.repeat_phone_max_attempts,
+        )
     if source_type == "google":
         if settings.google_credentials_file is None:
             raise ConfigurationError("Не задан GOOGLE_CREDENTIALS_FILE")
-        return GoogleSheetsQueueSource(
+        source = GoogleSheetsQueueSource(
             settings.google_credentials_file,
             settings.google_spreadsheet_id,
             sheet_name,
             columns,
             settings.max_attempts,
+            settings.repeat_phone_max_attempts,
         )
+        return source
     raise ConfigurationError("--source: допустимо google, xlsx или csv")
 
 
@@ -451,7 +541,7 @@ def _safe_int(value: Any) -> int:
 
 
 def _patch_values(columns: QueueColumns, patch: QueuePatch) -> dict[str, Any]:
-    return {
+    values = {
         columns.status: patch.status,
         columns.phone: patch.phone,
         columns.crm_lead_id: patch.crm_lead_id,
@@ -460,3 +550,11 @@ def _patch_values(columns: QueueColumns, patch: QueuePatch) -> dict[str, Any]:
         columns.processed_at: patch.processed_at,
         columns.run_id: patch.run_id,
     }
+    optional = {
+        columns.funnel_stage: patch.funnel_stage,
+        columns.crm_create_count: patch.crm_create_count,
+        columns.repeat_crm_lead_id: patch.repeat_crm_lead_id,
+        columns.repeat_phone_attempts: patch.repeat_phone_attempts,
+    }
+    values.update({name: value for name, value in optional.items() if value is not None})
+    return values

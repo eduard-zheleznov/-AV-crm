@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from avito_crm.errors import ConfigurationError, NotificationError
+from avito_crm.models import RunSummary
 from avito_crm.notifications import (
     EmailNotifier,
     MaxNotifier,
@@ -494,3 +495,31 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
     assert "Номер не открыт после всех попыток: 1" in body
     assert "secret-id" not in body
     assert "очередь продолжает работу" not in body
+
+
+def test_completion_delivery_can_target_backup_without_changing_captcha_routing(
+    settings, monkeypatch
+):
+    configured = _notification_settings(
+        settings,
+        telegram_completion_primary=False,
+        telegram_completion_backup=True,
+    )
+    notifier = TelegramNotifier(configured)
+    calls = []
+    monkeypatch.setattr(
+        notifier,
+        "send",
+        lambda text, recipients: calls.append((text, recipients)) or len(recipients),
+    )
+
+    delivered = notifier.send_run_completed(
+        summary=RunSummary(run_id="run", requested=1),
+        source_name="google:test",
+        mode="full",
+        live=True,
+    )
+
+    assert delivered == 1
+    assert calls[0][1] == ("10002",)
+    assert notifier.primary_chat_ids == ("10001",)

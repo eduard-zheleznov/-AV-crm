@@ -8,7 +8,14 @@ from avito_crm.errors import (
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
-from avito_crm.models import ItemStatus, PhoneResult, QueueItem, QueuePatch
+from avito_crm.models import (
+    CrmDestination,
+    CrmWriteResult,
+    ItemStatus,
+    PhoneResult,
+    QueueItem,
+    QueuePatch,
+)
 from avito_crm.pipeline import Pipeline
 from avito_crm.queue import QueueColumns, QueueSource
 from avito_crm.state import StateStore
@@ -190,9 +197,7 @@ def test_phone_failure_becomes_normal_terminal_outcome_after_all_attempts(
     assert summary.errors == 0
 
 
-def test_only_unresolved_technical_failure_counts_as_error(
-    tmp_path, settings, monkeypatch
-):
+def test_only_unresolved_technical_failure_counts_as_error(tmp_path, settings, monkeypatch):
     source = RoundQueue(settings)
     browser = SequencedBrowser(
         {"2": [BrowserOperationError("сеть") for _ in range(settings.max_attempts)]}
@@ -209,9 +214,7 @@ def test_recovered_technical_failure_is_removed_from_final_error_count(
     tmp_path, settings, monkeypatch
 ):
     source = RoundQueue(settings)
-    browser = SequencedBrowser(
-        {"2": [BrowserOperationError("сеть"), "+79991234567"]}
-    )
+    browser = SequencedBrowser({"2": [BrowserOperationError("сеть"), "+79991234567"]})
 
     summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
 
@@ -220,3 +223,189 @@ def test_recovered_technical_failure_is_removed_from_final_error_count(
     assert summary.captured == 1
     assert summary.retries == 1
     assert summary.errors == 0
+
+
+class RepeatQueue(QueueSource):
+    def __init__(self, settings, *, repeat_failures=0):
+        super().__init__(
+            QueueColumns.from_settings(settings),
+            settings.max_attempts,
+            settings.repeat_phone_max_attempts,
+        )
+        self.item = QueueItem(
+            row_id="2",
+            url="https://www.avito.ru/moskva/item_123456789",
+            status=ItemStatus.DONE,
+            attempts=1,
+            values={
+                settings.phone_column: "+79990000000",
+                settings.crm_lead_column: "111",
+                settings.crm_create_count_column: "1",
+                settings.funnel_stage_column: "Новый лид",
+                settings.repeat_crm_lead_column: "",
+                settings.repeat_phone_attempts_column: str(repeat_failures),
+                settings.status_column: ItemStatus.DONE,
+                settings.error_column: "",
+            },
+        )
+        self.patches = []
+
+    def list_all(self):
+        return [self.item]
+
+    def list_actionable(self, *, include_manual=False):
+        count = int(self.item.values.get(self.columns.crm_create_count, 0) or 0)
+        repeat_attempts = int(self.item.values.get(self.columns.repeat_phone_attempts, 0) or 0)
+        return (
+            [self.item]
+            if self._is_actionable(
+                self.item.status,
+                self.item.attempts,
+                include_manual,
+                count,
+                repeat_attempts,
+            )
+            else []
+        )
+
+    def update(self, item, patch):
+        self.patches.append(patch)
+
+
+class FakeRepeatCrm:
+    instances = []
+    recovered_repeat = None
+
+    def __init__(self, _settings):
+        self.created = []
+        self.__class__.instances.append(self)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def resolve_destination(self):
+        return CrmDestination(1, "Progress Pro 2.0", 42, "Тег", "cats", "Сбор")
+
+    def list_funnel_steps(self, _project_id):
+        return [
+            {"id": 12, "name": "Автоответчик"},
+            {"id": 88, "name": "Повторный лид"},
+        ]
+
+    def get_lead_stage_name(self, lead_id, **_kwargs):
+        assert str(lead_id) == "111"
+        return "Автоответчик"
+
+    def find_lead_for_listing(self, *_args, **_kwargs):
+        return self.__class__.recovered_repeat
+
+    def create_for_phone(self, phone, listing_url, destination, **kwargs):
+        self.created.append((phone, listing_url, destination, kwargs))
+        return CrmWriteResult(ItemStatus.DONE, contact_id="99", lead_id="222")
+
+
+def _run_repeat(tmp_path, settings, monkeypatch, source, browser, *, recovered_repeat=None):
+    FakeRepeatCrm.instances.clear()
+    FakeRepeatCrm.recovered_repeat = recovered_repeat
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr("avito_crm.pipeline.LpTrackerClient", FakeRepeatCrm)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+    with StateStore(tmp_path / "repeat-state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="google:test",
+            mode="full",
+            live=True,
+        ).run(1)
+    return summary, FakeRepeatCrm.instances[-1]
+
+
+def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2"]
+    assert len(crm.created) == 1
+    phone, listing_url, _destination, options = crm.created[0]
+    assert phone == "+79997654321"
+    assert listing_url.endswith("item_123456789")
+    assert options == {"force_create": True, "funnel_id": 88, "repeat": True}
+    assert source.item.status == ItemStatus.DONE
+    assert source.item.values[source.columns.crm_lead_id] == "111"
+    assert source.item.values[source.columns.repeat_crm_lead_id] == "222"
+    assert source.item.values[source.columns.crm_create_count] == 2
+    assert source.item.values[source.columns.funnel_stage] == "Повторный лид"
+    assert source.item.values[source.columns.repeat_phone_attempts] == 0
+    assert summary.created == 1
+    assert summary.repeat_created == 1
+    assert summary.stage_synced == 1
+
+
+def test_repeat_phone_reveal_stops_forever_after_three_failed_attempts(
+    tmp_path, settings, monkeypatch
+):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": [PhoneNotFoundError("номер не открылся") for _ in range(3)]})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2", "2", "2"]
+    assert crm.created == []
+    assert source.item.status == ItemStatus.REPEAT_EXHAUSTED
+    assert source.item.values[source.columns.crm_lead_id] == "111"
+    assert source.item.values[source.columns.crm_create_count] == 1
+    assert int(source.item.values[source.columns.repeat_phone_attempts]) == 3
+    assert source.list_actionable() == []
+    assert summary.repeat_exhausted == 1
+    assert summary.phone_failed == 1
+    assert summary.errors == 0
+
+
+def test_already_exhausted_repeat_stays_skipped_without_inflating_summary(
+    tmp_path, settings, monkeypatch
+):
+    source = RepeatQueue(settings, repeat_failures=settings.repeat_phone_max_attempts)
+    source.item.status = ItemStatus.REPEAT_EXHAUSTED
+    source.item.values[source.columns.status] = ItemStatus.REPEAT_EXHAUSTED
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == []
+    assert crm.created == []
+    assert source.item.status == ItemStatus.REPEAT_EXHAUSTED
+    assert int(source.item.values[source.columns.repeat_phone_attempts]) == 3
+    assert source.list_actionable() == []
+    assert summary.repeat_exhausted == 0
+    assert summary.stage_synced == 1
+
+
+def test_repeat_lead_is_recovered_before_another_phone_attempt(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        recovered_repeat={"id": 222, "name": "Авито — 123456789 — повторный лид"},
+    )
+
+    assert browser.calls == []
+    assert crm.created == []
+    assert source.item.status == ItemStatus.DONE
+    assert source.item.values[source.columns.crm_create_count] == 2
+    assert source.item.values[source.columns.repeat_crm_lead_id] == "222"
+    assert summary.created == 0

@@ -41,9 +41,7 @@ def _max_ssl_context() -> ssl.SSLContext:
     """Build a MAX-only trust context without weakening TLS for other services."""
     context = ssl.create_default_context()
     root_ca = (
-        files("avito_crm")
-        .joinpath(*MAX_ROOT_CA_RESOURCE.split("/"))
-        .read_text(encoding="ascii")
+        files("avito_crm").joinpath(*MAX_ROOT_CA_RESOURCE.split("/")).read_text(encoding="ascii")
     )
     context.load_verify_locations(cadata=root_ca)
     return context
@@ -81,6 +79,8 @@ class TelegramNotifier:
         self.token = settings.telegram_bot_token
         self.primary_chat_ids = settings.telegram_primary_chat_ids
         self.backup_chat_ids = settings.telegram_backup_chat_ids
+        self.completion_primary = settings.telegram_completion_primary
+        self.completion_backup = settings.telegram_completion_backup
         self.computer_name = settings.notification_computer_name or socket.gethostname()
         self.send_attempts = settings.telegram_send_attempts
         self._owns_client = client is None
@@ -232,7 +232,13 @@ class TelegramNotifier:
         _subject, body = _run_completion_message(
             summary, self.computer_name, source_name, mode, live
         )
-        return self.send(body, self.primary_chat_ids)
+        recipients = _completion_recipients(
+            self.primary_chat_ids,
+            self.backup_chat_ids,
+            primary=self.completion_primary,
+            backup=self.completion_backup,
+        )
+        return self.send(body, recipients) if recipients else 0
 
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_chat_ids, *self.backup_chat_ids))
@@ -325,6 +331,8 @@ class MaxNotifier:
         self.token = settings.max_bot_token
         self.primary_recipients = settings.max_primary_recipients
         self.backup_recipients = settings.max_backup_recipients
+        self.completion_primary = settings.max_completion_primary
+        self.completion_backup = settings.max_completion_backup
         self.computer_name = settings.notification_computer_name or socket.gethostname()
         self.send_attempts = settings.max_send_attempts
         self._owns_client = client is None
@@ -476,7 +484,13 @@ class MaxNotifier:
         _subject, body = _run_completion_message(
             summary, self.computer_name, source_name, mode, live
         )
-        return self.send(body, self.primary_recipients)
+        recipients = _completion_recipients(
+            self.primary_recipients,
+            self.backup_recipients,
+            primary=self.completion_primary,
+            backup=self.completion_backup,
+        )
+        return self.send(body, recipients) if recipients else 0
 
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
@@ -599,6 +613,8 @@ class EmailNotifier:
         self.from_address = settings.smtp_from_address or settings.smtp_username
         self.primary_recipients = settings.email_primary_recipients
         self.backup_recipients = settings.email_backup_recipients
+        self.completion_primary = settings.email_completion_primary
+        self.completion_backup = settings.email_completion_backup
         self.computer_name = settings.notification_computer_name or socket.gethostname()
         self.timeout = settings.email_request_timeout
         self.send_attempts = settings.email_send_attempts
@@ -764,7 +780,13 @@ class EmailNotifier:
         subject, body = _run_completion_message(
             summary, self.computer_name, source_name, mode, live
         )
-        return self.send(subject, body, self.primary_recipients)
+        recipients = _completion_recipients(
+            self.primary_recipients,
+            self.backup_recipients,
+            primary=self.completion_primary,
+            backup=self.completion_backup,
+        )
+        return self.send(subject, body, recipients) if recipients else 0
 
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
@@ -923,6 +945,9 @@ def _run_completion_message(
         f"Всего попыток: {summary.inspected}; кругов: {summary.rounds}",
         f"Номеров открыто: {summary.captured}",
         f"Лидов создано: {summary.created}",
+        f"Повторных лидов: {summary.repeat_created}",
+        f"Шагов воронки обновлено: {summary.stage_synced}",
+        f"Повторное открытие исчерпано: {summary.repeat_exhausted}",
         f"Дубликатов: {summary.duplicates}",
         f"Неактивных объявлений: {summary.inactive}",
         f"Без кнопки телефона: {summary.unavailable}",
@@ -938,6 +963,21 @@ def _run_completion_message(
 
 def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(value for value in values if value))
+
+
+def _completion_recipients(
+    primary_values: tuple[str, ...],
+    backup_values: tuple[str, ...],
+    *,
+    primary: bool,
+    backup: bool,
+) -> tuple[str, ...]:
+    selected: tuple[str, ...] = ()
+    if primary:
+        selected += primary_values
+    if backup:
+        selected += backup_values
+    return _deduplicate(selected)
 
 
 def _mask_chat_id(chat_id: str) -> str:

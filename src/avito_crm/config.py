@@ -114,6 +114,8 @@ class Settings:
     lptracker_field_name: str
     lptracker_field_value: str
     lptracker_service_name: str
+    lptracker_autoresponder_funnel_name: str
+    lptracker_repeat_funnel_name: str
     duplicate_policy: str
 
     google_credentials_file: Path | None
@@ -128,6 +130,10 @@ class Settings:
     status_column: str
     phone_column: str
     crm_lead_column: str
+    funnel_stage_column: str
+    crm_create_count_column: str
+    repeat_crm_lead_column: str
+    repeat_phone_attempts_column: str
     error_column: str
     attempts_column: str
     processed_at_column: str
@@ -157,12 +163,16 @@ class Settings:
     telegram_reminder_minutes: tuple[float, ...]
     telegram_request_timeout: float
     telegram_send_attempts: int
+    telegram_completion_primary: bool
+    telegram_completion_backup: bool
     max_api_base_url: str
     max_bot_token: str
     max_primary_recipients: tuple[str, ...]
     max_backup_recipients: tuple[str, ...]
     max_request_timeout: float
     max_send_attempts: int
+    max_completion_primary: bool
+    max_completion_backup: bool
     smtp_host: str
     smtp_port: int
     smtp_security: str
@@ -173,10 +183,13 @@ class Settings:
     email_backup_recipients: tuple[str, ...]
     email_request_timeout: float
     email_send_attempts: int
+    email_completion_primary: bool
+    email_completion_backup: bool
     notification_computer_name: str
     tesseract_cmd: str
     ocr_min_agreement: int
     max_attempts: int
+    repeat_phone_max_attempts: int
     max_consecutive_failures: int
 
     @classmethod
@@ -216,15 +229,19 @@ class Settings:
             lptracker_service_name=os.getenv(
                 "LPTRACKER_SERVICE_NAME", "Avito CRM Pipeline"
             ).strip(),
+            lptracker_autoresponder_funnel_name=os.getenv(
+                "LPTRACKER_AUTORESPONDER_FUNNEL_NAME", "Автоответчик"
+            ).strip(),
+            lptracker_repeat_funnel_name=os.getenv(
+                "LPTRACKER_REPEAT_FUNNEL_NAME", "Повторный лид"
+            ).strip(),
             duplicate_policy=os.getenv("CRM_DUPLICATE_POLICY", "skip").strip().lower(),
             google_credentials_file=Path(credentials).expanduser().resolve()
             if credentials
             else None,
             google_spreadsheet_id=os.getenv("GOOGLE_SPREADSHEET_ID", "").strip(),
             google_worksheet=os.getenv("GOOGLE_WORKSHEET", "Лист1").strip(),
-            google_control_worksheet=os.getenv(
-                "GOOGLE_CONTROL_WORKSHEET", "Управление"
-            ).strip(),
+            google_control_worksheet=os.getenv("GOOGLE_CONTROL_WORKSHEET", "Управление").strip(),
             google_history_worksheet=os.getenv(
                 "GOOGLE_HISTORY_WORKSHEET", "История запусков"
             ).strip(),
@@ -234,6 +251,16 @@ class Settings:
             status_column=os.getenv("QUEUE_STATUS_COLUMN", "Статус").strip(),
             phone_column=os.getenv("QUEUE_PHONE_COLUMN", "Телефон").strip(),
             crm_lead_column=os.getenv("QUEUE_CRM_LEAD_COLUMN", "CRM lead ID").strip(),
+            funnel_stage_column=os.getenv("QUEUE_FUNNEL_STAGE_COLUMN", "Шаг воронки").strip(),
+            crm_create_count_column=os.getenv(
+                "QUEUE_CRM_CREATE_COUNT_COLUMN", "Попытка завода в CRM"
+            ).strip(),
+            repeat_crm_lead_column=os.getenv(
+                "QUEUE_REPEAT_CRM_LEAD_COLUMN", "Повторный CRM ID"
+            ).strip(),
+            repeat_phone_attempts_column=os.getenv(
+                "QUEUE_REPEAT_PHONE_ATTEMPTS_COLUMN", "Попытки повторного открытия"
+            ).strip(),
             error_column=os.getenv("QUEUE_ERROR_COLUMN", "Ошибка").strip(),
             attempts_column=os.getenv("QUEUE_ATTEMPTS_COLUMN", "Попытки").strip(),
             processed_at_column=os.getenv("QUEUE_PROCESSED_AT_COLUMN", "Обработано").strip(),
@@ -266,6 +293,8 @@ class Settings:
             ),
             telegram_request_timeout=_float("TELEGRAM_REQUEST_TIMEOUT_SECONDS", 15.0),
             telegram_send_attempts=_int("TELEGRAM_SEND_ATTEMPTS", 3) or 3,
+            telegram_completion_primary=_bool("TELEGRAM_COMPLETION_PRIMARY", True),
+            telegram_completion_backup=_bool("TELEGRAM_COMPLETION_BACKUP", True),
             max_api_base_url=os.getenv("MAX_API_BASE_URL", "https://platform-api2.max.ru")
             .strip()
             .rstrip("/"),
@@ -274,6 +303,8 @@ class Settings:
             max_backup_recipients=parse_max_recipients(os.getenv("MAX_BACKUP_RECIPIENTS", "")),
             max_request_timeout=_float("MAX_REQUEST_TIMEOUT_SECONDS", 15.0),
             max_send_attempts=_int("MAX_SEND_ATTEMPTS", 3) or 3,
+            max_completion_primary=_bool("MAX_COMPLETION_PRIMARY", True),
+            max_completion_backup=_bool("MAX_COMPLETION_BACKUP", True),
             smtp_host=os.getenv("SMTP_HOST", "smtp.yandex.ru").strip(),
             smtp_port=int(_int("SMTP_PORT", 465) or 465),
             smtp_security=os.getenv("SMTP_SECURITY", "ssl").strip().lower(),
@@ -286,12 +317,15 @@ class Settings:
             email_backup_recipients=parse_email_addresses(os.getenv("EMAIL_BACKUP_RECIPIENTS", "")),
             email_request_timeout=_float("EMAIL_REQUEST_TIMEOUT_SECONDS", 20.0),
             email_send_attempts=_int("EMAIL_SEND_ATTEMPTS", 2) or 2,
+            email_completion_primary=_bool("EMAIL_COMPLETION_PRIMARY", True),
+            email_completion_backup=_bool("EMAIL_COMPLETION_BACKUP", True),
             notification_computer_name=os.getenv(
                 "NOTIFICATION_COMPUTER_NAME", os.getenv("COMPUTERNAME", socket.gethostname())
             ).strip(),
             tesseract_cmd=os.getenv("TESSERACT_CMD", "").strip(),
             ocr_min_agreement=_int("OCR_MIN_AGREEMENT", 2) or 2,
             max_attempts=_int("PIPELINE_MAX_ATTEMPTS", 3) or 3,
+            repeat_phone_max_attempts=_int("CRM_REPEAT_PHONE_MAX_ATTEMPTS", 3) or 3,
             max_consecutive_failures=_int("PIPELINE_MAX_CONSECUTIVE_FAILURES", 5) or 5,
         )
         settings.validate()
@@ -342,6 +376,8 @@ class Settings:
             )
         if self.max_attempts < 1:
             raise ConfigurationError("PIPELINE_MAX_ATTEMPTS должен быть больше нуля")
+        if self.repeat_phone_max_attempts < 1:
+            raise ConfigurationError("CRM_REPEAT_PHONE_MAX_ATTEMPTS должен быть больше нуля")
         if self.telegram_request_timeout <= 0:
             raise ConfigurationError("TELEGRAM_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
         if self.telegram_send_attempts < 1 or self.telegram_send_attempts > 10:
@@ -402,9 +438,7 @@ class Settings:
             self.google_history_worksheet.casefold(),
         }
         if len(remote_tabs) != 2 or self.google_worksheet.casefold() in remote_tabs:
-            raise ConfigurationError(
-                "Лист очереди, пульт и история должны иметь разные имена"
-            )
+            raise ConfigurationError("Лист очереди, пульт и история должны иметь разные имена")
         if not 5 <= self.remote_control_poll_seconds <= 300:
             raise ConfigurationError("REMOTE_CONTROL_POLL_SECONDS должен быть от 5 до 300")
         if not 1 <= self.remote_control_max_limit <= 1000:

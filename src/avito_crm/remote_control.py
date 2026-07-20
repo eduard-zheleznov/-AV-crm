@@ -9,6 +9,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from avito_crm import __version__
@@ -22,7 +23,8 @@ from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 LOGGER = logging.getLogger(__name__)
 
 CONTROL_MARKER = "AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"
-ANALYTICS_MARKER = "AVITO CRM — АНАЛИТИКА"
+ANALYTICS_MARKER_V1 = "AVITO CRM — АНАЛИТИКА"
+ANALYTICS_MARKER = "AVITO CRM — АНАЛИТИКА v2"
 ANALYTICS_WORKSHEET = "Аналитика"
 LEGACY_HISTORY_HEADERS = (
     "Команда ID",
@@ -137,6 +139,7 @@ class GoogleControlPanel:
         self.control: Any | None = None
         self.history: Any | None = None
         self.analytics: Any | None = None
+        self._analytics_period: int | None = None
 
     @classmethod
     def connect(cls, settings: Settings) -> GoogleControlPanel:
@@ -166,9 +169,7 @@ class GoogleControlPanel:
         self.history = self._worksheet_or_create(
             self.settings.google_history_worksheet, rows=1000, cols=len(HISTORY_HEADERS)
         )
-        self.analytics = self._worksheet_or_create(
-            ANALYTICS_WORKSHEET, rows=110, cols=8
-        )
+        self.analytics = self._worksheet_or_create(ANALYTICS_WORKSHEET, rows=110, cols=8)
         try:
             marker = self._cell(self.control.get("A1:F12"), 1, 1)
             if marker != CONTROL_MARKER:
@@ -207,13 +208,17 @@ class GoogleControlPanel:
             self._format_history()
             self._backfill_history_dates()
             analytics_marker = self._cell(self.analytics.get("A1:H2"), 1, 1)
-            if analytics_marker and analytics_marker != ANALYTICS_MARKER:
+            if analytics_marker and analytics_marker not in {
+                ANALYTICS_MARKER_V1,
+                ANALYTICS_MARKER,
+            }:
                 raise SourceError(
                     f"Лист {ANALYTICS_WORKSHEET!r} уже занят другими данными. "
                     "Переименуйте его и повторите настройку пульта."
                 )
-            if not analytics_marker:
-                self._initialize_analytics()
+            if analytics_marker != ANALYTICS_MARKER:
+                self._initialize_analytics(add_chart=not bool(analytics_marker))
+            self.refresh_analytics(force=True)
         except Exception as exc:
             raise SourceError(f"Не удалось подготовить листы пульта: {exc}") from exc
 
@@ -378,8 +383,9 @@ class GoogleControlPanel:
                     ]
                 ],
                 f"F{state.history_row}:V{state.history_row}",
-                value_input_option="USER_ENTERED",
+                value_input_option="RAW",
             )
+            self.refresh_analytics(force=True)
         except Exception as exc:
             raise SourceError(f"Не удалось завершить запись истории: {exc}") from exc
 
@@ -445,8 +451,9 @@ class GoogleControlPanel:
             history.update(
                 [row],
                 f"A{row_number}:V{row_number}",
-                value_input_option="USER_ENTERED",
+                value_input_option="RAW",
             )
+            self.refresh_analytics(force=True)
         except Exception as exc:
             raise SourceError(f"Не удалось записать итог запуска в аналитику: {exc}") from exc
 
@@ -566,104 +573,139 @@ class GoogleControlPanel:
                 finished_at = str(row[5] if len(row) > 5 else "").strip()
                 existing_date = str(row[date_index] if len(row) > date_index else "").strip()
                 if finished_at and not existing_date:
-                    updates.append(
-                        {"range": f"V{row_number}", "values": [[finished_at[:10]]]}
-                    )
+                    updates.append({"range": f"V{row_number}", "values": [[finished_at[:10]]]})
             if updates:
                 history.batch_update(updates, value_input_option="USER_ENTERED")
 
-    def _initialize_analytics(self) -> None:
+    def _initialize_analytics(self, *, add_chart: bool = True) -> None:
         analytics = self._require_analytics()
-        history_title = self.settings.google_history_worksheet.replace("'", "''")
-        history_ref = f"'{history_title}'"
-        date_range = f"{history_ref}!$V:$V"
-
-        def current_sum(column: str) -> str:
-            return (
-                f'=SUMIFS({history_ref}!${column}:${column},{date_range},'
-                '">="&TODAY()-$B$4+1)'
-            )
-
-        def previous_sum(column: str) -> str:
-            return (
-                f'=SUMIFS({history_ref}!${column}:${column},{date_range},'
-                '">="&TODAY()-2*$B$4+1,'
-                f'{date_range},"<"&TODAY()-$B$4+1)'
-            )
-
+        current_period = self._analytics_period_value(default=30)
         rows: list[list[Any]] = [[""] * 8 for _ in range(107)]
         rows[0][0] = ANALYTICS_MARKER
         rows[1][0] = (
-            "Показатели удалённых запусков. Период сравнивается с предыдущим "
-            "периодом такой же длины."
+            "Показатели всех запусков. Период сравнивается с предыдущим периодом "
+            "такой же длины; данные рассчитывает программа без формул."
         )
-        rows[3][:5] = ["Период, дней", 30, "", "Обновлено", "=NOW()"]
+        rows[3][:5] = ["Период, дней", current_period, "", "Обновлено", ""]
         rows[5][:4] = ["Показатель", "Текущий период", "Предыдущий период", "Изменение"]
-
-        current_runs = f'=COUNTIFS({date_range},">="&TODAY()-$B$4+1)'
-        previous_runs = (
-            f'=COUNTIFS({date_range},">="&TODAY()-2*$B$4+1,'
-            f'{date_range},"<"&TODAY()-$B$4+1)'
-        )
-        metrics = [
-            ("Запусков", current_runs, previous_runs),
-            ("Обработано ссылок", current_sum("M"), previous_sum("M")),
-            ("Всего попыток", current_sum("N"), previous_sum("N")),
-            ("Открыто номеров", current_sum("O"), previous_sum("O")),
-            ("Создано лидов", current_sum("H"), previous_sum("H")),
-            (
-                "Неактивных / без кнопки",
-                f'={current_sum("P")[1:]}+{current_sum("Q")[1:]}',
-                f'={previous_sum("P")[1:]}+{previous_sum("Q")[1:]}',
-            ),
-            ("Не открыто после попыток", current_sum("R"), previous_sum("R")),
-            ("Технических ошибок", current_sum("J"), previous_sum("J")),
-            (
-                "Конверсия ссылок в лиды",
-                f'=IFERROR({current_sum("H")[1:]}/{current_sum("M")[1:]},0)',
-                f'=IFERROR({previous_sum("H")[1:]}/{previous_sum("M")[1:]},0)',
-            ),
-        ]
-        for row_index, (label, current, previous) in enumerate(metrics, start=6):
-            spreadsheet_row = row_index + 1
-            rows[row_index][:4] = [
-                label,
-                current,
-                previous,
-                (
-                    f'=IF(C{spreadsheet_row}=0,IF(B{spreadsheet_row}=0,0,1),'
-                    f'(B{spreadsheet_row}-C{spreadsheet_row})/C{spreadsheet_row})'
-                ),
-            ]
-
         rows[16][:4] = ["Дата", "Создано лидов", "Открыто номеров", "Тех. ошибок"]
-        for row_index in range(17, 107):
-            spreadsheet_row = row_index + 1
-            rows[row_index][:4] = [
-                (
-                    '=IF(ROW()-17<=MIN($B$4,90),'
-                    'TODAY()-MIN($B$4,90)+ROW()-17,"")'
-                ),
-                (
-                    f'=IF($A{spreadsheet_row}="","",SUMIFS('
-                    f'{history_ref}!$H:$H,{date_range},$A{spreadsheet_row}))'
-                ),
-                (
-                    f'=IF($A{spreadsheet_row}="","",SUMIFS('
-                    f'{history_ref}!$O:$O,{date_range},$A{spreadsheet_row}))'
-                ),
-                (
-                    f'=IF($A{spreadsheet_row}="","",SUMIFS('
-                    f'{history_ref}!$J:$J,{date_range},$A{spreadsheet_row}))'
-                ),
-            ]
-
         with suppress(Exception):
             analytics.resize(rows=110, cols=8)
-        analytics.update(rows, "A1:H107", value_input_option="USER_ENTERED")
-        self._format_analytics()
+        with suppress(Exception):
+            analytics.unmerge_cells("A1:H1")
+            analytics.unmerge_cells("A2:H2")
+        analytics.update(rows, "A1:H107", value_input_option="RAW")
+        self._format_analytics(add_chart=add_chart)
 
-    def _format_analytics(self) -> None:
+    def refresh_analytics(self, *, force: bool = False) -> None:
+        analytics = self._require_analytics()
+        history = self._require_history()
+        period = self._analytics_period_value(default=30)
+        if not force and self._analytics_period == period:
+            return
+        today = datetime.now(UTC).date()
+        current_start = today - timedelta(days=period - 1)
+        previous_start = today - timedelta(days=2 * period - 1)
+        previous_end = current_start - timedelta(days=1)
+        rows = history.get_all_values()
+        records: list[tuple[date, list[str]]] = []
+        for row in rows[1:]:
+            finished = _history_date(row)
+            if finished is not None:
+                records.append((finished, row))
+
+        def selected(start: date, end: date) -> list[list[str]]:
+            return [row for finished, row in records if start <= finished <= end]
+
+        current = selected(current_start, today)
+        previous = selected(previous_start, previous_end)
+
+        def total(values: list[list[str]], index: int) -> int:
+            return sum(_history_int(row, index) for row in values)
+
+        def snapshot(values: list[list[str]]) -> list[float | int]:
+            processed = total(values, 12)
+            created = total(values, 7)
+            return [
+                len(values),
+                processed,
+                total(values, 13),
+                total(values, 14),
+                created,
+                total(values, 15) + total(values, 16),
+                total(values, 17),
+                total(values, 9),
+                created / processed if processed else 0.0,
+            ]
+
+        current_values = snapshot(current)
+        previous_values = snapshot(previous)
+        labels = [
+            "Запусков",
+            "Обработано ссылок",
+            "Всего попыток",
+            "Открыто номеров",
+            "Создано лидов",
+            "Неактивных / без кнопки",
+            "Не открыто после попыток",
+            "Технических ошибок",
+            "Конверсия ссылок в лиды",
+        ]
+        metrics = []
+        for label, current_value, previous_value in zip(
+            labels, current_values, previous_values, strict=True
+        ):
+            change = (
+                0.0
+                if previous_value == 0 and current_value == 0
+                else 1.0
+                if previous_value == 0
+                else (current_value - previous_value) / previous_value
+            )
+            metrics.append([label, current_value, previous_value, change])
+
+        daily_count = min(period, 90)
+        daily_start = today - timedelta(days=daily_count - 1)
+        daily: list[list[Any]] = []
+        for offset in range(daily_count):
+            day = daily_start + timedelta(days=offset)
+            day_rows = [row for finished, row in records if finished == day]
+            daily.append(
+                [
+                    day.strftime("%d.%m.%Y"),
+                    total(day_rows, 7),
+                    total(day_rows, 14),
+                    total(day_rows, 9),
+                ]
+            )
+        daily.extend([["", "", "", ""]] * (90 - len(daily)))
+        analytics.update(metrics, "A7:D15", value_input_option="RAW")
+        analytics.update(daily, "A18:D107", value_input_option="RAW")
+        analytics.batch_update(
+            [
+                {"range": "B4", "values": [[period]]},
+                {
+                    "range": "E4",
+                    "values": [[datetime.now().astimezone().strftime("%d.%m.%Y %H:%M:%S")]],
+                },
+            ],
+            value_input_option="RAW",
+        )
+        self._analytics_period = period
+
+    def refresh_analytics_if_needed(self) -> None:
+        self.refresh_analytics(force=False)
+
+    def _analytics_period_value(self, *, default: int) -> int:
+        analytics = self._require_analytics()
+        try:
+            raw = self._cell(analytics.get("B4"), 1, 1)
+            value = int(float(raw)) if raw else default
+        except (TypeError, ValueError):
+            value = default
+        return value if value in {7, 30, 90, 365} else default
+
+    def _format_analytics(self, *, add_chart: bool = True) -> None:
         analytics = self._require_analytics()
         with suppress(Exception):
             analytics.freeze(rows=6)
@@ -765,8 +807,9 @@ class GoogleControlPanel:
                         },
                     }
                 },
-                _analytics_chart_request(sheet_id),
             ]
+            if add_chart:
+                requests.append(_analytics_chart_request(sheet_id))
             self.spreadsheet.batch_update({"requests": requests})
 
     def _format_control(self) -> None:
@@ -1010,6 +1053,10 @@ class RemoteController:
             return
 
         command = self.panel.read_command()
+        try:
+            self.panel.refresh_analytics_if_needed()
+        except Exception as exc:
+            LOGGER.warning("Не удалось обновить период аналитики: %s", exc)
         if command.stop:
             self._handle_stop(clear_start=command.start)
             if command.start:
@@ -1409,6 +1456,33 @@ def _checked(value: str) -> bool:
 def _new_command_id() -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     return f"{stamp}-{uuid.uuid4().hex[:6]}"
+
+
+def _history_int(row: list[str], index: int) -> int:
+    if index >= len(row):
+        return 0
+    raw = str(row[index] or "").strip().replace("\u00a0", "").replace(",", ".")
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _history_date(row: list[str]) -> date | None:
+    # V is the stable date-only column. Older rows may only have F/E timestamps.
+    for index in (21, 5, 4):
+        if index >= len(row):
+            continue
+        raw = str(row[index] or "").strip()
+        if not raw:
+            continue
+        iso_candidate = raw[:10]
+        with suppress(ValueError):
+            return date.fromisoformat(iso_candidate)
+        for pattern in ("%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y"):
+            with suppress(ValueError):
+                return datetime.strptime(raw[:10], pattern).date()
+    return None
 
 
 def _computer_name(settings: Settings) -> str:

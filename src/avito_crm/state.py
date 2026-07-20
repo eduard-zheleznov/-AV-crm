@@ -47,6 +47,10 @@ class StateStore:
                 inspected INTEGER NOT NULL DEFAULT 0,
                 processed INTEGER NOT NULL DEFAULT 0,
                 rounds INTEGER NOT NULL DEFAULT 0,
+                stage_synced INTEGER NOT NULL DEFAULT 0,
+                repeat_created INTEGER NOT NULL DEFAULT 0,
+                repeat_exhausted INTEGER NOT NULL DEFAULT 0,
+                crm_sync_errors INTEGER NOT NULL DEFAULT 0,
                 stopped_reason TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS items (
@@ -58,6 +62,10 @@ class StateStore:
                 crm_lead_id TEXT NOT NULL DEFAULT '',
                 error TEXT NOT NULL DEFAULT '',
                 attempts INTEGER NOT NULL DEFAULT 0,
+                funnel_stage TEXT NOT NULL DEFAULT '',
+                crm_create_count INTEGER NOT NULL DEFAULT 0,
+                repeat_crm_lead_id TEXT NOT NULL DEFAULT '',
+                repeat_phone_attempts INTEGER NOT NULL DEFAULT 0,
                 run_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -74,10 +82,26 @@ class StateStore:
             "retries": "INTEGER NOT NULL DEFAULT 0",
             "processed": "INTEGER NOT NULL DEFAULT 0",
             "rounds": "INTEGER NOT NULL DEFAULT 0",
+            "stage_synced": "INTEGER NOT NULL DEFAULT 0",
+            "repeat_created": "INTEGER NOT NULL DEFAULT 0",
+            "repeat_exhausted": "INTEGER NOT NULL DEFAULT 0",
+            "crm_sync_errors": "INTEGER NOT NULL DEFAULT 0",
         }
         for name, definition in run_columns.items():
             if name not in columns:
                 self.connection.execute(f"ALTER TABLE runs ADD COLUMN {name} {definition}")
+        item_columns = {
+            row[1] for row in self.connection.execute("PRAGMA table_info(items)").fetchall()
+        }
+        item_migrations = {
+            "funnel_stage": "TEXT NOT NULL DEFAULT ''",
+            "crm_create_count": "INTEGER NOT NULL DEFAULT 0",
+            "repeat_crm_lead_id": "TEXT NOT NULL DEFAULT ''",
+            "repeat_phone_attempts": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in item_migrations.items():
+            if name not in item_columns:
+                self.connection.execute(f"ALTER TABLE items ADD COLUMN {name} {definition}")
         self.connection.commit()
 
     def begin_run(self, summary: RunSummary) -> None:
@@ -100,12 +124,34 @@ class StateStore:
         item: QueueItem,
         patch: QueuePatch,
     ) -> None:
+        previous = self.get_item(canonical_url) or {}
+        funnel_stage = (
+            patch.funnel_stage
+            if patch.funnel_stage is not None
+            else str(previous.get("funnel_stage", ""))
+        )
+        crm_create_count = (
+            patch.crm_create_count
+            if patch.crm_create_count is not None
+            else _safe_int(previous.get("crm_create_count"))
+        )
+        repeat_crm_lead_id = (
+            patch.repeat_crm_lead_id
+            if patch.repeat_crm_lead_id is not None
+            else str(previous.get("repeat_crm_lead_id", ""))
+        )
+        repeat_phone_attempts = (
+            patch.repeat_phone_attempts
+            if patch.repeat_phone_attempts is not None
+            else _safe_int(previous.get("repeat_phone_attempts"))
+        )
         self.connection.execute(
             """
             INSERT INTO items(
                 canonical_url, source_name, row_id, status, phone, crm_lead_id,
-                error, attempts, run_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                error, attempts, funnel_stage, crm_create_count,
+                repeat_crm_lead_id, repeat_phone_attempts, run_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(canonical_url) DO UPDATE SET
                 source_name=excluded.source_name,
                 row_id=excluded.row_id,
@@ -114,6 +160,10 @@ class StateStore:
                 crm_lead_id=excluded.crm_lead_id,
                 error=excluded.error,
                 attempts=excluded.attempts,
+                funnel_stage=excluded.funnel_stage,
+                crm_create_count=excluded.crm_create_count,
+                repeat_crm_lead_id=excluded.repeat_crm_lead_id,
+                repeat_phone_attempts=excluded.repeat_phone_attempts,
                 run_id=excluded.run_id,
                 updated_at=excluded.updated_at
             """,
@@ -126,6 +176,10 @@ class StateStore:
                 patch.crm_lead_id,
                 patch.error,
                 patch.attempts,
+                str(funnel_stage),
+                int(crm_create_count),
+                str(repeat_crm_lead_id),
+                int(repeat_phone_attempts),
                 patch.run_id,
                 utc_now(),
             ),
@@ -147,6 +201,8 @@ class StateStore:
                 phone_failed=phone_failed + ?, retries=retries + ?,
                 manual_required=manual_required + ?, inspected=inspected + ?,
                 processed=processed + ?, rounds=rounds + ?, stopped_reason=?
+                , stage_synced=stage_synced + ?, repeat_created=repeat_created + ?,
+                repeat_exhausted=repeat_exhausted + ?, crm_sync_errors=crm_sync_errors + ?
             WHERE run_id=?
             """,
             (
@@ -165,6 +221,10 @@ class StateStore:
                 summary.processed,
                 summary.rounds,
                 summary.stopped_reason,
+                summary.stage_synced,
+                summary.repeat_created,
+                summary.repeat_exhausted,
+                summary.crm_sync_errors,
                 summary.run_id,
             ),
         )
@@ -190,6 +250,13 @@ class StateStore:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(float(str(value or "0").strip()))
+    except (TypeError, ValueError):
+        return 0
 
 
 class SingleInstanceLock(AbstractContextManager["SingleInstanceLock"]):
