@@ -261,6 +261,21 @@ def test_remote_command_is_claimed_once_and_finished(settings):
     assert len(panel.claims) == 1
 
 
+def test_remote_worker_reloads_env_before_each_command(settings, monkeypatch):
+    panel = FakePanel(PanelCommand(False, False, 1, "Лист1", False))
+    controller = RemoteController(settings, panel)
+    calls = []
+
+    def load(root_dir, *, refresh_env=False):
+        calls.append((root_dir, refresh_env))
+        return settings
+
+    monkeypatch.setattr("avito_crm.remote_control.Settings.load", load)
+
+    assert controller._load_worker_settings() is settings
+    assert calls == [(settings.root_dir, True)]
+
+
 def test_interrupted_command_resumes_only_remaining_target(settings):
     panel = FakePanel(
         PanelCommand(False, False, 3, "Лист1", False),

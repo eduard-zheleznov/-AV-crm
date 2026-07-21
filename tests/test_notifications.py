@@ -16,6 +16,7 @@ from avito_crm.notifications import (
     _max_http_error_description,
     _max_ssl_context,
     _run_completion_message,
+    _telegram_http_error_description,
     split_max_text,
     split_telegram_text,
 )
@@ -69,6 +70,12 @@ def test_telegram_error_never_exposes_bot_token(settings):
 
     assert token not in str(captured.value)
     assert "Unauthorized" in str(captured.value)
+
+
+def test_telegram_connect_timeout_has_actionable_error():
+    assert "api.telegram.org:443" in _telegram_http_error_description(
+        httpx.ConnectTimeout("timeout")
+    )
 
 
 def test_recent_chats_are_deduplicated(settings):
@@ -421,7 +428,7 @@ def test_email_error_never_exposes_password(settings, monkeypatch):
     assert "m***@example.com" in str(captured.value)
 
 
-def test_router_keeps_working_channel_and_disables_failed_one(settings):
+def test_router_retries_transiently_failed_channel_on_next_reminder(settings):
     calls = []
 
     class Backend:
@@ -452,7 +459,29 @@ def test_router_keeps_working_channel_and_disables_failed_one(settings):
         router.send_captcha_detected(reason="captcha", url="https://example.com", wait_seconds=1)
         == 1
     )
-    assert calls == ["Email", "Telegram", "Email"]
+    assert calls == ["Email", "Telegram", "Email", "Telegram"]
+
+
+def test_telegram_partial_recipient_failure_does_not_hide_success(settings, monkeypatch):
+    notifier = TelegramNotifier(
+        _notification_settings(
+            settings,
+            telegram_primary_chat_ids=("10001", "10002"),
+        )
+    )
+
+    def call(_method, data):
+        if data["chat_id"] == "10001":
+            raise NotificationError("chat not found")
+        return {"ok": True}
+
+    monkeypatch.setattr(notifier, "_call", call)
+
+    assert notifier.send_captcha_detected(
+        reason="captcha",
+        url="https://example.com",
+        wait_seconds=60,
+    ) == 1
 
 
 def test_router_default_delivery_order_is_max_email_telegram(settings):

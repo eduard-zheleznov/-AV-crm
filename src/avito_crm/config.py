@@ -193,9 +193,19 @@ class Settings:
     max_consecutive_failures: int
 
     @classmethod
-    def load(cls, root_dir: Path | None = None) -> Settings:
+    def load(
+        cls,
+        root_dir: Path | None = None,
+        *,
+        refresh_env: bool = False,
+    ) -> Settings:
         root = (root_dir or Path.cwd()).resolve()
-        load_dotenv(root / ".env", override=False)
+        # The desktop application starts short-lived workers, but the Google
+        # remote controller can stay alive for days.  ``refresh_env=True`` lets
+        # that controller deliberately reload GUI-saved settings before every
+        # command instead of retaining recipients from its startup.  Normal CLI
+        # loads keep the conventional external-environment precedence.
+        load_dotenv(root / ".env", override=refresh_env, encoding="utf-8-sig")
         data = Path(os.getenv("APP_DATA_DIR", root / "data")).expanduser().resolve()
         output = Path(os.getenv("APP_OUTPUT_DIR", root / "output")).expanduser().resolve()
         logs = Path(os.getenv("APP_LOGS_DIR", root / "logs")).expanduser().resolve()

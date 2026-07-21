@@ -70,6 +70,16 @@ def _max_http_error_description(exc: httpx.HTTPError) -> str:
     return exc.__class__.__name__
 
 
+def _telegram_http_error_description(exc: httpx.HTTPError) -> str:
+    if isinstance(exc, httpx.ConnectTimeout):
+        return "нет доступа к api.telegram.org:443 (тайм-аут подключения)"
+    if isinstance(exc, httpx.ReadTimeout):
+        return "Telegram API не ответил за отведённое время"
+    if isinstance(exc, httpx.ConnectError):
+        return "не удалось подключиться к api.telegram.org:443"
+    return exc.__class__.__name__
+
+
 class TelegramNotifier:
     """Small Telegram Bot API client that never exposes the bot token in errors."""
 
@@ -128,9 +138,13 @@ class TelegramNotifier:
                 failures.append(f"{_mask_chat_id(chat_id)}: {exc}")
 
         if failures:
-            raise NotificationError(
-                f"сообщение доставлено в {sent} из {len(recipients)} чатов; " + "; ".join(failures)
+            detail = (
+                f"сообщение доставлено в {sent} из {len(recipients)} чатов; "
+                + "; ".join(failures)
             )
+            if sent == 0:
+                raise NotificationError(detail)
+            LOGGER.warning("Частичная доставка Telegram: %s", detail)
         return sent
 
     def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
@@ -313,8 +327,10 @@ class TelegramNotifier:
                 if self.token:
                     description = description.replace(self.token, "***REDACTED***")
                 last_error = f"HTTP {response.status_code}: {description[:240] or 'ошибка API'}"
-            except (httpx.HTTPError, ValueError) as exc:
-                last_error = exc.__class__.__name__
+            except httpx.HTTPError as exc:
+                last_error = _telegram_http_error_description(exc)
+            except ValueError:
+                last_error = "Telegram вернул ответ не в формате JSON"
 
             if attempt < self.send_attempts:
                 time.sleep(min(2**attempt, 5))
@@ -382,10 +398,13 @@ class MaxNotifier:
                 failures.append(f"{_mask_max_recipient(target)}: {exc}")
 
         if failures:
-            raise NotificationError(
+            detail = (
                 f"MAX-сообщение доставлено {sent} из {len(targets)} получателей; "
                 + "; ".join(failures)
             )
+            if sent == 0:
+                raise NotificationError(detail)
+            LOGGER.warning("Частичная доставка MAX: %s", detail)
         return sent
 
     def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
@@ -674,10 +693,14 @@ class EmailNotifier:
                 time.sleep(min(2**attempt, 5))
 
         masked = ", ".join(_mask_email(value) for value in pending)
-        raise NotificationError(
+        detail = (
             f"email доставлен {sent} из {sent + len(pending)} получателей; "
             f"не доставлено: {masked} ({last_error})"
         )
+        if sent == 0:
+            raise NotificationError(detail)
+        LOGGER.warning("Частичная доставка Email: %s", detail)
+        return sent
 
     def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
         return self.send(
@@ -823,7 +846,7 @@ class EmailNotifier:
 
 
 class NotificationRouter:
-    """Send through every configured channel and disable failed channels for this run."""
+    """Send through every configured channel without losing later reminders."""
 
     def __init__(self, settings: Settings, backends: list[object] | None = None) -> None:
         # Email goes first so a blocked Telegram endpoint cannot delay the useful alert.
@@ -855,11 +878,29 @@ class NotificationRouter:
                 continue
             channel = str(getattr(backend, "channel_name", backend.__class__.__name__))
             try:
-                delivered += int(getattr(backend, method)(**kwargs))
-            except (ConfigurationError, NotificationError) as exc:
+                channel_delivered = int(getattr(backend, method)(**kwargs))
+                delivered += channel_delivered
+                LOGGER.info(
+                    "Уведомление %s/%s: доставлено получателям: %s",
+                    channel,
+                    method,
+                    channel_delivered,
+                )
+            except ConfigurationError as exc:
                 self._unavailable.add(id(backend))
                 failures.append(f"{channel}: {exc}")
-                LOGGER.warning("Канал %s отключён до конца запуска: %s", channel, exc)
+                LOGGER.warning("Канал %s отключён из-за настройки: %s", channel, exc)
+            except NotificationError as exc:
+                # Delivery/API failures can be transient.  Keep the channel
+                # eligible for the next reminder so a temporary outage does not
+                # silence the entire CAPTCHA escalation chain.
+                failures.append(f"{channel}: {exc}")
+                LOGGER.warning(
+                    "Канал %s не доставил %s; повторим на следующем напоминании: %s",
+                    channel,
+                    method,
+                    exc,
+                )
             except Exception as exc:
                 self._unavailable.add(id(backend))
                 failures.append(f"{channel}: {exc.__class__.__name__}")

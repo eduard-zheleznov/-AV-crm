@@ -1178,16 +1178,23 @@ class RemoteController:
 
     def _run_worker(self, state: CommandState, remaining: int) -> None:
         try:
-            source = build_queue_source(self.settings, "google", None, state.worksheet)
+            # The controller is a long-running scheduled task.  Reload the
+            # local .env for every accepted command so notification recipients,
+            # tokens and other GUI settings take effect without a Windows logoff
+            # or manual task restart.
+            worker_settings = self._load_worker_settings()
+            source = build_queue_source(worker_settings, "google", None, state.worksheet)
             with (
-                SingleInstanceLock(self.settings.data_dir / "worker.lock"),
-                StateStore(self.settings.state_db) as store,
+                SingleInstanceLock(worker_settings.data_dir / "worker.lock"),
+                StateStore(worker_settings.state_db) as store,
             ):
                 summary = Pipeline(
-                    self.settings,
+                    worker_settings,
                     source,
                     store,
-                    source_name=(f"google:{self.settings.google_spreadsheet_id}:{state.worksheet}"),
+                    source_name=(
+                        f"google:{worker_settings.google_spreadsheet_id}:{state.worksheet}"
+                    ),
                     mode="full",
                     live=True,
                     include_manual=state.retry_manual,
@@ -1208,6 +1215,9 @@ class RemoteController:
             )
         with self._worker_guard:
             self._worker_result = result
+
+    def _load_worker_settings(self) -> Settings:
+        return Settings.load(self.settings.root_dir, refresh_env=True)
 
     def _progress_callback(self, state: CommandState, summary: RunSummary, row_id: str) -> None:
         with self._worker_guard:
