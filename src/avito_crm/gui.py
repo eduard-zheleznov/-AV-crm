@@ -68,7 +68,7 @@ class DesktopApp:
         )
         self.worksheet_var = tk.StringVar(value=values.get("GOOGLE_WORKSHEET", "Лист1"))
         self.credentials_var = tk.StringVar(value=values.get("GOOGLE_CREDENTIALS_FILE", ""))
-        self.limit_var = tk.StringVar(value=values.get("GUI_DEFAULT_LIMIT", "10"))
+        self.limit_var = tk.StringVar(value=values.get("GUI_DEFAULT_LIMIT", "0"))
         self.retry_manual_var = tk.BooleanVar(
             value=values.get("GUI_RETRY_MANUAL", "false").strip().lower()
             in {"1", "true", "yes", "on"}
@@ -251,13 +251,15 @@ class DesktopApp:
         ttk.Entry(settings_card, textvariable=self.worksheet_var, width=24).grid(
             row=2, column=1, sticky="w", pady=(12, 0)
         )
-        ttk.Label(settings_card, text="Лимит новых лидов", style="Field.TLabel").grid(
+        ttk.Label(
+            settings_card,
+            text="Цель по лидам (0 = все)",
+            style="Field.TLabel",
+        ).grid(
             row=2, column=2, sticky="e", padx=(20, 12), pady=(12, 0)
         )
-        ttk.Spinbox(
+        ttk.Entry(
             settings_card,
-            from_=1,
-            to=10_000,
             textvariable=self.limit_var,
             width=10,
         ).grid(row=2, column=3, sticky="e", pady=(12, 0))
@@ -1231,12 +1233,15 @@ class DesktopApp:
         except (OSError, ValueError) as exc:
             messagebox.showerror("Проверьте настройки", str(exc), parent=self.root)
             return
+        prompt = (
+            "Запустить последовательную обработку всех доступных строк?\n\n"
+            if limit == 0
+            else f"Запустить последовательную обработку до {limit} новых лидов?\n\n"
+        )
+        prompt += "Номер будет записан в LPTracker сразу после распознавания."
         confirmed = messagebox.askyesno(
             "Запуск в CRM",
-            (
-                f"Запустить последовательную обработку до {limit} новых лидов?\n\n"
-                "Номер будет записан в LPTracker сразу после распознавания."
-            ),
+            prompt,
             parent=self.root,
         )
         if not confirmed:

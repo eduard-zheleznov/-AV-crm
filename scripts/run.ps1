@@ -3,9 +3,7 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("google", "xlsx", "csv")]
     [string]$Source,
-    [Parameter(Mandatory = $true)]
-    [ValidateRange(1, 10000)]
-    [int]$Limit,
+    [int]$Limit = 0,
     [string]$File,
     [string]$Sheet,
     [ValidateSet("full", "capture", "crm")]
@@ -15,6 +13,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($Limit -lt 0) { throw "Limit не может быть отрицательным; 0 означает обработать все строки" }
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) { throw "Сначала выполните .\scripts\install.ps1" }

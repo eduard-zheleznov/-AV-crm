@@ -988,6 +988,7 @@ def _run_completion_message(
         f"Лидов создано: {summary.created}",
         f"Повторных лидов: {summary.repeat_created}",
         f"Шагов воронки обновлено: {summary.stage_synced}",
+        f'Строк со статусом «Недозвон»: {summary.no_answer_synced}',
         f"Повторное открытие исчерпано: {summary.repeat_exhausted}",
         f"Дубликатов: {summary.duplicates}",
         f"Неактивных объявлений: {summary.inactive}",

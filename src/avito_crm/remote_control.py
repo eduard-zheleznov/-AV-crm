@@ -63,6 +63,7 @@ HISTORY_HEADERS = (
     "Повторных попыток",
     "Некорректных ссылок",
     "Дата завершения",
+    "Строк со статусом «Недозвон»",
 )
 
 
@@ -97,6 +98,7 @@ class CommandState:
     base_manual_required: int = 0
     base_processed: int = 0
     base_inspected: int = 0
+    base_no_answer_synced: int = 0
     result: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -119,6 +121,7 @@ class ProgressSnapshot:
     manual_required: int = 0
     processed: int = 0
     inspected: int = 0
+    no_answer_synced: int = 0
     row_id: str = ""
 
 
@@ -187,6 +190,7 @@ class GoogleControlPanel:
             history_headers = tuple(history_values[0]) if history_values else ()
             if history_headers and history_headers not in {
                 LEGACY_HISTORY_HEADERS,
+                HISTORY_HEADERS[:-1],
                 HISTORY_HEADERS,
             }:
                 raise SourceError(
@@ -226,11 +230,8 @@ class GoogleControlPanel:
         control = self._require_control()
         try:
             values = control.get("A1:F12")
-            raw_limit = self._cell(values, 6, 2) or "10"
-            try:
-                limit = int(float(str(raw_limit).replace(",", ".")))
-            except ValueError:
-                limit = 0
+            raw_limit = self._cell(values, 6, 2)
+            limit = _parse_panel_limit(raw_limit)
             worksheet = self._cell(values, 7, 2).strip() or self.settings.google_worksheet
             return PanelCommand(
                 start=_checked(self._cell(values, 4, 2)),
@@ -250,7 +251,7 @@ class GoogleControlPanel:
                 "B4": False,
                 "E4": "ПРИНЯТО",
                 "E5": state.command_id,
-                "E6": f"0 / {state.target}",
+                "E6": f"0 / {_target_label(state.target)}",
                 "E7": state.started_at,
                 "E8": utc_now(),
                 "E9": "Команда зафиксирована; запускаем рабочий процесс.",
@@ -283,7 +284,7 @@ class GoogleControlPanel:
             {
                 "E4": status,
                 "E5": state.command_id,
-                "E6": f"{progress.created} / {state.target}",
+                "E6": f"{progress.created} / {_target_label(state.target)}",
                 "E7": state.started_at,
                 "E8": utc_now(),
                 "E9": detail[:500],
@@ -298,7 +299,9 @@ class GoogleControlPanel:
             {
                 "E4": str(result.get("status", "ЗАВЕРШЕНО")),
                 "E5": state.command_id,
-                "E6": f"{int(result.get('created', 0))} / {state.target}",
+                "E6": (
+                    f"{int(result.get('created', 0))} / {_target_label(state.target)}"
+                ),
                 "E8": utc_now(),
                 "E9": str(result.get("message", ""))[:500],
                 "E11": _computer_name(self.settings),
@@ -345,9 +348,10 @@ class GoogleControlPanel:
                         0,
                         0,
                         "",
+                        0,
                     ]
                 ],
-                f"A{row_number}:V{row_number}",
+                f"A{row_number}:W{row_number}",
                 value_input_option="RAW",
             )
             return row_number
@@ -380,9 +384,10 @@ class GoogleControlPanel:
                         int(result.get("retries", 0)),
                         int(result.get("invalid", 0)),
                         str(result.get("finished_at", utc_now()))[:10],
+                        int(result.get("no_answer_synced", 0)),
                     ]
                 ],
-                f"F{state.history_row}:V{state.history_row}",
+                f"F{state.history_row}:W{state.history_row}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -447,10 +452,11 @@ class GoogleControlPanel:
                 summary.retries,
                 summary.invalid,
                 finished_at[:10],
+                summary.no_answer_synced,
             ]
             history.update(
                 [row],
-                f"A{row_number}:V{row_number}",
+                f"A{row_number}:W{row_number}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -475,9 +481,15 @@ class GoogleControlPanel:
             if self.settings.attempts_column in headers
             else -1
         )
+        funnel_stage_index = (
+            headers.index(self.settings.funnel_stage_column)
+            if self.settings.funnel_stage_column in headers
+            else -1
+        )
         counts: dict[str, int] = {}
         attempts = 0
         processed = 0
+        no_answer_synced = 0
         for row in values[1:]:
             run_value = row[run_index].strip() if run_index < len(row) else ""
             if run_value != command_id:
@@ -485,6 +497,16 @@ class GoogleControlPanel:
             processed += 1
             status = row[status_index].strip().lower() if status_index < len(row) else ""
             counts[status] = counts.get(status, 0) + 1
+            if funnel_stage_index >= 0 and funnel_stage_index < len(row):
+                normalized_stage = " ".join(row[funnel_stage_index].split()).casefold()
+                if normalized_stage in {
+                    " ".join(
+                        self.settings.lptracker_no_answer_funnel_name.split()
+                    ).casefold(),
+                    "недозвон",
+                    "не дозвон",
+                }:
+                    no_answer_synced += 1
             if attempts_index >= 0 and attempts_index < len(row):
                 with suppress(ValueError):
                     attempts += max(0, int(float(row[attempts_index] or 0)))
@@ -505,6 +527,7 @@ class GoogleControlPanel:
             manual_required=counts.get(ItemStatus.MANUAL_REQUIRED.value, 0),
             processed=processed,
             inspected=attempts,
+            no_answer_synced=no_answer_synced,
         )
 
     def _worksheet_or_create(self, title: str, *, rows: int, cols: int) -> Any:
@@ -518,12 +541,12 @@ class GoogleControlPanel:
         matrix: list[list[Any]] = [[""] * 6 for _ in range(12)]
         matrix[0][0] = CONTROL_MARKER
         matrix[1][0] = (
-            "1. Добавьте ссылки в лист очереди.  2. Укажите лимит.  "
+            "1. Добавьте ссылки в лист очереди.  2. Укажите цель (0 = все строки).  "
             "3. Поставьте галочку «ЗАПУСТИТЬ В CRM»."
         )
         matrix[3] = ["ЗАПУСТИТЬ В CRM", False, "", "Статус", "ГОТОВ", ""]
         matrix[4] = ["Остановить", False, "", "Команда ID", "", ""]
-        matrix[5] = ["Лимит новых лидов", 10, "", "Прогресс", "0 / 0", ""]
+        matrix[5] = ["Цель по новым лидам (0 = все)", 0, "", "Прогресс", "0 / все", ""]
         matrix[6] = ["Лист очереди", self.settings.google_worksheet, "", "Запущено", "", ""]
         matrix[7] = [
             "Повторить строки после ручной проверки",
@@ -551,6 +574,10 @@ class GoogleControlPanel:
         with suppress(Exception):
             control.batch_update(
                 [
+                    {
+                        "range": "A6",
+                        "values": [["Цель по новым лидам (0 = все)"]],
+                    },
                     {
                         "range": "A8",
                         "values": [["Повторить строки после ручной проверки"]],
@@ -588,7 +615,13 @@ class GoogleControlPanel:
         )
         rows[3][:5] = ["Период, дней", current_period, "", "Обновлено", ""]
         rows[5][:4] = ["Показатель", "Текущий период", "Предыдущий период", "Изменение"]
-        rows[16][:4] = ["Дата", "Создано лидов", "Открыто номеров", "Тех. ошибок"]
+        rows[16][:5] = [
+            "Дата",
+            "Создано лидов",
+            "Открыто номеров",
+            "Тех. ошибок",
+            "Недозвон",
+        ]
         with suppress(Exception):
             analytics.resize(rows=110, cols=8)
         with suppress(Exception):
@@ -635,6 +668,7 @@ class GoogleControlPanel:
                 total(values, 15) + total(values, 16),
                 total(values, 17),
                 total(values, 9),
+                total(values, 22),
                 created / processed if processed else 0.0,
             ]
 
@@ -649,6 +683,7 @@ class GoogleControlPanel:
             "Неактивных / без кнопки",
             "Не открыто после попыток",
             "Технических ошибок",
+            "Строк со статусом «Недозвон»",
             "Конверсия ссылок в лиды",
         ]
         metrics = []
@@ -676,11 +711,12 @@ class GoogleControlPanel:
                     total(day_rows, 7),
                     total(day_rows, 14),
                     total(day_rows, 9),
+                    total(day_rows, 22),
                 ]
             )
-        daily.extend([["", "", "", ""]] * (90 - len(daily)))
-        analytics.update(metrics, "A7:D15", value_input_option="RAW")
-        analytics.update(daily, "A18:D107", value_input_option="RAW")
+        daily.extend([["", "", "", "", ""]] * (90 - len(daily)))
+        analytics.update(metrics, "A7:D16", value_input_option="RAW")
+        analytics.update(daily, "A18:E107", value_input_option="RAW")
         analytics.batch_update(
             [
                 {"range": "B4", "values": [[period]]},
@@ -743,15 +779,15 @@ class GoogleControlPanel:
                 },
             )
             analytics.format(
-                "A7:D15",
+                "A7:D16",
                 {
                     "backgroundColor": {"red": 0.97, "green": 0.98, "blue": 1},
                     "verticalAlignment": "MIDDLE",
                 },
             )
-            analytics.format("A7:A15", {"textFormat": {"bold": True}})
+            analytics.format("A7:A16", {"textFormat": {"bold": True}})
             analytics.format(
-                "D7:D15",
+                "D7:D16",
                 {
                     "numberFormat": {
                         "type": "PERCENT",
@@ -759,9 +795,9 @@ class GoogleControlPanel:
                     }
                 },
             )
-            analytics.format("B15:C15", {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}})
+            analytics.format("B16:C16", {"numberFormat": {"type": "PERCENT", "pattern": "0.0%"}})
             analytics.format(
-                "A17:D17",
+                "A17:E17",
                 {
                     "backgroundColor": {"red": 0.12, "green": 0.24, "blue": 0.42},
                     "textFormat": {
@@ -784,7 +820,7 @@ class GoogleControlPanel:
                 _row_height_request(sheet_id, 0, 1, 50),
                 _row_height_request(sheet_id, 1, 2, 36),
                 _column_width_request(sheet_id, 0, 1, 260),
-                _column_width_request(sheet_id, 1, 4, 135),
+                _column_width_request(sheet_id, 1, 5, 135),
                 {
                     "setDataValidation": {
                         "range": {
@@ -864,7 +900,7 @@ class GoogleControlPanel:
             history.freeze(rows=1)
             history.set_basic_filter()
             history.format(
-                "A1:V1",
+                "A1:W1",
                 {
                     "backgroundColor": {"red": 0.05, "green": 0.09, "blue": 0.16},
                     "textFormat": {
@@ -891,7 +927,7 @@ class GoogleControlPanel:
                     (7, 10, 95),
                     (10, 11, 320),
                     (11, 12, 170),
-                    (12, 22, 130),
+                    (12, 23, 130),
                 ):
                     requests.append(_column_width_request(sheet_id, start, end, size))
                 requests.extend(
@@ -951,15 +987,10 @@ class GoogleControlPanel:
                     },
                     "rule": {
                         "condition": {
-                            "type": "NUMBER_BETWEEN",
-                            "values": [
-                                {"userEnteredValue": "1"},
-                                {"userEnteredValue": str(self.settings.remote_control_max_limit)},
-                            ],
+                            "type": "NUMBER_GREATER_THAN_EQ",
+                            "values": [{"userEnteredValue": "0"}],
                         },
-                        "inputMessage": (
-                            f"Целое число от 1 до {self.settings.remote_control_max_limit}"
-                        ),
+                        "inputMessage": "Целое число от 0; 0 означает обработать все строки",
                         "strict": True,
                         "showCustomUi": True,
                     },
@@ -1112,10 +1143,8 @@ class RemoteController:
         self._continue_existing_state()
 
     def _validate_command(self, command: PanelCommand) -> None:
-        if not 1 <= command.limit <= self.settings.remote_control_max_limit:
-            self.panel.reject_start(
-                f"Лимит должен быть от 1 до {self.settings.remote_control_max_limit}."
-            )
+        if command.limit < 0:
+            self.panel.reject_start("Цель должна быть целым числом от 0; 0 означает «все».")
             raise ConfigurationError("Некорректный лимит удалённой команды")
         reserved = {
             self.settings.google_control_worksheet.casefold(),
@@ -1153,9 +1182,10 @@ class RemoteController:
         state.base_manual_required = recovered.manual_required
         state.base_processed = recovered.processed
         state.base_inspected = recovered.inspected
+        state.base_no_answer_synced = recovered.no_answer_synced
         self._progress = recovered
-        remaining = state.target - recovered.created
-        if remaining <= 0:
+        remaining = max(0, state.target - recovered.created)
+        if state.target > 0 and remaining == 0:
             state.result = self._result_dict(
                 state,
                 status="ЗАВЕРШЕНО",
@@ -1234,6 +1264,9 @@ class RemoteController:
                 manual_required=state.base_manual_required + summary.manual_required,
                 processed=state.base_processed + summary.processed,
                 inspected=state.base_inspected + summary.inspected,
+                no_answer_synced=(
+                    state.base_no_answer_synced + summary.no_answer_synced
+                ),
                 row_id=row_id,
             )
 
@@ -1302,10 +1335,17 @@ class RemoteController:
             status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
         else:
             status = "ЗАВЕРШЕНО"
+        goal_message = (
+            f"Создано {progress.created}; обработаны все доступные строки; "
+            if state.target == 0
+            else f"Создано {progress.created} из цели {state.target}; "
+        )
         message = (
-            f"Создано {progress.created} из лимита {state.target}; "
+            goal_message
+            +
             f"открыто номеров {progress.captured}; "
             f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
+            f"статус «Недозвон» {progress.no_answer_synced}; "
             f"не открыто после попыток {progress.phone_failed}; "
             f"технических ошибок {progress.errors}. "
             f"Остановка: {summary.stopped_reason or 'не указана'}."
@@ -1336,6 +1376,7 @@ class RemoteController:
             "manual_required": progress.manual_required,
             "processed": progress.processed,
             "inspected": progress.inspected,
+            "no_answer_synced": progress.no_answer_synced,
             "command_id": state.command_id,
         }
 
@@ -1424,7 +1465,7 @@ def _analytics_chart_request(sheet_id: int) -> dict[str, Any]:
                         "domains": [{"domain": source_range(0)}],
                         "series": [
                             {"series": source_range(column), "targetAxis": "LEFT_AXIS"}
-                            for column in (1, 2, 3)
+                            for column in (1, 2, 3, 4)
                         ],
                         "axis": [
                             {"position": "BOTTOM_AXIS", "title": "Дата"},
@@ -1461,6 +1502,25 @@ def _column_letter(number: int) -> str:
 
 def _checked(value: str) -> bool:
     return str(value or "").strip().casefold() in {"true", "1", "yes", "да", "запуск"}
+
+
+def _parse_panel_limit(value: object) -> int:
+    """Parse a non-negative integer without silently truncating decimal input."""
+    raw = str(value or "").strip().replace("\u00a0", "")
+    if not raw:
+        return 0
+    normalized = raw.replace(",", ".")
+    try:
+        numeric = float(normalized)
+    except ValueError:
+        return -1
+    if not numeric.is_integer() or numeric < 0:
+        return -1
+    return int(numeric)
+
+
+def _target_label(target: int) -> str:
+    return "все" if target == 0 else str(target)
 
 
 def _new_command_id() -> str:

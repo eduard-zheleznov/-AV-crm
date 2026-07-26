@@ -329,8 +329,8 @@ def test_stop_is_durable_and_does_not_restart_after_controller_reboot(settings):
     assert panel.finishes[0]["status"] == "ОСТАНОВЛЕНО"
 
 
-def test_invalid_remote_limit_is_rejected_before_state_is_created(settings):
-    panel = FakePanel(PanelCommand(True, False, 1001, "Лист1", False))
+def test_negative_remote_limit_is_rejected_before_state_is_created(settings):
+    panel = FakePanel(PanelCommand(True, False, -1, "Лист1", False))
     controller = InstantController(settings, panel)
 
     with pytest.raises(Exception, match="лимит"):
@@ -338,6 +338,19 @@ def test_invalid_remote_limit_is_rejected_before_state_is_created(settings):
 
     assert panel.rejections
     assert not controller.state_path.exists()
+
+
+def test_remote_control_accepts_unlimited_target(settings):
+    panel = FakePanel(PanelCommand(True, False, 0, "Лист1", False))
+    controller = InstantController(settings, panel)
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller.remaining_values == [0]
+    assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
 
 
 def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):

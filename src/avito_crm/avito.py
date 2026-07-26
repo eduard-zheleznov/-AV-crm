@@ -158,7 +158,6 @@ class AvitoBrowser:
         self.playwright: Playwright | None = None
         self.context: BrowserContext | None = None
         self.page: Page | None = None
-        self.processed_in_session = 0
         self.next_long_break_at = 0.0
 
     def __enter__(self) -> AvitoBrowser:
@@ -186,10 +185,6 @@ class AvitoBrowser:
         self.page = None
         self.context = None
         self.playwright = None
-
-    @property
-    def session_limit_reached(self) -> bool:
-        return self.processed_in_session >= self.settings.avito_max_per_session
 
     def reveal_phone(self, url: str, row_id: str = "") -> PhoneResult:
         if self.page is None:
@@ -220,13 +215,10 @@ class AvitoBrowser:
                 return self._complete_listing(first_round.phone)
 
             last_round = first_round
-            if (
-                first_round.explicit_phone_error
-                and self.settings.avito_phone_second_round_attempts > 0
-            ):
+            if first_round.button_found and self.settings.avito_phone_second_round_attempts > 0:
                 LOGGER.info(
-                    "Avito показал временную ошибку телефона; начинаем второй круг после "
-                    "повторной загрузки страницы"
+                    "Первый круг не вернул номер; очищаем состояние полной повторной "
+                    "загрузкой объявления и запускаем второй круг"
                 )
                 self._sleep_range(
                     self.settings.avito_phone_retry_min,
@@ -235,6 +227,9 @@ class AvitoBrowser:
                 self._goto_with_retries(page, canonical_url)
                 self._wait_delay(0.45, 0.75)
                 self._recover_manual_action(page, canonical_url)
+                inactive_reason = self._inactive_listing_reason(page)
+                if inactive_reason:
+                    raise InactiveListingError(inactive_reason)
                 second_round = self._reveal_round(
                     page,
                     canonical_url,
@@ -721,7 +716,6 @@ class AvitoBrowser:
         self._schedule_next_long_break()
 
     def _complete_listing(self, result: PhoneResult) -> PhoneResult:
-        self.processed_in_session += 1
         self._sleep_range(0.7, 1.8)
         return result
 

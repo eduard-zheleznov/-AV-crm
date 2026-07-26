@@ -22,6 +22,7 @@ class ItemStatus(StrEnum):
     REPEAT_RETRY_PHONE = "repeat_retry_phone"
     REPEAT_RETRY_TECHNICAL = "repeat_retry_technical"
     REPEAT_EXHAUSTED = "repeat_exhausted"
+    RECREATE_PENDING = "recreate_pending"
     INVALID = "invalid"
 
 
@@ -90,6 +91,7 @@ class RunSummary:
     processed: int = 0
     rounds: int = 0
     stage_synced: int = 0
+    no_answer_synced: int = 0
     repeat_created: int = 0
     repeat_exhausted: int = 0
     crm_sync_errors: int = 0

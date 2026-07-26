@@ -123,12 +123,15 @@ def service_account_email(path: Path) -> str:
 
 
 def parse_limit(value: str) -> int:
+    candidate = value.strip().casefold()
+    if candidate in {"", "все", "all", "∞"}:
+        return 0
     try:
-        limit = int(value.strip())
+        limit = int(candidate)
     except ValueError as exc:
-        raise ValueError("Лимит должен быть целым числом") from exc
-    if not 1 <= limit <= 10_000:
-        raise ValueError("Лимит должен быть от 1 до 10000")
+        raise ValueError("Введите целое число или «все»") from exc
+    if limit < 0:
+        raise ValueError("Лимит не может быть отрицательным; 0 означает «все»")
     return limit
 
 

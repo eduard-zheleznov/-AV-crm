@@ -4,7 +4,11 @@ import logging
 import re
 import threading
 import time
+from contextlib import suppress
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -203,20 +207,43 @@ class LpTrackerClient:
         *,
         project_id: int,
         funnel_steps: list[dict[str, Any]] | None = None,
+        lead: dict[str, Any] | None = None,
     ) -> str:
-        lead = self.get_lead(lead_id)
+        lead_data = lead if lead is not None else self.get_lead(lead_id)
         steps = funnel_steps if funnel_steps is not None else self.list_funnel_steps(project_id)
         stage_map = {
             str(step.get("id", "")): str(step.get("name", "")).strip()
             for step in steps
             if step.get("id") is not None
         }
-        stage_id, direct_name = _extract_funnel_stage(lead)
+        stage_id, direct_name = _extract_funnel_stage(lead_data)
         if direct_name:
             return direct_name
         if stage_id and stage_id in stage_map:
             return stage_map[stage_id]
         return ""
+
+    def first_call_delay_seconds(self, lead: dict[str, Any]) -> float | None:
+        """Return first successful call delay, or None when either date is unavailable."""
+        try:
+            local_timezone = ZoneInfo(self.settings.lptracker_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigurationError(
+                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE="
+                f"{self.settings.lptracker_timezone!r}"
+            ) from exc
+        created_at = _extract_lead_created_at(lead, local_timezone)
+        first_call_at = _extract_first_call_at(lead, local_timezone)
+        if created_at is None or first_call_at is None:
+            return None
+        return (first_call_at - created_at).total_seconds()
+
+    def delete_lead(self, lead_id: str | int) -> None:
+        """Delete one lead; a failed or ambiguous API response raises CrmError."""
+        normalized_id = str(lead_id).strip()
+        if not normalized_id:
+            raise CrmError("Нельзя удалить лид без ID")
+        self._request("DELETE", f"/lead/{normalized_id}")
 
     def find_lead_for_listing(
         self,
@@ -483,6 +510,101 @@ def _extract_funnel_stage(lead: dict[str, Any]) -> tuple[str, str]:
         if value not in (None, ""):
             return str(value).strip(), ""
     return "", ""
+
+
+def _extract_lead_created_at(
+    lead: dict[str, Any], local_timezone: ZoneInfo
+) -> datetime | None:
+    for key in ("created_at", "lead_date", "created"):
+        parsed = _parse_crm_datetime(lead.get(key), local_timezone)
+        if parsed is not None:
+            return parsed
+    created_names = {
+        "дата заявки",
+        "дата лида",
+        "дата создания",
+        "дата создания лида",
+    }
+    for field in _custom_fields(lead):
+        if _normalized_name(str(field.get("name", ""))) not in created_names:
+            continue
+        parsed = _parse_crm_datetime(field.get("value"), local_timezone)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _extract_first_call_at(
+    lead: dict[str, Any], local_timezone: ZoneInfo
+) -> datetime | None:
+    records: list[Any] = []
+    for key in ("calls_records", "call_records", "calls"):
+        value = lead.get(key)
+        if isinstance(value, list):
+            records.extend(value)
+    call_dates: list[datetime] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key in ("time", "created_at", "started_at", "date"):
+            parsed = _parse_crm_datetime(record.get(key), local_timezone)
+            if parsed is not None:
+                call_dates.append(parsed)
+                break
+    return min(call_dates) if call_dates else None
+
+
+def _custom_fields(lead: dict[str, Any]) -> list[dict[str, Any]]:
+    custom = lead.get("custom") or []
+    if isinstance(custom, dict):
+        custom = (
+            [custom] if "id" in custom or "name" in custom else list(custom.values())
+        )
+    return [field for field in custom if isinstance(field, dict)]
+
+
+def _parse_crm_datetime(value: Any, local_timezone: ZoneInfo) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, (int, float)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp, UTC)
+        except (OSError, OverflowError, ValueError):
+            return None
+    else:
+        text = str(value).strip()
+        if not text:
+            return None
+        if re.fullmatch(r"\d+(?:\.\d+)?", text):
+            return _parse_crm_datetime(float(text), local_timezone)
+        parsed = None
+        with suppress(ValueError):
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed is None:
+            for pattern in (
+                "%d.%m.%Y %H:%M:%S",
+                "%d.%m.%Y %H:%M",
+                "%d.%m.%y %H:%M:%S",
+                "%d.%m.%y %H:%M",
+            ):
+                try:
+                    parsed = datetime.strptime(text, pattern)
+                    break
+                except ValueError:
+                    continue
+        if parsed is None:
+            try:
+                parsed = parsedate_to_datetime(text)
+            except (TypeError, ValueError):
+                return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=local_timezone)
+    return parsed.astimezone(UTC)
 
 
 def _error_codes(payload: dict[str, Any]) -> set[int]:

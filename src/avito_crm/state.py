@@ -48,6 +48,7 @@ class StateStore:
                 processed INTEGER NOT NULL DEFAULT 0,
                 rounds INTEGER NOT NULL DEFAULT 0,
                 stage_synced INTEGER NOT NULL DEFAULT 0,
+                no_answer_synced INTEGER NOT NULL DEFAULT 0,
                 repeat_created INTEGER NOT NULL DEFAULT 0,
                 repeat_exhausted INTEGER NOT NULL DEFAULT 0,
                 crm_sync_errors INTEGER NOT NULL DEFAULT 0,
@@ -83,6 +84,7 @@ class StateStore:
             "processed": "INTEGER NOT NULL DEFAULT 0",
             "rounds": "INTEGER NOT NULL DEFAULT 0",
             "stage_synced": "INTEGER NOT NULL DEFAULT 0",
+            "no_answer_synced": "INTEGER NOT NULL DEFAULT 0",
             "repeat_created": "INTEGER NOT NULL DEFAULT 0",
             "repeat_exhausted": "INTEGER NOT NULL DEFAULT 0",
             "crm_sync_errors": "INTEGER NOT NULL DEFAULT 0",
@@ -201,7 +203,8 @@ class StateStore:
                 phone_failed=phone_failed + ?, retries=retries + ?,
                 manual_required=manual_required + ?, inspected=inspected + ?,
                 processed=processed + ?, rounds=rounds + ?, stopped_reason=?
-                , stage_synced=stage_synced + ?, repeat_created=repeat_created + ?,
+                , stage_synced=stage_synced + ?, no_answer_synced=no_answer_synced + ?,
+                repeat_created=repeat_created + ?,
                 repeat_exhausted=repeat_exhausted + ?, crm_sync_errors=crm_sync_errors + ?
             WHERE run_id=?
             """,
@@ -222,6 +225,7 @@ class StateStore:
                 summary.rounds,
                 summary.stopped_reason,
                 summary.stage_synced,
+                summary.no_answer_synced,
                 summary.repeat_created,
                 summary.repeat_exhausted,
                 summary.crm_sync_errors,

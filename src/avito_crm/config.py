@@ -6,6 +6,7 @@ import socket
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -115,7 +116,10 @@ class Settings:
     lptracker_field_value: str
     lptracker_service_name: str
     lptracker_autoresponder_funnel_name: str
+    lptracker_no_answer_funnel_name: str
+    lptracker_new_lead_funnel_name: str
     lptracker_repeat_funnel_name: str
+    lptracker_timezone: str
     duplicate_policy: str
 
     google_credentials_file: Path | None
@@ -124,7 +128,6 @@ class Settings:
     google_control_worksheet: str
     google_history_worksheet: str
     remote_control_poll_seconds: float
-    remote_control_max_limit: int
 
     url_column: str
     status_column: str
@@ -144,7 +147,6 @@ class Settings:
     avito_max_delay: float
     avito_page_timeout: float
     avito_manual_timeout: float
-    avito_max_per_session: int
     avito_phone_first_round_attempts: int
     avito_phone_second_round_attempts: int
     avito_phone_retry_min: float
@@ -242,9 +244,16 @@ class Settings:
             lptracker_autoresponder_funnel_name=os.getenv(
                 "LPTRACKER_AUTORESPONDER_FUNNEL_NAME", "Автоответчик"
             ).strip(),
+            lptracker_no_answer_funnel_name=os.getenv(
+                "LPTRACKER_NO_ANSWER_FUNNEL_NAME", "Недозвон"
+            ).strip(),
+            lptracker_new_lead_funnel_name=os.getenv(
+                "LPTRACKER_NEW_LEAD_FUNNEL_NAME", "Новый Лид"
+            ).strip(),
             lptracker_repeat_funnel_name=os.getenv(
                 "LPTRACKER_REPEAT_FUNNEL_NAME", "Повторный лид"
             ).strip(),
+            lptracker_timezone=os.getenv("LPTRACKER_TIMEZONE", "Europe/Moscow").strip(),
             duplicate_policy=os.getenv("CRM_DUPLICATE_POLICY", "skip").strip().lower(),
             google_credentials_file=Path(credentials).expanduser().resolve()
             if credentials
@@ -256,7 +265,6 @@ class Settings:
                 "GOOGLE_HISTORY_WORKSHEET", "История запусков"
             ).strip(),
             remote_control_poll_seconds=_float("REMOTE_CONTROL_POLL_SECONDS", 20.0),
-            remote_control_max_limit=int(_int("REMOTE_CONTROL_MAX_LIMIT", 100) or 0),
             url_column=os.getenv("QUEUE_URL_COLUMN", "Ссылка").strip(),
             status_column=os.getenv("QUEUE_STATUS_COLUMN", "Статус").strip(),
             phone_column=os.getenv("QUEUE_PHONE_COLUMN", "Телефон").strip(),
@@ -280,7 +288,6 @@ class Settings:
             avito_max_delay=_float("AVITO_MAX_DELAY_SECONDS", 15.0),
             avito_page_timeout=_float("AVITO_PAGE_TIMEOUT_SECONDS", 45.0),
             avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 43_200.0),
-            avito_max_per_session=_int("AVITO_MAX_PER_SESSION", 25) or 25,
             avito_phone_first_round_attempts=int(_int("AVITO_PHONE_FIRST_ROUND_ATTEMPTS", 6) or 0),
             avito_phone_second_round_attempts=int(
                 _int("AVITO_PHONE_SECOND_ROUND_ATTEMPTS", 3) or 0
@@ -344,8 +351,6 @@ class Settings:
     def validate(self) -> None:
         if self.avito_min_delay < 0 or self.avito_max_delay < self.avito_min_delay:
             raise ConfigurationError("Некорректный диапазон задержек Avito")
-        if self.avito_max_per_session < 1:
-            raise ConfigurationError("AVITO_MAX_PER_SESSION должен быть больше нуля")
         if self.avito_manual_timeout < 60:
             raise ConfigurationError("AVITO_MANUAL_TIMEOUT_SECONDS должен быть не меньше 60")
         ranges = (
@@ -439,6 +444,22 @@ class Settings:
                 raise ConfigurationError("Последнее напоминание должно быть раньше таймаута капчи")
         if self.duplicate_policy not in {"skip", "create_lead"}:
             raise ConfigurationError("CRM_DUPLICATE_POLICY: допустимо skip или create_lead")
+        funnel_names = {
+            "LPTRACKER_AUTORESPONDER_FUNNEL_NAME": self.lptracker_autoresponder_funnel_name,
+            "LPTRACKER_NO_ANSWER_FUNNEL_NAME": self.lptracker_no_answer_funnel_name,
+            "LPTRACKER_NEW_LEAD_FUNNEL_NAME": self.lptracker_new_lead_funnel_name,
+            "LPTRACKER_REPEAT_FUNNEL_NAME": self.lptracker_repeat_funnel_name,
+        }
+        empty_funnels = [name for name, value in funnel_names.items() if not value]
+        if empty_funnels:
+            raise ConfigurationError(f"{', '.join(empty_funnels)} не может быть пустым")
+        try:
+            ZoneInfo(self.lptracker_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigurationError(
+                f"LPTRACKER_TIMEZONE содержит неизвестный часовой пояс: "
+                f"{self.lptracker_timezone!r}"
+            ) from exc
         if not self.google_control_worksheet:
             raise ConfigurationError("GOOGLE_CONTROL_WORKSHEET не может быть пустым")
         if not self.google_history_worksheet:
@@ -451,8 +472,6 @@ class Settings:
             raise ConfigurationError("Лист очереди, пульт и история должны иметь разные имена")
         if not 5 <= self.remote_control_poll_seconds <= 300:
             raise ConfigurationError("REMOTE_CONTROL_POLL_SECONDS должен быть от 5 до 300")
-        if not 1 <= self.remote_control_max_limit <= 1000:
-            raise ConfigurationError("REMOTE_CONTROL_MAX_LIMIT должен быть от 1 до 1000")
 
     def ensure_runtime_dirs(self) -> None:
         for path in (

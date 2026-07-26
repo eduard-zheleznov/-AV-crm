@@ -61,8 +61,8 @@ class Pipeline:
         run_id: str | None = None,
         progress: Callable[[RunSummary, str], None] | None = None,
     ) -> RunSummary:
-        if limit < 1:
-            raise ValueError("Лимит должен быть больше нуля")
+        if limit < 0:
+            raise ValueError("Лимит не может быть отрицательным; 0 означает «все строки»")
         self.stop_file.unlink(missing_ok=True)
         summary = RunSummary(run_id=run_id or uuid.uuid4().hex[:12], requested=limit)
         self.state.begin_run(summary)
@@ -144,17 +144,7 @@ class Pipeline:
                             should_stop = True
                             break
                         repeat_flow = self._is_repeat_flow(item)
-                        needs_phone = repeat_flow or not normalize_phone(
-                            str(item.values.get(self.source.columns.phone, "") or "")
-                        )
-                        if browser and needs_phone and browser.session_limit_reached:
-                            summary.stopped_reason = (
-                                "Достигнут лимит сессии Avito: "
-                                f"{self.settings.avito_max_per_session}"
-                            )
-                            should_stop = True
-                            break
-
+                        recreate_flow = self._is_recreate_flow(item)
                         attempted_this_round = True
                         summary.inspected += 1
                         processed_rows.add(item.row_id)
@@ -301,12 +291,22 @@ class Pipeline:
                                     destination.project_id,
                                     self.settings.lptracker_repeat_funnel_name,
                                 )
+                            recreate_funnel_id = (
+                                getattr(self, "_new_lead_funnel_id", None)
+                                if recreate_flow
+                                else None
+                            )
+                            if recreate_flow and recreate_funnel_id is None:
+                                recreate_funnel_id = crm.resolve_funnel_step_id(
+                                    destination.project_id,
+                                    self.settings.lptracker_new_lead_funnel_name,
+                                )
                             write = crm.create_for_phone(
                                 phone,
                                 canonical_url,
                                 destination,
-                                force_create=repeat_flow,
-                                funnel_id=repeat_funnel_id,
+                                force_create=repeat_flow or recreate_flow,
+                                funnel_id=recreate_funnel_id or repeat_funnel_id,
                                 repeat=repeat_flow,
                             )
                             self._finalize(
@@ -336,13 +336,15 @@ class Pipeline:
                                     funnel_stage=(
                                         self.settings.lptracker_repeat_funnel_name
                                         if repeat_flow and write.status == ItemStatus.DONE
+                                        else self.settings.lptracker_new_lead_funnel_name
+                                        if recreate_flow and write.status == ItemStatus.DONE
                                         else None
                                     ),
                                     crm_create_count=(
                                         2
                                         if repeat_flow and write.status == ItemStatus.DONE
                                         else 1
-                                        if not repeat_flow and write.status == ItemStatus.DONE
+                                        if (not repeat_flow) and write.status == ItemStatus.DONE
                                         else None
                                     ),
                                     repeat_crm_lead_id=(
@@ -510,6 +512,8 @@ class Pipeline:
                                 if repeat_reveal_exhausted
                                 else ItemStatus.ERROR
                                 if final_attempt
+                                else ItemStatus.RECREATE_PENDING
+                                if recreate_flow
                                 else ItemStatus.REPEAT_RETRY_TECHNICAL
                                 if repeat_flow
                                 else ItemStatus.RETRY_TECHNICAL
@@ -576,10 +580,11 @@ class Pipeline:
         project_id: int,
         summary: RunSummary,
     ) -> None:
-        """Refresh funnel stages and schedule only bounded autoresponder repeats."""
+        """Refresh funnel stages and schedule bounded repeats for configured stages."""
         all_items = self.source.list_all()
         sync_items: list[QueueItem] = []
         self._repeat_funnel_id = None
+        self._new_lead_funnel_id = None
 
         for item in all_items:
             count = self._int_value(item.values.get(self.source.columns.crm_create_count))
@@ -637,8 +642,25 @@ class Pipeline:
                 self._repeat_funnel_id = int(repeat_matches[0]["id"])
             except (KeyError, TypeError, ValueError):
                 self._repeat_funnel_id = None
+        new_lead_matches = [
+            step
+            for step in steps
+            if self._normalized_text(str(step.get("name", "")))
+            == self._normalized_text(self.settings.lptracker_new_lead_funnel_name)
+        ]
+        if len(new_lead_matches) == 1:
+            try:
+                self._new_lead_funnel_id = int(new_lead_matches[0]["id"])
+            except (KeyError, TypeError, ValueError):
+                self._new_lead_funnel_id = None
 
         autoresponder = self._normalized_text(self.settings.lptracker_autoresponder_funnel_name)
+        no_answer_stages = {
+            self._normalized_text(self.settings.lptracker_no_answer_funnel_name),
+            self._normalized_text("Недозвон"),
+            self._normalized_text("Не дозвон"),
+        }
+        repeat_eligible_stages = {autoresponder}
         for item in sync_items:
             count = self._int_value(item.values.get(self.source.columns.crm_create_count))
             first_lead_id = str(item.values.get(self.source.columns.crm_lead_id, "") or "").strip()
@@ -662,23 +684,99 @@ class Pipeline:
                     if not lead or not lead.get("id"):
                         raise SourceError("Не найден первый лид по CRM ID, телефону и ссылке")
                     lead_id = str(lead["id"])
+                lead_data = crm.get_lead(lead_id)
                 stage = crm.get_lead_stage_name(
                     lead_id,
                     project_id=project_id,
                     funnel_steps=steps,
+                    lead=lead_data,
                 )
                 if not stage:
                     raise SourceError("LPTracker не вернул текущий шаг воронки лида")
                 summary.stage_synced += 1
+                normalized_stage = self._normalized_text(stage)
+                if normalized_stage in no_answer_stages:
+                    summary.no_answer_synced += 1
+                # Save the observed CRM state before any follow-up action. If a
+                # later delete, validation, or repeat preparation fails, the
+                # sheet still shows the real funnel stage and original lead ID.
+                self._update_metadata(
+                    item,
+                    funnel_stage=stage,
+                    crm_create_count=1,
+                    crm_lead_id=lead_id,
+                )
                 repeat_attempts = self._int_value(
                     item.values.get(self.source.columns.repeat_phone_attempts)
                 )
+                stored_phone = str(item.values.get(self.source.columns.phone, "") or "").strip()
+
+                if normalized_stage in no_answer_stages:
+                    delay_seconds = crm.first_call_delay_seconds(lead_data)
+                    if delay_seconds is None or delay_seconds <= 10 * 60:
+                        self._update_metadata(
+                            item,
+                            status=item.status or ItemStatus.DONE,
+                            funnel_stage=stage,
+                            crm_create_count=1,
+                            crm_lead_id=lead_id,
+                        )
+                        if delay_seconds is None:
+                            LOGGER.info(
+                                "Строка %s: «Недозвон», но дата создания или первого "
+                                "успешного звонка отсутствует; пересоздание запрещено",
+                                item.row_id,
+                            )
+                        else:
+                            LOGGER.info(
+                                "Строка %s: первый звонок через %.1f мин.; "
+                                "пересоздание не требуется",
+                                item.row_id,
+                                delay_seconds / 60,
+                            )
+                        continue
+                    if not normalize_phone(stored_phone):
+                        raise SourceError(
+                            "Нельзя безопасно пересоздать лид «Недозвон»: "
+                            "в строке отсутствует корректный сохранённый телефон"
+                        )
+                    if self._new_lead_funnel_id is None:
+                        available = ", ".join(str(step.get("name", "")) for step in steps[:30])
+                        raise SourceError(
+                            f"Шаг воронки {self.settings.lptracker_new_lead_funnel_name!r} "
+                            f"не найден однозначно. Доступно: {available}"
+                        )
+                    # The row is reset only after LPTracker confirms deletion.  This
+                    # prevents a delete failure from ever being followed by creation.
+                    crm.delete_lead(lead_id)
+                    self._update_metadata(
+                        item,
+                        status=ItemStatus.RECREATE_PENDING,
+                        attempts=0,
+                        phone=stored_phone,
+                        crm_lead_id="",
+                        funnel_stage=stage,
+                        crm_create_count=0,
+                        repeat_crm_lead_id="",
+                        repeat_phone_attempts=0,
+                        error=(
+                            "Старая карточка удалена после позднего первого звонка; "
+                            "ожидается пересоздание"
+                        ),
+                    )
+                    LOGGER.info(
+                        "Строка %s: лид %s удалён, первый звонок через %.1f мин.; "
+                        "строка поставлена на безопасное пересоздание",
+                        item.row_id,
+                        lead_id,
+                        delay_seconds / 60,
+                    )
+                    continue
 
                 # If the previous process stopped after LPTracker accepted the
                 # second lead, recover it by the phone persisted immediately before
                 # the API request. This wins over both the current stage and the
                 # three-attempt cap because the repeat already exists.
-                stored_phone = str(item.values.get(self.source.columns.phone, "") or "").strip()
                 if not repeat_lead_id and stored_phone:
                     recovered_repeat = crm.find_lead_for_listing(
                         project_id,
@@ -714,7 +812,7 @@ class Pipeline:
                         crm_lead_id=lead_id,
                     )
                     continue
-                if self._normalized_text(stage) != autoresponder:
+                if normalized_stage not in repeat_eligible_stages:
                     self._update_metadata(
                         item,
                         status=ItemStatus.DONE,
@@ -833,6 +931,11 @@ class Pipeline:
             ItemStatus.REPEAT_RETRY_TECHNICAL.value,
         }
 
+    def _is_recreate_flow(self, item: QueueItem) -> bool:
+        return self._int_value(
+            item.values.get(self.source.columns.crm_create_count)
+        ) == 0 and self._normalized_text(item.status) == ItemStatus.RECREATE_PENDING.value
+
     @staticmethod
     def _normalized_text(value: object) -> str:
         return " ".join(str(value or "").split()).casefold()
@@ -884,6 +987,8 @@ class Pipeline:
         return True
 
     def _goal_reached(self, summary: RunSummary, limit: int) -> bool:
+        if limit == 0:
+            return False
         if self.mode == "capture" or not self.live:
             return summary.captured >= limit
         return summary.created >= limit

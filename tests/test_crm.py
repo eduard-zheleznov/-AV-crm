@@ -1,5 +1,7 @@
 import json
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -133,6 +135,59 @@ def test_crm_reads_funnel_stage_from_lead(settings):
         )
 
     assert stage == "Автоответчик"
+
+
+def test_crm_calculates_first_call_delay_in_configured_timezone(settings):
+    timezone = ZoneInfo(settings.lptracker_timezone)
+    created_at = datetime(2026, 7, 25, 12, 0, tzinfo=timezone)
+    first_call_at = datetime(2026, 7, 25, 12, 11, tzinfo=timezone)
+    later_call_at = datetime(2026, 7, 25, 12, 20, tzinfo=timezone)
+    lead = {
+        "created_at": created_at.timestamp(),
+        "calls_records": [
+            {"time": later_call_at.timestamp()},
+            {"time": first_call_at.timestamp()},
+        ],
+    }
+
+    with httpx.Client() as http, LpTrackerClient(settings, http) as crm:
+        delay = crm.first_call_delay_seconds(lead)
+
+    assert delay == 11 * 60
+
+
+def test_crm_returns_no_delay_when_first_call_date_is_missing(settings):
+    lead = {"created_at": "25.07.2026 12:00:00", "calls_records": []}
+
+    with httpx.Client() as http, LpTrackerClient(settings, http) as crm:
+        delay = crm.first_call_delay_seconds(lead)
+
+    assert delay is None
+
+
+def test_crm_deletes_lead_only_after_successful_api_response(settings):
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/lead/777" and request.method == "DELETE":
+            return _success(None)
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        crm.delete_lead(777)
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/login"),
+        ("DELETE", "/lead/777"),
+    ]
 
 
 def test_crm_skips_existing_contact_by_default(settings):

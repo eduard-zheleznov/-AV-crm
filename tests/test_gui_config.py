@@ -79,12 +79,22 @@ def test_service_account_email_validates_json_without_returning_key(tmp_path):
     assert service_account_email(path) == "worker@example.iam.gserviceaccount.com"
 
 
-@pytest.mark.parametrize(("raw", "expected"), [("1", 1), ("25", 25), ("10000", 10000)])
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", 0),
+        ("0", 0),
+        ("все", 0),
+        ("1", 1),
+        ("25", 25),
+        ("100000000000000000000", 100000000000000000000),
+    ],
+)
 def test_parse_limit(raw, expected):
     assert parse_limit(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["", "0", "10001", "1.5"])
+@pytest.mark.parametrize("raw", ["-1", "1.5", "не число"])
 def test_parse_limit_rejects_invalid_values(raw):
     with pytest.raises(ValueError):
         parse_limit(raw)

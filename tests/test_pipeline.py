@@ -4,6 +4,7 @@ import pytest
 
 from avito_crm.errors import (
     BrowserOperationError,
+    CrmError,
     InactiveListingError,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
@@ -108,8 +109,6 @@ class SequencedBrowser:
     def __init__(self, outcomes):
         self.outcomes = {row_id: iter(values) for row_id, values in outcomes.items()}
         self.calls = []
-        self.session_limit_reached = False
-
     def reveal_phone(self, _url, row_id):
         self.calls.append(row_id)
         outcome = next(self.outcomes[row_id])
@@ -178,6 +177,38 @@ def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
     assert summary.retries == 1
     assert summary.captured == 2
     assert summary.errors == 0
+
+
+def test_unlimited_mode_processes_more_than_twenty_five_rows(
+    tmp_path, settings, monkeypatch
+):
+    source = RoundQueue(settings, count=30)
+    browser = SequencedBrowser(
+        {
+            item.row_id: [f"+7999{index:07d}"]
+            for index, item in enumerate(source.items, start=1)
+        }
+    )
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(0)
+
+    assert len(browser.calls) == 30
+    assert summary.processed == 30
+    assert summary.captured == 30
+    assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
 
 
 def test_phone_failure_becomes_normal_terminal_outcome_after_all_attempts(
@@ -275,9 +306,13 @@ class RepeatQueue(QueueSource):
 class FakeRepeatCrm:
     instances = []
     recovered_repeat = None
+    stage_name = "Автоответчик"
+    call_delay_seconds = None
+    delete_error = None
 
     def __init__(self, _settings):
         self.created = []
+        self.deleted = []
         self.__class__.instances.append(self)
 
     def __enter__(self):
@@ -291,13 +326,26 @@ class FakeRepeatCrm:
 
     def list_funnel_steps(self, _project_id):
         return [
+            {"id": 11, "name": "Новый Лид"},
             {"id": 12, "name": "Автоответчик"},
             {"id": 88, "name": "Повторный лид"},
         ]
 
+    def get_lead(self, lead_id):
+        assert str(lead_id) == "111"
+        return {"id": 111, "funnel": 12}
+
     def get_lead_stage_name(self, lead_id, **_kwargs):
         assert str(lead_id) == "111"
-        return "Автоответчик"
+        return self.__class__.stage_name
+
+    def first_call_delay_seconds(self, _lead):
+        return self.__class__.call_delay_seconds
+
+    def delete_lead(self, lead_id):
+        if self.__class__.delete_error is not None:
+            raise self.__class__.delete_error
+        self.deleted.append(str(lead_id))
 
     def find_lead_for_listing(self, *_args, **_kwargs):
         return self.__class__.recovered_repeat
@@ -307,9 +355,23 @@ class FakeRepeatCrm:
         return CrmWriteResult(ItemStatus.DONE, contact_id="99", lead_id="222")
 
 
-def _run_repeat(tmp_path, settings, monkeypatch, source, browser, *, recovered_repeat=None):
+def _run_repeat(
+    tmp_path,
+    settings,
+    monkeypatch,
+    source,
+    browser,
+    *,
+    recovered_repeat=None,
+    stage_name="Автоответчик",
+    call_delay_seconds=None,
+    delete_error=None,
+):
     FakeRepeatCrm.instances.clear()
     FakeRepeatCrm.recovered_repeat = recovered_repeat
+    FakeRepeatCrm.stage_name = stage_name
+    FakeRepeatCrm.call_delay_seconds = call_delay_seconds
+    FakeRepeatCrm.delete_error = delete_error
     monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
     monkeypatch.setattr("avito_crm.pipeline.LpTrackerClient", FakeRepeatCrm)
     monkeypatch.setattr(
@@ -349,6 +411,120 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     assert summary.created == 1
     assert summary.repeat_created == 1
     assert summary.stage_synced == 1
+
+
+def test_no_answer_after_late_first_call_recreates_as_new_lead(
+    tmp_path, settings, monkeypatch
+):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        stage_name="Не дозвон",
+        call_delay_seconds=601,
+    )
+
+    assert browser.calls == []
+    assert crm.deleted == ["111"]
+    assert len(crm.created) == 1
+    phone, listing_url, _destination, options = crm.created[0]
+    assert phone == "+79990000000"
+    assert listing_url.endswith("item_123456789")
+    assert options == {"force_create": True, "funnel_id": 11, "repeat": False}
+    assert source.item.values[source.columns.crm_create_count] == 1
+    assert source.item.values[source.columns.crm_lead_id] == "222"
+    assert source.item.values[source.columns.repeat_crm_lead_id] == ""
+    assert source.item.values[source.columns.funnel_stage] == "Новый Лид"
+    assert source.item.status == ItemStatus.DONE
+    assert summary.stage_synced == 1
+    assert summary.no_answer_synced == 1
+    assert summary.created == 1
+    assert summary.repeat_created == 0
+
+
+def test_no_answer_without_first_call_date_never_deletes_or_recreates(
+    tmp_path, settings, monkeypatch
+):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        stage_name="Недозвон",
+        call_delay_seconds=None,
+    )
+
+    assert browser.calls == []
+    assert crm.deleted == []
+    assert crm.created == []
+    assert source.item.values[source.columns.crm_create_count] == 1
+    assert source.item.values[source.columns.crm_lead_id] == "111"
+    assert source.item.values[source.columns.funnel_stage] == "Недозвон"
+    assert summary.no_answer_synced == 1
+    assert summary.errors == 0
+
+
+def test_no_answer_at_exactly_ten_minutes_is_not_recreated(
+    tmp_path, settings, monkeypatch
+):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        stage_name="Не дозвон",
+        call_delay_seconds=600,
+    )
+
+    assert browser.calls == []
+    assert crm.deleted == []
+    assert crm.created == []
+    assert source.item.values[source.columns.crm_create_count] == 1
+    assert source.item.values[source.columns.crm_lead_id] == "111"
+    assert source.item.values[source.columns.funnel_stage] == "Не дозвон"
+    assert summary.no_answer_synced == 1
+    assert summary.errors == 0
+
+
+def test_no_answer_delete_error_never_creates_replacement(
+    tmp_path, settings, monkeypatch
+):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        stage_name="Недозвон",
+        call_delay_seconds=601,
+        delete_error=CrmError("удаление отклонено"),
+    )
+
+    assert browser.calls == []
+    assert crm.deleted == []
+    assert crm.created == []
+    assert source.item.values[source.columns.crm_create_count] == 1
+    assert source.item.values[source.columns.crm_lead_id] == "111"
+    assert source.item.values[source.columns.funnel_stage] == "Недозвон"
+    assert summary.no_answer_synced == 1
+    assert summary.crm_sync_errors == 1
+    assert summary.errors == 1
 
 
 def test_repeat_phone_reveal_stops_forever_after_three_failed_attempts(
