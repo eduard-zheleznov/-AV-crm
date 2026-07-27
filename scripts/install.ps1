@@ -63,10 +63,22 @@ if ($Tesseract) {
     Write-Warning "Tesseract OCR не найден. Установите Windows-сборку Tesseract и укажите TESSERACT_CMD в .env."
 }
 
+$RemoteTaskName = "Avito CRM Remote Control"
+$RemoteTask = Get-ScheduledTask -TaskName $RemoteTaskName -ErrorAction SilentlyContinue
+if ($RemoteTask) {
+    Write-Host ""
+    Write-Host "Найден установленный удалённый пульт. Безопасно перезапускаем его на новой версии..."
+    & (Join-Path $PSScriptRoot "install-remote-control.ps1") -TaskName $RemoteTaskName
+}
+
 Write-Host ""
 Write-Host "Установка завершена. Следующие шаги:"
 Write-Host "1. Заполните CRM-секреты в .env (не коммитить)."
 Write-Host "2. Запустите ярлык 'Авито в CRM' на рабочем столе."
 Write-Host "3. Выберите Google JSON, вставьте ссылку таблицы и нажмите 'Проверить доступ'."
 Write-Host "4. В строке 'Капча и уведомления' настройте MAX и резервный Email."
-Write-Host "5. Для запуска из Google Sheets выполните .\scripts\install-remote-control.ps1"
+if ($RemoteTask) {
+    Write-Host "5. Удалённый пульт обновлён и уже перезапущен на новой версии."
+} else {
+    Write-Host "5. Для первого запуска из Google Sheets выполните .\scripts\install-remote-control.ps1"
+}

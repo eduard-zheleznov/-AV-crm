@@ -6,6 +6,7 @@ import os
 import socket
 import threading
 import time
+import tomllib
 import uuid
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
@@ -64,7 +65,12 @@ HISTORY_HEADERS = (
     "Некорректных ссылок",
     "Дата завершения",
     "Строк со статусом «Недозвон»",
+    "Предупреждений синхронизации CRM",
 )
+
+
+class _ControllerReloadRequired(RuntimeError):
+    """Signal a clean Scheduled Task restart after an on-disk application update."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +128,7 @@ class ProgressSnapshot:
     processed: int = 0
     inspected: int = 0
     no_answer_synced: int = 0
+    crm_sync_errors: int = 0
     row_id: str = ""
 
 
@@ -190,6 +197,7 @@ class GoogleControlPanel:
             history_headers = tuple(history_values[0]) if history_values else ()
             if history_headers and history_headers not in {
                 LEGACY_HISTORY_HEADERS,
+                HISTORY_HEADERS[:-2],
                 HISTORY_HEADERS[:-1],
                 HISTORY_HEADERS,
             }:
@@ -349,9 +357,10 @@ class GoogleControlPanel:
                         0,
                         "",
                         0,
+                        0,
                     ]
                 ],
-                f"A{row_number}:W{row_number}",
+                f"A{row_number}:X{row_number}",
                 value_input_option="RAW",
             )
             return row_number
@@ -385,9 +394,10 @@ class GoogleControlPanel:
                         int(result.get("invalid", 0)),
                         str(result.get("finished_at", utc_now()))[:10],
                         int(result.get("no_answer_synced", 0)),
+                        int(result.get("crm_sync_errors", 0)),
                     ]
                 ],
-                f"F{state.history_row}:W{state.history_row}",
+                f"F{state.history_row}:X{state.history_row}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -419,6 +429,8 @@ class GoogleControlPanel:
                 status = "ТРЕБУЕТ ВНИМАНИЯ"
             elif "останов" in summary.stopped_reason.casefold():
                 status = "ОСТАНОВЛЕНО"
+            elif summary.crm_sync_errors:
+                status = "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
             else:
                 status = "ЗАВЕРШЕНО"
             finished_at = utc_now()
@@ -426,7 +438,8 @@ class GoogleControlPanel:
                 f"Создано {summary.created}; открыто номеров {summary.captured}; "
                 f"неактивных {summary.inactive}; без кнопки {summary.unavailable}; "
                 f"не открыто после попыток {summary.phone_failed}; "
-                f"технических ошибок {summary.errors}. "
+                f"технических ошибок {summary.errors}; "
+                f"предупреждений синхронизации CRM {summary.crm_sync_errors}. "
                 f"Остановка: {summary.stopped_reason or 'не указана'}."
             )
             row = [
@@ -453,10 +466,11 @@ class GoogleControlPanel:
                 summary.invalid,
                 finished_at[:10],
                 summary.no_answer_synced,
+                summary.crm_sync_errors,
             ]
             history.update(
                 [row],
-                f"A{row_number}:W{row_number}",
+                f"A{row_number}:X{row_number}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -900,7 +914,7 @@ class GoogleControlPanel:
             history.freeze(rows=1)
             history.set_basic_filter()
             history.format(
-                "A1:W1",
+                f"A1:{_column_letter(len(HISTORY_HEADERS))}1",
                 {
                     "backgroundColor": {"red": 0.05, "green": 0.09, "blue": 0.16},
                     "textFormat": {
@@ -927,7 +941,7 @@ class GoogleControlPanel:
                     (7, 10, 95),
                     (10, 11, 320),
                     (11, 12, 170),
-                    (12, 23, 130),
+                    (12, len(HISTORY_HEADERS), 130),
                 ):
                     requests.append(_column_width_request(sheet_id, start, end, size))
                 requests.extend(
@@ -1073,12 +1087,21 @@ class RemoteController:
             try:
                 self.tick()
                 delay = self.settings.remote_control_poll_seconds
+            except _ControllerReloadRequired:
+                LOGGER.warning(
+                    "На диске установлена новая версия Avito CRM; "
+                    "завершаем контроллер для автоматического перезапуска."
+                )
+                raise
             except Exception as exc:
                 LOGGER.error("Ошибка цикла удалённого пульта: %s", exc)
                 delay = min(max(delay * 2, 10), 120)
             self._stop_event.wait(delay)
 
     def tick(self) -> None:
+        if self._state is None and self._source_version_changed():
+            raise _ControllerReloadRequired
+
         if self._state and self._state.phase == "finalizing":
             self._finalize_remote()
             return
@@ -1249,6 +1272,16 @@ class RemoteController:
     def _load_worker_settings(self) -> Settings:
         return Settings.load(self.settings.root_dir, refresh_env=True)
 
+    def _source_version_changed(self) -> bool:
+        """Let Windows reload Python modules once an update is safely idle."""
+        project_file = self.settings.root_dir / "pyproject.toml"
+        try:
+            with project_file.open("rb") as handle:
+                disk_version = str(tomllib.load(handle)["project"]["version"]).strip()
+        except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError):
+            return False
+        return bool(disk_version and disk_version != __version__)
+
     def _progress_callback(self, state: CommandState, summary: RunSummary, row_id: str) -> None:
         with self._worker_guard:
             self._progress = ProgressSnapshot(
@@ -1267,6 +1300,7 @@ class RemoteController:
                 no_answer_synced=(
                     state.base_no_answer_synced + summary.no_answer_synced
                 ),
+                crm_sync_errors=summary.crm_sync_errors,
                 row_id=row_id,
             )
 
@@ -1326,13 +1360,16 @@ class RemoteController:
         self._save_state(state)
 
     def _classify_summary(self, state: CommandState, summary: RunSummary) -> dict[str, Any]:
-        progress = self._progress
+        progress = replace(self._progress, crm_sync_errors=summary.crm_sync_errors)
+        self._progress = progress
         if state.stop_requested or "останов" in summary.stopped_reason.casefold():
             status = "ОСТАНОВЛЕНО"
         elif progress.manual_required:
             status = "ТРЕБУЕТ ВНИМАНИЯ"
         elif progress.errors:
             status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
+        elif progress.crm_sync_errors:
+            status = "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
         else:
             status = "ЗАВЕРШЕНО"
         goal_message = (
@@ -1347,7 +1384,8 @@ class RemoteController:
             f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
             f"статус «Недозвон» {progress.no_answer_synced}; "
             f"не открыто после попыток {progress.phone_failed}; "
-            f"технических ошибок {progress.errors}. "
+            f"технических ошибок {progress.errors}; "
+            f"предупреждений синхронизации CRM {progress.crm_sync_errors}. "
             f"Остановка: {summary.stopped_reason or 'не указана'}."
         )
         return self._result_dict(state, status=status, message=message, progress=progress)
@@ -1377,6 +1415,7 @@ class RemoteController:
             "processed": progress.processed,
             "inspected": progress.inspected,
             "no_answer_synced": progress.no_answer_synced,
+            "crm_sync_errors": progress.crm_sync_errors,
             "command_id": state.command_id,
         }
 

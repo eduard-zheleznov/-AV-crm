@@ -1,7 +1,9 @@
 ﻿[CmdletBinding()]
 param(
     [string]$TaskName = "Avito CRM Remote Control",
-    [switch]$NoStart
+    [switch]$NoStart,
+    [ValidateRange(30, 1800)]
+    [int]$SafeStopTimeoutSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,14 +15,27 @@ $WorkerLock = Join-Path $ProjectRoot "data\worker.lock"
 if (-not (Test-Path $Python) -or -not (Test-Path $Pythonw)) {
     throw "Python-окружение не найдено. Сначала выполните .\scripts\install.ps1"
 }
-if (Test-Path $WorkerLock) {
-    throw (
-        "Сейчас обрабатывается строка очереди. Дождитесь завершения запуска или " +
-        "выполните мягкую остановку, затем повторите установку пульта."
-    )
+Set-Location $ProjectRoot
+$Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($Existing) {
+    Write-Host "Обновляем установленный пульт без обрыва текущей записи..."
+    & $Python -m avito_crm --root $ProjectRoot stop | Out-Null
+
+    $Deadline = (Get-Date).AddSeconds($SafeStopTimeoutSeconds)
+    while ((Test-Path $WorkerLock) -and ((Get-Date) -lt $Deadline)) {
+        Write-Host "Ждём безопасного завершения текущей строки..."
+        Start-Sleep -Seconds 2
+    }
+    if (Test-Path $WorkerLock) {
+        throw (
+            "Рабочий процесс не завершился за $SafeStopTimeoutSeconds сек. " +
+            "Пульт оставлен работающим, чтобы не оборвать запись в CRM."
+        )
+    }
+
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
 
-Set-Location $ProjectRoot
 Write-Host "Проверяем Google и создаём листы удалённого пульта..."
 & $Python -m avito_crm --root $ProjectRoot remote-control --setup-only
 if ($LASTEXITCODE -ne 0) {
@@ -47,10 +62,6 @@ $TaskSettings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries
 
-$Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($Existing) {
-    Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-}
 Register-ScheduledTask `
     -TaskName $TaskName `
     -Action $Action `

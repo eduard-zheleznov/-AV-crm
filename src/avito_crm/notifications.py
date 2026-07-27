@@ -971,6 +971,9 @@ def _run_completion_message(
     elif "останов" in reason_lower:
         headline = "⏹ Запуск остановлен оператором"
         subject = "[Avito CRM] Запуск остановлен"
+    elif summary.crm_sync_errors:
+        headline = "⚠️ Запуск завершён с предупреждениями синхронизации CRM"
+        subject = "[Avito CRM] Завершено с предупреждениями"
     else:
         headline = "✅ Запуск Avito → CRM завершён"
         subject = "[Avito CRM] Запуск завершён"
@@ -997,6 +1000,7 @@ def _run_completion_message(
         f"Повторных попыток: {summary.retries}",
         f"Некорректных ссылок: {summary.invalid}",
         f"Технических ошибок: {summary.errors}",
+        f"Предупреждений синхронизации CRM: {summary.crm_sync_errors}",
         f"Требуют ручного действия: {summary.manual_required}",
         f"Итог: {reason}",
     )

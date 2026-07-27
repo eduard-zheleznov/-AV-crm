@@ -524,7 +524,7 @@ def test_no_answer_delete_error_never_creates_replacement(
     assert source.item.values[source.columns.funnel_stage] == "Недозвон"
     assert summary.no_answer_synced == 1
     assert summary.crm_sync_errors == 1
-    assert summary.errors == 1
+    assert summary.errors == 0
 
 
 def test_repeat_phone_reveal_stops_forever_after_three_failed_attempts(

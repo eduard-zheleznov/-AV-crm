@@ -219,6 +219,7 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
     assert analytics.values[6][0] == "Запусков"
     assert analytics.values[6][1] == 0
     assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", analytics.values[17][0])
+    assert HISTORY_HEADERS[-1] == "Предупреждений синхронизации CRM"
 
 
 def test_history_append_is_idempotent_after_a_crash(settings):
@@ -239,6 +240,26 @@ def test_history_append_is_idempotent_after_a_crash(settings):
 
     assert row == 2
     assert len(history.values) == 2
+
+
+def test_new_history_rows_include_separate_crm_sync_warning_column(settings):
+    history = MatrixSheet([list(HISTORY_HEADERS)])
+    panel = GoogleControlPanel(settings, spreadsheet=object(), worksheet_not_found=KeyError)
+    panel.history = history
+    state = CommandState(
+        command_id="cmd-warning-column",
+        target=0,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="claimed",
+        started_at="2026-07-19T10:00:00+00:00",
+    )
+
+    row = panel.append_history(state)
+
+    assert row == 2
+    assert len(history.values[1]) == len(HISTORY_HEADERS)
+    assert history.values[1][-1] == 0
 
 
 def test_remote_command_is_claimed_once_and_finished(settings):
@@ -386,3 +407,49 @@ def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):
 
     assert result["status"] == "ЗАВЕРШЕНО"
     assert "технических ошибок 0" in result["message"]
+
+
+def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):
+    panel = FakePanel(PanelCommand(False, False, 10, "Лист1", False))
+    controller = InstantController(settings, panel)
+    state = CommandState(
+        command_id="cmd-sync-warning",
+        target=10,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-07-19T10:00:00+00:00",
+    )
+    controller._progress = ProgressSnapshot(created=10, errors=0)
+
+    result = controller._classify_summary(
+        state,
+        RunSummary(
+            run_id=state.command_id,
+            requested=10,
+            created=10,
+            crm_sync_errors=4,
+            stopped_reason="Достигнут заданный лимит",
+        ),
+    )
+
+    assert result["status"] == "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
+    assert result["errors"] == 0
+    assert result["crm_sync_errors"] == 4
+
+
+def test_remote_controller_detects_an_updated_source_version(settings):
+    project_file = settings.root_dir / "pyproject.toml"
+    project_file.write_text(
+        '[project]\nname = "avito-crm-pipeline"\nversion = "99.0.0"\n',
+        encoding="utf-8",
+    )
+    controller = RemoteController(
+        settings,
+        FakePanel(PanelCommand(False, False, 0, "Лист1", False)),
+    )
+
+    assert controller._source_version_changed() is True
+    with pytest.raises(RuntimeError):
+        controller.tick()
+    assert controller.panel.heartbeats == 0

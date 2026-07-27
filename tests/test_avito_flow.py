@@ -5,6 +5,7 @@ from playwright.sync_api import Error
 
 from avito_crm.avito import (
     AvitoBrowser,
+    _fresh_avito_page,
     _wait_until_profile_window_closes,
     launch_avito_context,
 )
@@ -41,6 +42,40 @@ def test_profile_manager_and_worker_share_profile_without_requiring_login(settin
     assert all(
         "username" not in call and "password" not in call for call in playwright.chromium.calls
     )
+    assert all("--no-first-run" in call["args"] for call in playwright.chromium.calls)
+
+
+def test_fresh_page_closes_tabs_restored_from_previous_session():
+    class FakePage:
+        def __init__(self):
+            self.closed = False
+            self.front = False
+
+        def close(self):
+            self.closed = True
+
+        def bring_to_front(self):
+            self.front = True
+
+    class FakeContext:
+        def __init__(self):
+            self.restored = [FakePage(), FakePage()]
+            self.created = FakePage()
+
+        @property
+        def pages(self):
+            return self.restored
+
+        def new_page(self):
+            return self.created
+
+    context = FakeContext()
+
+    page = _fresh_avito_page(context)
+
+    assert page is context.created
+    assert page.front is True
+    assert all(restored.closed for restored in context.restored)
 
 
 def test_profile_window_wait_survives_a_closed_tab():

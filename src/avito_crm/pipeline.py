@@ -166,9 +166,7 @@ class Pipeline:
                             )
                             summary.invalid += 1
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             consecutive_failures = 0
                             self._report_progress(progress, summary, item.row_id)
                             continue
@@ -181,9 +179,7 @@ class Pipeline:
                             )
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             continue
 
                         attempts = item.attempts + 1
@@ -275,9 +271,7 @@ class Pipeline:
                                 )
                                 consecutive_failures = 0
                                 unresolved_technical_rows.discard(item.row_id)
-                                summary.errors = summary.crm_sync_errors + len(
-                                    unresolved_technical_rows
-                                )
+                                summary.errors = len(unresolved_technical_rows)
                                 self._report_progress(progress, summary, item.row_id)
                                 continue
 
@@ -374,9 +368,7 @@ class Pipeline:
                                 LOGGER.info("Строка %s: дубликат, создание пропущено", item.row_id)
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             self._report_progress(progress, summary, item.row_id)
                         except InactiveListingError as exc:
                             self._finalize_expected(
@@ -394,9 +386,7 @@ class Pipeline:
                             summary.inactive += 1
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             LOGGER.info("Строка %s: %s", item.row_id, exc)
                             self._report_progress(progress, summary, item.row_id)
                         except PhoneButtonUnavailableError as exc:
@@ -415,9 +405,7 @@ class Pipeline:
                             summary.unavailable += 1
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             LOGGER.info("Строка %s: %s", item.row_id, exc)
                             self._report_progress(progress, summary, item.row_id)
                         except PhoneNotFoundError as exc:
@@ -469,9 +457,7 @@ class Pipeline:
                                 )
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             self._report_progress(progress, summary, item.row_id)
                         except ManualActionRequired as exc:
                             self._finalize_expected(
@@ -488,9 +474,7 @@ class Pipeline:
                             )
                             summary.manual_required += 1
                             unresolved_technical_rows.discard(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             summary.stopped_reason = str(exc)
                             should_stop = True
                             self._report_progress(progress, summary, item.row_id)
@@ -536,9 +520,7 @@ class Pipeline:
                                 summary.phone_failed += 1
                                 summary.repeat_exhausted += 1
                             unresolved_technical_rows.add(item.row_id)
-                            summary.errors = summary.crm_sync_errors + len(
-                                unresolved_technical_rows
-                            )
+                            summary.errors = len(unresolved_technical_rows)
                             consecutive_failures += 1
                             level = logging.ERROR if final_attempt else logging.WARNING
                             LOGGER.log(level, "Строка %s: %s", item.row_id, error)
@@ -617,7 +599,6 @@ class Pipeline:
                         self._update_metadata(item, error="")
                     except Exception as exc:
                         summary.crm_sync_errors += 1
-                        summary.errors += 1
                         LOGGER.warning(
                             "Строка %s: не удалось дописать ссылку в комментарий CRM: %s",
                             item.row_id,
@@ -871,7 +852,6 @@ class Pipeline:
                 )
             except Exception as exc:
                 summary.crm_sync_errors += 1
-                summary.errors += 1
                 LOGGER.error("Строка %s: не удалось обновить шаг CRM: %s", item.row_id, exc)
                 self._update_metadata(
                     item,

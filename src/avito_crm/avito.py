@@ -94,7 +94,24 @@ def launch_avito_context(
         locale="ru-RU",
         viewport={"width": 1440, "height": 900},
         accept_downloads=False,
+        args=[
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-session-crashed-bubble",
+        ],
     )
+
+
+def _fresh_avito_page(context: BrowserContext) -> Page:
+    """Use one deterministic tab and discard tabs restored from an earlier session."""
+    restored_pages = list(context.pages)
+    page = context.new_page()
+    for restored in restored_pages:
+        with suppress(Error):
+            restored.close()
+    with suppress(Error):
+        page.bring_to_front()
+    return page
 
 
 def open_avito_profile(settings: Settings) -> None:
@@ -103,7 +120,7 @@ def open_avito_profile(settings: Settings) -> None:
     context: BrowserContext | None = None
     try:
         context = launch_avito_context(playwright, settings, force_visible=True)
-        page = context.pages[0] if context.pages else context.new_page()
+        page = _fresh_avito_page(context)
         page.set_default_timeout(settings.avito_page_timeout * 1000)
         try:
             page.goto(
@@ -170,7 +187,7 @@ class AvitoBrowser:
             if self._owns_notifier:
                 self.notifier.close()
             raise
-        self.page = self.context.pages[0] if self.context.pages else self.context.new_page()
+        self.page = _fresh_avito_page(self.context)
         self.page.set_default_timeout(self.settings.avito_page_timeout * 1000)
         self._schedule_next_long_break()
         return self
@@ -193,6 +210,8 @@ class AvitoBrowser:
         page = self.page
         LOGGER.info("Открываем объявление, строка=%s", row_id or "-")
         try:
+            with suppress(Error, AttributeError):
+                page.bring_to_front()
             self._maybe_take_long_break()
             self._goto_with_retries(page, canonical_url)
             self._wait_delay(0.45, 0.75)

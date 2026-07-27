@@ -18,6 +18,18 @@ def test_remote_control_task_is_interactive_and_explicitly_live():
     assert "-AtLogOn" in script
     assert "pythonw.exe" in script
     assert "Test-Path $WorkerLock" in script
+    assert "SafeStopTimeoutSeconds" in script
+    assert script.index("while ((Test-Path $WorkerLock)") < script.index(
+        "Stop-ScheduledTask"
+    )
+
+
+def test_main_install_refreshes_an_existing_remote_controller():
+    path = Path(__file__).parents[1] / "scripts" / "install.ps1"
+    script = path.read_text(encoding="utf-8-sig")
+
+    assert 'Get-ScheduledTask -TaskName $RemoteTaskName' in script
+    assert 'Join-Path $PSScriptRoot "install-remote-control.ps1"' in script
 
 
 def test_remote_control_uninstall_waits_for_a_safe_worker_stop():

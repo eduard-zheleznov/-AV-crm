@@ -526,6 +526,26 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
     assert "очередь продолжает работу" not in body
 
 
+def test_crm_sync_warning_does_not_report_a_technical_processing_error():
+    summary = RunSummary(
+        run_id="run-sync-warning",
+        requested=10,
+        processed=10,
+        created=10,
+        errors=0,
+        crm_sync_errors=3,
+        stopped_reason="Достигнут заданный лимит",
+    )
+
+    subject, body = _run_completion_message(
+        summary, "server-1", "google:secret-id:Лист1", "full", True
+    )
+
+    assert subject == "[Avito CRM] Завершено с предупреждениями"
+    assert "Технических ошибок: 0" in body
+    assert "Предупреждений синхронизации CRM: 3" in body
+
+
 def test_completion_delivery_can_target_backup_without_changing_captcha_routing(
     settings, monkeypatch
 ):
