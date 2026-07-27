@@ -1,3 +1,6 @@
+import pytest
+
+from avito_crm import cli
 from avito_crm.cli import build_parser
 
 
@@ -52,6 +55,18 @@ def test_avito_profile_command_is_available_without_login_arguments():
     args = build_parser().parse_args(["avito-profile"])
 
     assert args.command == "avito-profile"
+
+
+def test_avito_profile_starts_even_when_crm_timezone_is_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setenv("LPTRACKER_TIMEZONE", "Missing/Timezone")
+    opened_profiles = []
+    monkeypatch.setattr(cli, "open_avito_profile", opened_profiles.append)
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--root", str(tmp_path), "avito-profile"])
+
+    assert exit_info.value.code == 0
+    assert len(opened_profiles) == 1
 
 
 def test_remote_control_requires_an_explicit_live_flag_at_runtime():

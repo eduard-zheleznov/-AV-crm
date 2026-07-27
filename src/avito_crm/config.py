@@ -6,7 +6,6 @@ import socket
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -453,13 +452,10 @@ class Settings:
         empty_funnels = [name for name, value in funnel_names.items() if not value]
         if empty_funnels:
             raise ConfigurationError(f"{', '.join(empty_funnels)} не может быть пустым")
-        try:
-            ZoneInfo(self.lptracker_timezone)
-        except ZoneInfoNotFoundError as exc:
-            raise ConfigurationError(
-                f"LPTRACKER_TIMEZONE содержит неизвестный часовой пояс: "
-                f"{self.lptracker_timezone!r}"
-            ) from exc
+        # LPTRACKER_TIMEZONE is required only by the CRM rule that compares a
+        # lead creation time with its first call. Validate it lazily in that
+        # CRM operation so unrelated commands (notably ``avito-profile``) can
+        # still open the persistent browser profile.
         if not self.google_control_worksheet:
             raise ConfigurationError("GOOGLE_CONTROL_WORKSHEET не может быть пустым")
         if not self.google_history_worksheet:

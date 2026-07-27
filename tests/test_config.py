@@ -13,3 +13,11 @@ def test_refresh_env_reloads_gui_saved_notification_recipients(tmp_path, monkeyp
 
     assert stale.telegram_primary_chat_ids == ("111111",)
     assert refreshed.telegram_primary_chat_ids == ("222222",)
+
+
+def test_invalid_crm_timezone_does_not_block_unrelated_settings_load(tmp_path, monkeypatch):
+    monkeypatch.setenv("LPTRACKER_TIMEZONE", "Missing/Timezone")
+
+    settings = Settings.load(tmp_path)
+
+    assert settings.lptracker_timezone == "Missing/Timezone"

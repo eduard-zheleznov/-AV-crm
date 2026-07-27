@@ -4,8 +4,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import httpx
+import pytest
 
 from avito_crm.crm import LpTrackerClient, RateLimiter
+from avito_crm.errors import ConfigurationError
 from avito_crm.models import ItemStatus
 
 
@@ -163,6 +165,17 @@ def test_crm_returns_no_delay_when_first_call_date_is_missing(settings):
         delay = crm.first_call_delay_seconds(lead)
 
     assert delay is None
+
+
+def test_crm_rejects_unknown_timezone_only_when_call_delay_is_needed(settings):
+    invalid_settings = replace(settings, lptracker_timezone="Missing/Timezone")
+
+    with (
+        httpx.Client() as http,
+        LpTrackerClient(invalid_settings, http) as crm,
+        pytest.raises(ConfigurationError, match="LPTRACKER_TIMEZONE"),
+    ):
+        crm.first_call_delay_seconds({"created_at": "25.07.2026 12:00:00"})
 
 
 def test_crm_deletes_lead_only_after_successful_api_response(settings):
