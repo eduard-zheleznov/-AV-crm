@@ -7,8 +7,10 @@ class FakeSheet:
         self.values = [["Ссылка"], ["https://www.avito.ru/moskva/item_123456789"]]
         self.header_update = None
         self.batch = None
+        self.read_count = 0
 
     def get_all_values(self):
+        self.read_count += 1
         return [row[:] for row in self.values]
 
     def update(self, values, range_name=None, **_kwargs):
@@ -62,6 +64,7 @@ def test_google_sheet_uses_current_gspread_argument_order(settings):
         ),
     )
     assert source.sheet.batch
+    assert source.sheet.read_count == 1
     assert any(cell["values"] == [[ItemStatus.CAPTURED]] for cell in source.sheet.batch)
 
 

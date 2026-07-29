@@ -15,6 +15,7 @@ from openpyxl import load_workbook
 
 from avito_crm.config import Settings
 from avito_crm.errors import ConfigurationError, SourceError
+from avito_crm.google_api import google_api_call
 from avito_crm.models import TERMINAL_STATUSES, ItemStatus, QueueItem, QueuePatch
 
 
@@ -349,24 +350,40 @@ class GoogleSheetsQueueSource(QueueSource):
             import gspread
 
             client = gspread.service_account(filename=str(credentials_file))
-            spreadsheet = client.open_by_key(spreadsheet_id)
+            spreadsheet = google_api_call(
+                lambda: client.open_by_key(spreadsheet_id),
+                label="Открытие Google Sheet очереди",
+            )
             self.spreadsheet = spreadsheet
-            self.sheet = spreadsheet.worksheet(worksheet)
+            self.sheet = google_api_call(
+                lambda: spreadsheet.worksheet(worksheet),
+                label=f"Открытие листа очереди {worksheet!r}",
+            )
+            self._headers_cache: list[str] | None = None
+            self._rows_cache: list[list[str]] | None = None
         except Exception as exc:
             raise SourceError(f"Не удалось открыть Google Sheet: {exc}") from exc
 
     def _read(self) -> tuple[list[str], list[list[str]]]:
         try:
-            values = self.sheet.get_all_values()
+            values = google_api_call(
+                self.sheet.get_all_values,
+                label="Чтение Google Sheet очереди",
+            )
         except Exception as exc:
             raise SourceError(f"Не удалось прочитать Google Sheet: {exc}") from exc
         if not values:
             headers = [self.columns.url, *self.columns.managed]
             try:
-                self.sheet.update([headers], "1:1", value_input_option="RAW")
+                google_api_call(
+                    lambda: self.sheet.update([headers], "1:1", value_input_option="RAW"),
+                    label="Подготовка заголовков Google Sheet",
+                )
             except Exception as exc:
                 raise SourceError(f"Не удалось подготовить пустой Google Sheet: {exc}") from exc
             self._format_empty_sheet(headers)
+            self._headers_cache = headers
+            self._rows_cache = []
             return headers, []
         headers = [str(value).strip() for value in values[0]]
         if self.columns.url not in headers:
@@ -378,11 +395,16 @@ class GoogleSheetsQueueSource(QueueSource):
                 changed = True
         if changed:
             try:
-                self.sheet.update([headers], "1:1", value_input_option="RAW")
+                google_api_call(
+                    lambda: self.sheet.update([headers], "1:1", value_input_option="RAW"),
+                    label="Добавление служебных колонок Google Sheet",
+                )
             except Exception as exc:
                 raise SourceError(f"Не удалось добавить служебные колонки: {exc}") from exc
         width = len(headers)
         rows = [row + [""] * (width - len(row)) for row in values[1:]]
+        self._headers_cache = headers
+        self._rows_cache = rows
         return headers, rows
 
     def _format_empty_sheet(self, headers: list[str]) -> None:
@@ -469,22 +491,44 @@ class GoogleSheetsQueueSource(QueueSource):
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         from gspread.utils import rowcol_to_a1
 
-        headers, rows = self._read()
+        headers = getattr(self, "_headers_cache", None)
+        rows = getattr(self, "_rows_cache", None)
+        if headers is None or rows is None:
+            headers, rows = self._read()
         index = {name: position for position, name in enumerate(headers)}
         row_number = _safe_int(item.row_id)
         values_index = row_number - 2
         if values_index < 0 or values_index >= len(rows):
             raise SourceError(f"Строка Google Sheet больше не существует: {item.row_id}")
-        if rows[values_index][index[self.columns.url]].strip() != item.url:
+        url_column = index[self.columns.url]
+        current_url = rows[values_index][url_column].strip()
+        if hasattr(self.sheet, "acell"):
+            try:
+                url_cell = rowcol_to_a1(row_number, url_column + 1)
+                current_url = str(
+                    google_api_call(
+                        lambda: self.sheet.acell(url_cell).value,
+                        label=f"Проверка строки Google Sheet {row_number}",
+                    )
+                    or ""
+                ).strip()
+            except Exception as exc:
+                raise SourceError(f"Не удалось проверить строку {item.row_id}: {exc}") from exc
+        if current_url != item.url:
             raise SourceError(f"Ссылка в строке {item.row_id} изменилась; результат не записан")
         patch_values = _patch_values(self.columns, patch)
         cells = []
         for name, value in patch_values.items():
             cells.append({"range": rowcol_to_a1(row_number, index[name] + 1), "values": [[value]]})
         try:
-            self.sheet.batch_update(cells, value_input_option="RAW")
+            google_api_call(
+                lambda: self.sheet.batch_update(cells, value_input_option="RAW"),
+                label=f"Обновление строки Google Sheet {row_number}",
+            )
         except Exception as exc:
             raise SourceError(f"Не удалось обновить Google Sheet: {exc}") from exc
+        for name, value in patch_values.items():
+            rows[values_index][index[name]] = str(value or "")
 
 
 def build_queue_source(
