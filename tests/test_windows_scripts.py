@@ -17,9 +17,10 @@ def test_remote_control_task_is_interactive_and_explicitly_live():
     assert "-LogonType Interactive" in script
     assert "-AtLogOn" in script
     assert "pythonw.exe" in script
-    assert "Test-Path $WorkerLock" in script
+    assert "Test-ActiveWorkerLock" in script
+    assert "GetProcessById" in script
     assert "SafeStopTimeoutSeconds" in script
-    assert script.index("while ((Test-Path $WorkerLock)") < script.index(
+    assert script.index("while ((Test-ActiveWorkerLock)") < script.index(
         "Stop-ScheduledTask"
     )
 
@@ -37,5 +38,9 @@ def test_remote_control_uninstall_waits_for_a_safe_worker_stop():
     script = path.read_text(encoding="utf-8-sig")
 
     assert "SafeStopTimeoutSeconds" in script
-    assert "while ((Test-Path $WorkerLock)" in script
-    assert script.index("while ((Test-Path $WorkerLock)") < script.index("Stop-ScheduledTask")
+    assert "Test-ActiveWorkerLock" in script
+    assert "GetProcessById" in script
+    assert "while ((Test-ActiveWorkerLock)" in script
+    assert script.index("while ((Test-ActiveWorkerLock)") < script.index(
+        "Stop-ScheduledTask"
+    )

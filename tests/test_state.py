@@ -1,3 +1,10 @@
+import json
+import os
+
+import pytest
+
+import avito_crm.state as state_module
+from avito_crm.errors import InstanceAlreadyRunning
 from avito_crm.models import ItemStatus, QueueItem, QueuePatch, RunSummary
 from avito_crm.state import SingleInstanceLock, StateStore
 
@@ -67,3 +74,53 @@ def test_single_instance_lock_cleans_up(tmp_path):
     with SingleInstanceLock(lock_path):
         assert lock_path.exists()
     assert not lock_path.exists()
+
+
+def test_single_instance_lock_clears_stale_windows_lock(tmp_path, monkeypatch):
+    lock_path = tmp_path / "worker.lock"
+    lock_path.write_text(
+        json.dumps({"pid": 999_999_999, "started_at": "2026-07-29T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(state_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(state_module, "_windows_process_is_running", lambda _pid: False)
+
+    with SingleInstanceLock(lock_path):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] == os.getpid()
+
+    assert not lock_path.exists()
+
+
+def test_single_instance_lock_keeps_live_windows_lock(tmp_path, monkeypatch):
+    lock_path = tmp_path / "worker.lock"
+    lock_path.write_text(
+        json.dumps({"pid": 1234, "started_at": "2026-07-29T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(state_module, "_IS_WINDOWS", True)
+    monkeypatch.setattr(state_module, "_windows_process_is_running", lambda _pid: True)
+
+    with pytest.raises(InstanceAlreadyRunning):
+        SingleInstanceLock(lock_path).__enter__()
+
+    assert lock_path.exists()
+
+
+def test_single_instance_lock_recovers_from_system_error_during_pid_probe(
+    tmp_path, monkeypatch
+):
+    lock_path = tmp_path / "worker.lock"
+    lock_path.write_text(
+        json.dumps({"pid": 1234, "started_at": "2026-07-29T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(state_module, "_IS_WINDOWS", False)
+
+    def broken_kill(_pid, _signal):
+        raise SystemError("<built-in function kill> returned a result with an exception set")
+
+    monkeypatch.setattr(state_module.os, "kill", broken_kill)
+
+    with SingleInstanceLock(lock_path):
+        assert json.loads(lock_path.read_text(encoding="utf-8"))["pid"] == os.getpid()
