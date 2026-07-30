@@ -229,8 +229,7 @@ class LpTrackerClient:
             local_timezone = ZoneInfo(self.settings.lptracker_timezone)
         except ZoneInfoNotFoundError as exc:
             raise ConfigurationError(
-                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE="
-                f"{self.settings.lptracker_timezone!r}"
+                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE={self.settings.lptracker_timezone!r}"
             ) from exc
         created_at = _extract_lead_created_at(lead, local_timezone)
         first_call_at = _extract_first_call_at(lead, local_timezone)
@@ -512,9 +511,7 @@ def _extract_funnel_stage(lead: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
-def _extract_lead_created_at(
-    lead: dict[str, Any], local_timezone: ZoneInfo
-) -> datetime | None:
+def _extract_lead_created_at(lead: dict[str, Any], local_timezone: ZoneInfo) -> datetime | None:
     for key in ("created_at", "lead_date", "created"):
         parsed = _parse_crm_datetime(lead.get(key), local_timezone)
         if parsed is not None:
@@ -534,9 +531,7 @@ def _extract_lead_created_at(
     return None
 
 
-def _extract_first_call_at(
-    lead: dict[str, Any], local_timezone: ZoneInfo
-) -> datetime | None:
+def _extract_first_call_at(lead: dict[str, Any], local_timezone: ZoneInfo) -> datetime | None:
     records: list[Any] = []
     for key in ("calls_records", "call_records", "calls"):
         value = lead.get(key)
@@ -557,9 +552,7 @@ def _extract_first_call_at(
 def _custom_fields(lead: dict[str, Any]) -> list[dict[str, Any]]:
     custom = lead.get("custom") or []
     if isinstance(custom, dict):
-        custom = (
-            [custom] if "id" in custom or "name" in custom else list(custom.values())
-        )
+        custom = [custom] if "id" in custom or "name" in custom else list(custom.values())
     return [field for field in custom if isinstance(field, dict)]
 
 

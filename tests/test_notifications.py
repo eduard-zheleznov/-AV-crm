@@ -477,11 +477,14 @@ def test_telegram_partial_recipient_failure_does_not_hide_success(settings, monk
 
     monkeypatch.setattr(notifier, "_call", call)
 
-    assert notifier.send_captcha_detected(
-        reason="captcha",
-        url="https://example.com",
-        wait_seconds=60,
-    ) == 1
+    assert (
+        notifier.send_captcha_detected(
+            reason="captcha",
+            url="https://example.com",
+            wait_seconds=60,
+        )
+        == 1
+    )
 
 
 def test_router_default_delivery_order_is_max_email_telegram(settings):

@@ -255,9 +255,7 @@ class DesktopApp:
             settings_card,
             text="Цель по лидам (0 = все)",
             style="Field.TLabel",
-        ).grid(
-            row=2, column=2, sticky="e", padx=(20, 12), pady=(12, 0)
-        )
+        ).grid(row=2, column=2, sticky="e", padx=(20, 12), pady=(12, 0))
         ttk.Entry(
             settings_card,
             textvariable=self.limit_var,
