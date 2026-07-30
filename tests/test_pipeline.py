@@ -109,6 +109,7 @@ class SequencedBrowser:
     def __init__(self, outcomes):
         self.outcomes = {row_id: iter(values) for row_id, values in outcomes.items()}
         self.calls = []
+
     def reveal_phone(self, _url, row_id):
         self.calls.append(row_id)
         outcome = next(self.outcomes[row_id])
@@ -179,15 +180,10 @@ def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
     assert summary.errors == 0
 
 
-def test_unlimited_mode_processes_more_than_twenty_five_rows(
-    tmp_path, settings, monkeypatch
-):
+def test_unlimited_mode_processes_more_than_twenty_five_rows(tmp_path, settings, monkeypatch):
     source = RoundQueue(settings, count=30)
     browser = SequencedBrowser(
-        {
-            item.row_id: [f"+7999{index:07d}"]
-            for index, item in enumerate(source.items, start=1)
-        }
+        {item.row_id: [f"+7999{index:07d}"] for index, item in enumerate(source.items, start=1)}
     )
 
     monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
@@ -366,6 +362,7 @@ def _run_repeat(
     stage_name="Автоответчик",
     call_delay_seconds=None,
     delete_error=None,
+    phase_messages=None,
 ):
     FakeRepeatCrm.instances.clear()
     FakeRepeatCrm.recovered_repeat = recovered_repeat
@@ -386,7 +383,10 @@ def _run_repeat(
             source_name="google:test",
             mode="full",
             live=True,
-        ).run(1)
+        ).run(
+            1,
+            phase=(phase_messages.append if phase_messages is not None else None),
+        )
     return summary, FakeRepeatCrm.instances[-1]
 
 
@@ -413,9 +413,49 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     assert summary.stage_synced == 1
 
 
-def test_no_answer_after_late_first_call_recreates_as_new_lead(
-    tmp_path, settings, monkeypatch
-):
+def test_live_pipeline_reports_crm_preflight_and_browser_phases(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+    phases = []
+
+    summary, _crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        phase_messages=phases,
+    )
+
+    assert summary.created == 1
+    assert any(message.startswith("Подготовка CRM") for message in phases)
+    assert any(message.startswith("Синхронизация CRM: 1/1") for message in phases)
+    assert "Запускаем Chromium и открываем очередь Avito." in phases
+    assert phases[-1] == "Обрабатываем очередь Avito по одной строке."
+
+
+def test_stop_during_crm_preflight_skips_browser_and_queue(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+    original_list_steps = FakeRepeatCrm.list_funnel_steps
+
+    def list_steps_and_request_stop(self, project_id):
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "STOP").touch()
+        return original_list_steps(self, project_id)
+
+    monkeypatch.setattr(FakeRepeatCrm, "list_funnel_steps", list_steps_and_request_stop)
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert summary.stopped_reason == "Остановлено оператором"
+    assert browser.calls == []
+    assert crm.created == []
+    assert crm.deleted == []
+    assert source.item.values[source.columns.crm_create_count] == "1"
+
+
+def test_no_answer_after_late_first_call_recreates_as_new_lead(tmp_path, settings, monkeypatch):
     source = RepeatQueue(settings)
     browser = SequencedBrowser({"2": []})
 
@@ -473,9 +513,7 @@ def test_no_answer_without_first_call_date_never_deletes_or_recreates(
     assert summary.errors == 0
 
 
-def test_no_answer_at_exactly_ten_minutes_is_not_recreated(
-    tmp_path, settings, monkeypatch
-):
+def test_no_answer_at_exactly_ten_minutes_is_not_recreated(tmp_path, settings, monkeypatch):
     source = RepeatQueue(settings)
     browser = SequencedBrowser({"2": []})
 
@@ -499,9 +537,7 @@ def test_no_answer_at_exactly_ten_minutes_is_not_recreated(
     assert summary.errors == 0
 
 
-def test_no_answer_delete_error_never_creates_replacement(
-    tmp_path, settings, monkeypatch
-):
+def test_no_answer_delete_error_never_creates_replacement(tmp_path, settings, monkeypatch):
     source = RepeatQueue(settings)
     browser = SequencedBrowser({"2": []})
 

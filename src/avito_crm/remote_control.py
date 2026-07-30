@@ -307,9 +307,7 @@ class GoogleControlPanel:
             {
                 "E4": str(result.get("status", "ЗАВЕРШЕНО")),
                 "E5": state.command_id,
-                "E6": (
-                    f"{int(result.get('created', 0))} / {_target_label(state.target)}"
-                ),
+                "E6": (f"{int(result.get('created', 0))} / {_target_label(state.target)}"),
                 "E8": utc_now(),
                 "E9": str(result.get("message", ""))[:500],
                 "E11": _computer_name(self.settings),
@@ -514,9 +512,7 @@ class GoogleControlPanel:
             if funnel_stage_index >= 0 and funnel_stage_index < len(row):
                 normalized_stage = " ".join(row[funnel_stage_index].split()).casefold()
                 if normalized_stage in {
-                    " ".join(
-                        self.settings.lptracker_no_answer_funnel_name.split()
-                    ).casefold(),
+                    " ".join(self.settings.lptracker_no_answer_funnel_name.split()).casefold(),
                     "недозвон",
                     "не дозвон",
                 }:
@@ -1069,6 +1065,7 @@ class RemoteController:
         self._worker_result: WorkerResult | None = None
         self._worker_guard = threading.Lock()
         self._progress = ProgressSnapshot()
+        self._phase_message = ""
         self._stop_event = threading.Event()
 
     def setup(self) -> None:
@@ -1134,8 +1131,24 @@ class RemoteController:
 
         if self._state:
             if self._worker and self._worker.is_alive():
-                status = "ОСТАНАВЛИВАЕТСЯ" if self._state.stop_requested else "РАБОТАЕТ"
-                self.panel.update_active(self._state, self._progress, status=status)
+                with self._worker_guard:
+                    progress = self._progress
+                    phase_message = self._phase_message
+                if self._state.stop_requested:
+                    status = "ОСТАНАВЛИВАЕТСЯ"
+                    phase_message = "Остановка принята; завершается текущий безопасный шаг."
+                elif phase_message.startswith(("Подготовка CRM", "Синхронизация CRM")):
+                    status = "СИНХРОНИЗАЦИЯ CRM"
+                elif phase_message.startswith("Запускаем Chromium"):
+                    status = "ЗАПУСК БРАУЗЕРА"
+                else:
+                    status = "РАБОТАЕТ"
+                self.panel.update_active(
+                    self._state,
+                    progress,
+                    status=status,
+                    message=phase_message,
+                )
             elif self._state.phase == "waiting_busy":
                 self.panel.update_active(
                     self._state,
@@ -1221,6 +1234,8 @@ class RemoteController:
         state.phase = "running"
         self._save_state(state)
         self._worker_result = None
+        with self._worker_guard:
+            self._phase_message = "Рабочий процесс запускается."
         self._worker = threading.Thread(
             target=self._run_worker,
             args=(replace(state), remaining),
@@ -1257,6 +1272,7 @@ class RemoteController:
                     progress=lambda current, row_id: self._progress_callback(
                         state, current, row_id
                     ),
+                    phase=lambda message: self._phase_callback(state, message),
                 )
             result = WorkerResult(kind="finished", summary=summary)
         except InstanceAlreadyRunning as exc:
@@ -1297,12 +1313,22 @@ class RemoteController:
                 manual_required=state.base_manual_required + summary.manual_required,
                 processed=state.base_processed + summary.processed,
                 inspected=state.base_inspected + summary.inspected,
-                no_answer_synced=(
-                    state.base_no_answer_synced + summary.no_answer_synced
-                ),
+                no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
                 crm_sync_errors=summary.crm_sync_errors,
                 row_id=row_id,
             )
+
+    def _phase_callback(self, state: CommandState, message: str) -> None:
+        normalized = " ".join(str(message).split())[:500]
+        if not normalized:
+            return
+        with self._worker_guard:
+            if self._state is None or self._state.command_id != state.command_id:
+                return
+            changed = normalized != self._phase_message
+            self._phase_message = normalized
+        if changed:
+            LOGGER.info("Команда %s: %s", state.command_id, normalized)
 
     def _collect_worker_result(self) -> None:
         if self._worker is None or self._worker.is_alive():
@@ -1315,6 +1341,8 @@ class RemoteController:
             return
         if result.kind == "busy":
             self._state.phase = "waiting_busy"
+            with self._worker_guard:
+                self._phase_message = "На компьютере ещё работает другой запуск."
             self._save_state(self._state)
             return
         if result.kind == "error":
@@ -1337,6 +1365,8 @@ class RemoteController:
         if self._state:
             self._state.stop_requested = True
             self._state.phase = "stopping"
+            with self._worker_guard:
+                self._phase_message = "Остановка принята; завершается текущий безопасный шаг."
             self._save_state(self._state)
             self.panel.update_active(
                 self._state,
@@ -1378,9 +1408,7 @@ class RemoteController:
             else f"Создано {progress.created} из цели {state.target}; "
         )
         message = (
-            goal_message
-            +
-            f"открыто номеров {progress.captured}; "
+            goal_message + f"открыто номеров {progress.captured}; "
             f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
             f"статус «Недозвон» {progress.no_answer_synced}; "
             f"не открыто после попыток {progress.phone_failed}; "
@@ -1431,6 +1459,7 @@ class RemoteController:
         self.state_path.unlink(missing_ok=True)
         self._state = None
         self._progress = ProgressSnapshot()
+        self._phase_message = ""
 
     def _load_state(self) -> CommandState | None:
         if not self.state_path.is_file():

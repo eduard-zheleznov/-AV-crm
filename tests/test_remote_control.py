@@ -453,3 +453,35 @@ def test_remote_controller_detects_an_updated_source_version(settings):
     with pytest.raises(RuntimeError):
         controller.tick()
     assert controller.panel.heartbeats == 0
+
+
+def test_remote_panel_shows_long_crm_preflight_instead_of_generic_zero_progress(settings):
+    panel = FakePanel(PanelCommand(False, False, 100, "Лист1", False))
+    controller = RemoteController(settings, panel)
+    state = CommandState(
+        command_id="cmd-preflight",
+        target=100,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-07-30T07:03:00+00:00",
+        history_row=2,
+    )
+
+    class AliveWorker:
+        @staticmethod
+        def is_alive():
+            return True
+
+    controller._state = state
+    controller._worker = AliveWorker()
+    controller._phase_callback(
+        state,
+        "Синхронизация CRM: 17/223; обновлено 16, предупреждений 0.",
+    )
+
+    controller.tick()
+
+    _command_id, _progress, details = panel.active_updates[-1]
+    assert details["status"] == "СИНХРОНИЗАЦИЯ CRM"
+    assert details["message"] == ("Синхронизация CRM: 17/223; обновлено 16, предупреждений 0.")
