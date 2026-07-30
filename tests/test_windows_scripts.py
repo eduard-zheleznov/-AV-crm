@@ -20,16 +20,14 @@ def test_remote_control_task_is_interactive_and_explicitly_live():
     assert "Test-ActiveWorkerLock" in script
     assert "GetProcessById" in script
     assert "SafeStopTimeoutSeconds" in script
-    assert script.index("while ((Test-ActiveWorkerLock)") < script.index(
-        "Stop-ScheduledTask"
-    )
+    assert script.index("while ((Test-ActiveWorkerLock)") < script.index("Stop-ScheduledTask")
 
 
 def test_main_install_refreshes_an_existing_remote_controller():
     path = Path(__file__).parents[1] / "scripts" / "install.ps1"
     script = path.read_text(encoding="utf-8-sig")
 
-    assert 'Get-ScheduledTask -TaskName $RemoteTaskName' in script
+    assert "Get-ScheduledTask -TaskName $RemoteTaskName" in script
     assert 'Join-Path $PSScriptRoot "install-remote-control.ps1"' in script
 
 
@@ -41,6 +39,16 @@ def test_remote_control_uninstall_waits_for_a_safe_worker_stop():
     assert "Test-ActiveWorkerLock" in script
     assert "GetProcessById" in script
     assert "while ((Test-ActiveWorkerLock)" in script
-    assert script.index("while ((Test-ActiveWorkerLock)") < script.index(
-        "Stop-ScheduledTask"
-    )
+    assert script.index("while ((Test-ActiveWorkerLock)") < script.index("Stop-ScheduledTask")
+
+
+def test_remote_status_reports_lock_owners_and_phase_without_mutating_runtime():
+    path = Path(__file__).parents[1] / "scripts" / "remote-control-status.ps1"
+    script = path.read_text(encoding="utf-8-sig")
+
+    assert "ShowRecentLog" in script
+    assert "Get-Process -Id $OwnerPid" in script
+    assert "remote-control.json" in script
+    assert "$State.phase" in script
+    assert "worker.lock" in script
+    assert "Remove-Item" not in script

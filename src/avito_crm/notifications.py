@@ -138,9 +138,8 @@ class TelegramNotifier:
                 failures.append(f"{_mask_chat_id(chat_id)}: {exc}")
 
         if failures:
-            detail = (
-                f"сообщение доставлено в {sent} из {len(recipients)} чатов; "
-                + "; ".join(failures)
+            detail = f"сообщение доставлено в {sent} из {len(recipients)} чатов; " + "; ".join(
+                failures
             )
             if sent == 0:
                 raise NotificationError(detail)
@@ -398,9 +397,8 @@ class MaxNotifier:
                 failures.append(f"{_mask_max_recipient(target)}: {exc}")
 
         if failures:
-            detail = (
-                f"MAX-сообщение доставлено {sent} из {len(targets)} получателей; "
-                + "; ".join(failures)
+            detail = f"MAX-сообщение доставлено {sent} из {len(targets)} получателей; " + "; ".join(
+                failures
             )
             if sent == 0:
                 raise NotificationError(detail)
@@ -991,7 +989,7 @@ def _run_completion_message(
         f"Лидов создано: {summary.created}",
         f"Повторных лидов: {summary.repeat_created}",
         f"Шагов воронки обновлено: {summary.stage_synced}",
-        f'Строк со статусом «Недозвон»: {summary.no_answer_synced}',
+        f"Строк со статусом «Недозвон»: {summary.no_answer_synced}",
         f"Повторное открытие исчерпано: {summary.repeat_exhausted}",
         f"Дубликатов: {summary.duplicates}",
         f"Неактивных объявлений: {summary.inactive}",

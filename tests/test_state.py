@@ -107,9 +107,7 @@ def test_single_instance_lock_keeps_live_windows_lock(tmp_path, monkeypatch):
     assert lock_path.exists()
 
 
-def test_single_instance_lock_recovers_from_system_error_during_pid_probe(
-    tmp_path, monkeypatch
-):
+def test_single_instance_lock_recovers_from_system_error_during_pid_probe(tmp_path, monkeypatch):
     lock_path = tmp_path / "worker.lock"
     lock_path.write_text(
         json.dumps({"pid": 1234, "started_at": "2026-07-29T00:00:00+00:00"}),

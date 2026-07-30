@@ -60,6 +60,7 @@ class Pipeline:
         *,
         run_id: str | None = None,
         progress: Callable[[RunSummary, str], None] | None = None,
+        phase: Callable[[str], None] | None = None,
     ) -> RunSummary:
         if limit < 0:
             raise ValueError("Лимит не может быть отрицательным; 0 означает «все строки»")
@@ -80,6 +81,7 @@ class Pipeline:
                 browser: AvitoBrowser | None = None
 
                 if self.mode in {"crm", "full"} and self.live:
+                    self._report_phase(phase, "Подготовка CRM: подключаемся к LPTracker.")
                     crm = stack.enter_context(LpTrackerClient(self.settings))
                     destination = crm.resolve_destination()
                     LOGGER.info(
@@ -88,7 +90,14 @@ class Pipeline:
                         destination.field_name,
                         self.settings.lptracker_field_value,
                     )
-                    self._sync_crm_rows(crm, destination.project_id, summary)
+                    if self._sync_crm_rows(
+                        crm,
+                        destination.project_id,
+                        summary,
+                        phase=phase,
+                    ):
+                        return summary
+                self._report_phase(phase, "Подготовка очереди Avito: читаем строки.")
                 initial_items = self.source.list_actionable(include_manual=self.include_manual)
                 initial_row_ids = {item.row_id for item in initial_items}
                 needs_browser = self.mode == "capture" or any(
@@ -103,9 +112,14 @@ class Pipeline:
                     if self._eligible_for_mode(item)
                 )
                 if needs_browser:
+                    self._report_phase(
+                        phase,
+                        "Запускаем Chromium и открываем очередь Avito.",
+                    )
                     ocr = PhoneOcr(self.settings.tesseract_cmd, self.settings.ocr_min_agreement)
                     ocr.check_available()
                     browser = stack.enter_context(AvitoBrowser(self.settings, ocr, notifier))
+                self._report_phase(phase, "Обрабатываем очередь Avito по одной строке.")
 
                 round_number = 0
                 while True:
@@ -561,14 +575,19 @@ class Pipeline:
         crm: LpTrackerClient,
         project_id: int,
         summary: RunSummary,
-    ) -> None:
-        """Refresh funnel stages and schedule bounded repeats for configured stages."""
+        *,
+        phase: Callable[[str], None] | None = None,
+    ) -> bool:
+        """Refresh funnel stages and return ``True`` when an operator requested stop."""
+        self._report_phase(phase, "Подготовка CRM: читаем ранее созданные лиды.")
         all_items = self.source.list_all()
         sync_items: list[QueueItem] = []
         self._repeat_funnel_id = None
         self._new_lead_funnel_id = None
 
         for item in all_items:
+            if self._operator_stop_requested(summary):
+                return True
             count = self._int_value(item.values.get(self.source.columns.crm_create_count))
             first_lead_id = str(item.values.get(self.source.columns.crm_lead_id, "") or "").strip()
             repeat_lead_id = str(
@@ -609,9 +628,16 @@ class Pipeline:
                 sync_items.append(item)
 
         if not sync_items:
-            return
+            self._report_phase(phase, "Подготовка CRM завершена: лидов для сверки нет.")
+            return False
 
+        self._report_phase(
+            phase,
+            f"Подготовка CRM: загружаем шаги воронки; лидов для сверки {len(sync_items)}.",
+        )
         steps = crm.list_funnel_steps(project_id)
+        if self._operator_stop_requested(summary):
+            return True
         repeat_matches = [
             step
             for step in steps
@@ -642,7 +668,18 @@ class Pipeline:
             self._normalized_text("Не дозвон"),
         }
         repeat_eligible_stages = {autoresponder}
-        for item in sync_items:
+        total_sync_items = len(sync_items)
+        for index, item in enumerate(sync_items, start=1):
+            if self._operator_stop_requested(summary):
+                return True
+            self._report_phase(
+                phase,
+                (
+                    f"Синхронизация CRM: {index}/{total_sync_items}; "
+                    f"обновлено {summary.stage_synced}, предупреждений "
+                    f"{summary.crm_sync_errors}."
+                ),
+            )
             count = self._int_value(item.values.get(self.source.columns.crm_create_count))
             first_lead_id = str(item.values.get(self.source.columns.crm_lead_id, "") or "").strip()
             repeat_lead_id = str(
@@ -716,6 +753,8 @@ class Pipeline:
                                 delay_seconds / 60,
                             )
                         continue
+                    if self._operator_stop_requested(summary):
+                        return True
                     if not normalize_phone(stored_phone):
                         raise SourceError(
                             "Нельзя безопасно пересоздать лид «Недозвон»: "
@@ -859,6 +898,22 @@ class Pipeline:
                     crm_create_count=1,
                     error=f"Синхронизация CRM: {_safe_error(exc)}",
                 )
+        self._report_phase(
+            phase,
+            (
+                f"Синхронизация CRM завершена: обновлено {summary.stage_synced}, "
+                f"предупреждений {summary.crm_sync_errors}."
+            ),
+        )
+        return False
+
+    def _operator_stop_requested(self, summary: RunSummary) -> bool:
+        if not self.stop_file.exists():
+            return False
+        if not summary.stopped_reason:
+            summary.stopped_reason = "Остановлено оператором"
+            LOGGER.warning("Остановка принята во время подготовки CRM; новые ссылки не открывались")
+        return True
 
     def _update_metadata(
         self,
@@ -912,9 +967,10 @@ class Pipeline:
         }
 
     def _is_recreate_flow(self, item: QueueItem) -> bool:
-        return self._int_value(
-            item.values.get(self.source.columns.crm_create_count)
-        ) == 0 and self._normalized_text(item.status) == ItemStatus.RECREATE_PENDING.value
+        return (
+            self._int_value(item.values.get(self.source.columns.crm_create_count)) == 0
+            and self._normalized_text(item.status) == ItemStatus.RECREATE_PENDING.value
+        )
 
     @staticmethod
     def _normalized_text(value: object) -> str:
@@ -954,6 +1010,15 @@ class Pipeline:
             callback(summary, row_id)
         except Exception as exc:
             LOGGER.warning("Не удалось обновить прогресс пульта: %s", exc)
+
+    @staticmethod
+    def _report_phase(callback: Callable[[str], None] | None, message: str) -> None:
+        if callback is None:
+            return
+        try:
+            callback(message)
+        except Exception as exc:
+            LOGGER.warning("Не удалось обновить этап работы пульта: %s", exc)
 
     def _eligible_for_mode(self, item: QueueItem) -> bool:
         phone = normalize_phone(str(item.values.get(self.source.columns.phone, "") or ""))

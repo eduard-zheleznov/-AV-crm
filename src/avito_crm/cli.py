@@ -225,11 +225,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 retry_manual=bool(args.retry_manual),
             )
         _print_summary(summary, live)
-        if (
-            getattr(args, "require_goal", False)
-            and args.limit > 0
-            and summary.created < args.limit
-        ):
+        if getattr(args, "require_goal", False) and args.limit > 0 and summary.created < args.limit:
             print(
                 f"ОШИБКА: создано {summary.created} из {args.limit} запрошенных лидов.",
                 file=sys.stderr,
