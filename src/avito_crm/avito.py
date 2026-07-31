@@ -203,9 +203,11 @@ class AvitoBrowser:
         self.context = None
         self.playwright = None
 
-    def reveal_phone(self, url: str, row_id: str = "") -> PhoneResult:
+    def reveal_phone(self, url: str, row_id: str = "", *, max_clicks: int = 2) -> PhoneResult:
         if self.page is None:
             raise RuntimeError("AvitoBrowser должен использоваться как context manager")
+        if max_clicks not in {1, 2}:
+            raise ValueError("max_clicks должен быть равен 1 или 2")
         canonical_url = canonical_avito_url(url)
         page = self.page
         LOGGER.info("Открываем объявление, строка=%s", row_id or "-")
@@ -227,14 +229,14 @@ class AvitoBrowser:
             first_round = self._reveal_round(
                 page,
                 canonical_url,
-                self.settings.avito_phone_first_round_attempts,
+                1,
                 round_number=1,
             )
             if first_round.phone:
                 return self._complete_listing(first_round.phone)
 
             last_round = first_round
-            if first_round.button_found and self.settings.avito_phone_second_round_attempts > 0:
+            if first_round.button_found and max_clicks == 2:
                 LOGGER.info(
                     "Первый круг не вернул номер; очищаем состояние полной повторной "
                     "загрузкой объявления и запускаем второй круг"
@@ -252,7 +254,7 @@ class AvitoBrowser:
                 second_round = self._reveal_round(
                     page,
                     canonical_url,
-                    self.settings.avito_phone_second_round_attempts,
+                    1,
                     round_number=2,
                 )
                 last_round = second_round
@@ -272,7 +274,7 @@ class AvitoBrowser:
                 )
             if explicit_error:
                 raise PhoneNotFoundError(
-                    "Avito не показал временный номер после двух ограниченных кругов"
+                    f"Avito не показал временный номер после {max_clicks} ограниченных попыток"
                 )
             raise PhoneNotFoundError(
                 "После клика не появились ни «Временный номер», ни явная ошибка Avito"
@@ -389,7 +391,10 @@ class AvitoBrowser:
                     self.settings.avito_after_label_max,
                 )
                 return None, True, error_seen, False
-            error_seen = error_seen or self._has_temp_number_error(page)
+            if self._has_temp_number_error(page):
+                # The explicit red Avito error is already a conclusive result.
+                # Waiting out the remaining timeout only slowed every failed row.
+                return None, False, True, False
             time.sleep(0.3)
         return None, False, error_seen, False
 

@@ -1,8 +1,11 @@
+from dataclasses import replace
+
 import pytest
 from openpyxl import Workbook, load_workbook
 
+import avito_crm.queue as queue_module
 from avito_crm.models import ItemStatus, QueuePatch
-from avito_crm.queue import QueueColumns, XlsxQueueSource
+from avito_crm.queue import QueueColumns, XlsxQueueSource, build_queue_source
 
 
 def test_xlsx_queue_adds_columns_updates_atomically_and_backs_up(tmp_path, settings):
@@ -66,3 +69,49 @@ def test_terminal_xlsx_rows_are_not_actionable(tmp_path, settings, status):
     source = XlsxQueueSource(path, "Лист1", columns, 3, tmp_path / "backups")
 
     assert source.list_actionable() == []
+
+
+def test_new_rows_are_processed_before_legacy_phone_errors(tmp_path, settings):
+    path = tmp_path / "queue.xlsx"
+    columns = QueueColumns.from_settings(settings)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Лист1"
+    sheet.append([columns.url, *columns.managed])
+    sheet.append(
+        [
+            "https://www.avito.ru/moskva/item_123456789",
+            ItemStatus.RETRY_PHONE,
+            "",
+        ]
+    )
+    sheet.append(["https://www.avito.ru/moskva/item_123456790"])
+    workbook.save(path)
+    workbook.close()
+
+    source = XlsxQueueSource(path, "Лист1", columns, 2, tmp_path / "backups")
+
+    assert [item.row_id for item in source.list_actionable()] == ["3", "2"]
+
+
+def test_google_source_receives_plan_and_local_window_settings(tmp_path, settings, monkeypatch):
+    captured = {}
+    sentinel = object()
+
+    def fake_google_source(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return sentinel
+
+    monkeypatch.setattr(queue_module, "GoogleSheetsQueueSource", fake_google_source)
+    configured = replace(settings, google_credentials_file=tmp_path / "credentials.json")
+
+    result = build_queue_source(configured, "google", None, None)
+
+    assert result is sentinel
+    assert captured["kwargs"] == {
+        "plan_worksheet": configured.google_plan_worksheet,
+        "timezone_guard_enabled": True,
+        "local_call_start": configured.local_call_start,
+        "local_lead_cutoff": configured.local_lead_cutoff,
+    }

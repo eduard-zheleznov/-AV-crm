@@ -4,6 +4,7 @@ import os
 import re
 import socket
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -42,6 +43,15 @@ def _float(name: str, default: float) -> float:
         return float(value)
     except ValueError as exc:
         raise ConfigurationError(f"{name}: ожидалось число") from exc
+
+
+def _time(name: str, default: str) -> time:
+    value = os.getenv(name, default).strip()
+    try:
+        hour, minute = (int(part) for part in value.split(":"))
+        return time(hour=hour, minute=minute)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"{name}: ожидалось время ЧЧ:ММ") from exc
 
 
 CHAT_ID_RE = re.compile(r"(?:-?\d+|@[A-Za-z0-9_]{5,})")
@@ -118,7 +128,10 @@ class Settings:
     lptracker_no_answer_funnel_name: str
     lptracker_new_lead_funnel_name: str
     lptracker_repeat_funnel_name: str
+    lptracker_pending_funnel_names: tuple[str, ...]
     lptracker_timezone: str
+    crm_monitor_max_hours: float
+    crm_monitor_batch_size: int
     duplicate_policy: str
 
     google_credentials_file: Path | None
@@ -126,6 +139,7 @@ class Settings:
     google_worksheet: str
     google_control_worksheet: str
     google_history_worksheet: str
+    google_plan_worksheet: str
     remote_control_poll_seconds: float
 
     url_column: str
@@ -140,6 +154,12 @@ class Settings:
     attempts_column: str
     processed_at_column: str
     run_id_column: str
+    next_retry_at_column: str
+
+    timezone_guard_enabled: bool
+    local_call_start: time
+    local_lead_cutoff: time
+    phone_retry_delay_minutes: float
 
     avito_headless: bool
     avito_min_delay: float
@@ -241,7 +261,7 @@ class Settings:
                 "LPTRACKER_SERVICE_NAME", "Avito CRM Pipeline"
             ).strip(),
             lptracker_autoresponder_funnel_name=os.getenv(
-                "LPTRACKER_AUTORESPONDER_FUNNEL_NAME", "Автоответчик"
+                "LPTRACKER_AUTORESPONDER_FUNNEL_NAME", "Автоответчики"
             ).strip(),
             lptracker_no_answer_funnel_name=os.getenv(
                 "LPTRACKER_NO_ANSWER_FUNNEL_NAME", "Недозвон"
@@ -252,7 +272,16 @@ class Settings:
             lptracker_repeat_funnel_name=os.getenv(
                 "LPTRACKER_REPEAT_FUNNEL_NAME", "Повторный лид"
             ).strip(),
+            lptracker_pending_funnel_names=tuple(
+                name.strip()
+                for name in os.getenv(
+                    "LPTRACKER_PENDING_FUNNEL_NAMES", "Новый лид,⚙️ Лид с робота"
+                ).split(",")
+                if name.strip()
+            ),
             lptracker_timezone=os.getenv("LPTRACKER_TIMEZONE", "Europe/Moscow").strip(),
+            crm_monitor_max_hours=_float("CRM_MONITOR_MAX_HOURS", 24.0),
+            crm_monitor_batch_size=_int("CRM_MONITOR_BATCH_SIZE", 20) or 20,
             duplicate_policy=os.getenv("CRM_DUPLICATE_POLICY", "skip").strip().lower(),
             google_credentials_file=Path(credentials).expanduser().resolve()
             if credentials
@@ -263,6 +292,7 @@ class Settings:
             google_history_worksheet=os.getenv(
                 "GOOGLE_HISTORY_WORKSHEET", "История запусков"
             ).strip(),
+            google_plan_worksheet=os.getenv("GOOGLE_PLAN_WORKSHEET", "План загрузки").strip(),
             remote_control_poll_seconds=_float("REMOTE_CONTROL_POLL_SECONDS", 20.0),
             url_column=os.getenv("QUEUE_URL_COLUMN", "Ссылка").strip(),
             status_column=os.getenv("QUEUE_STATUS_COLUMN", "Статус").strip(),
@@ -282,6 +312,13 @@ class Settings:
             attempts_column=os.getenv("QUEUE_ATTEMPTS_COLUMN", "Попытки").strip(),
             processed_at_column=os.getenv("QUEUE_PROCESSED_AT_COLUMN", "Обработано").strip(),
             run_id_column=os.getenv("QUEUE_RUN_ID_COLUMN", "Run ID").strip(),
+            next_retry_at_column=os.getenv(
+                "QUEUE_NEXT_RETRY_AT_COLUMN", "Следующая попытка"
+            ).strip(),
+            timezone_guard_enabled=_bool("LOCAL_TIME_GUARD_ENABLED", True),
+            local_call_start=_time("LOCAL_CALL_START", "10:00"),
+            local_lead_cutoff=_time("LOCAL_LEAD_CUTOFF", "19:45"),
+            phone_retry_delay_minutes=_float("PHONE_RETRY_DELAY_MINUTES", 30.0),
             avito_headless=_bool("AVITO_HEADLESS", False),
             avito_min_delay=_float("AVITO_MIN_DELAY_SECONDS", 7.0),
             avito_max_delay=_float("AVITO_MAX_DELAY_SECONDS", 15.0),
@@ -340,7 +377,9 @@ class Settings:
             ).strip(),
             tesseract_cmd=os.getenv("TESSERACT_CMD", "").strip(),
             ocr_min_agreement=_int("OCR_MIN_AGREEMENT", 2) or 2,
-            max_attempts=_int("PIPELINE_MAX_ATTEMPTS", 3) or 3,
+            # One session contains two actual reveal clicks (with one reload).
+            # A second session contains the single final click: three clicks total.
+            max_attempts=min(_int("PIPELINE_MAX_ATTEMPTS", 2) or 2, 2),
             repeat_phone_max_attempts=_int("CRM_REPEAT_PHONE_MAX_ATTEMPTS", 3) or 3,
             max_consecutive_failures=_int("PIPELINE_MAX_CONSECUTIVE_FAILURES", 5) or 5,
         )
@@ -392,6 +431,16 @@ class Settings:
             raise ConfigurationError("PIPELINE_MAX_ATTEMPTS должен быть больше нуля")
         if self.repeat_phone_max_attempts < 1:
             raise ConfigurationError("CRM_REPEAT_PHONE_MAX_ATTEMPTS должен быть больше нуля")
+        if self.crm_monitor_max_hours <= 0:
+            raise ConfigurationError("CRM_MONITOR_MAX_HOURS должен быть больше нуля")
+        if not 1 <= self.crm_monitor_batch_size <= 100:
+            raise ConfigurationError("CRM_MONITOR_BATCH_SIZE должен быть от 1 до 100")
+        if not self.lptracker_pending_funnel_names:
+            raise ConfigurationError("LPTRACKER_PENDING_FUNNEL_NAMES не может быть пустым")
+        if self.local_lead_cutoff <= self.local_call_start:
+            raise ConfigurationError("LOCAL_LEAD_CUTOFF должен быть позже LOCAL_CALL_START")
+        if self.phone_retry_delay_minutes < 1:
+            raise ConfigurationError("PHONE_RETRY_DELAY_MINUTES должен быть не меньше 1")
         if self.telegram_request_timeout <= 0:
             raise ConfigurationError("TELEGRAM_REQUEST_TIMEOUT_SECONDS должен быть больше нуля")
         if self.telegram_send_attempts < 1 or self.telegram_send_attempts > 10:
@@ -460,6 +509,8 @@ class Settings:
             raise ConfigurationError("GOOGLE_CONTROL_WORKSHEET не может быть пустым")
         if not self.google_history_worksheet:
             raise ConfigurationError("GOOGLE_HISTORY_WORKSHEET не может быть пустым")
+        if self.timezone_guard_enabled and not self.google_plan_worksheet:
+            raise ConfigurationError("GOOGLE_PLAN_WORKSHEET не может быть пустым")
         remote_tabs = {
             self.google_control_worksheet.casefold(),
             self.google_history_worksheet.casefold(),

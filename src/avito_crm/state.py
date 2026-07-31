@@ -70,6 +70,7 @@ class StateStore:
                 crm_create_count INTEGER NOT NULL DEFAULT 0,
                 repeat_crm_lead_id TEXT NOT NULL DEFAULT '',
                 repeat_phone_attempts INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT NOT NULL DEFAULT '',
                 run_id TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -103,6 +104,7 @@ class StateStore:
             "crm_create_count": "INTEGER NOT NULL DEFAULT 0",
             "repeat_crm_lead_id": "TEXT NOT NULL DEFAULT ''",
             "repeat_phone_attempts": "INTEGER NOT NULL DEFAULT 0",
+            "next_retry_at": "TEXT NOT NULL DEFAULT ''",
         }
         for name, definition in item_migrations.items():
             if name not in item_columns:
@@ -150,13 +152,19 @@ class StateStore:
             if patch.repeat_phone_attempts is not None
             else _safe_int(previous.get("repeat_phone_attempts"))
         )
+        next_retry_at = (
+            patch.next_retry_at
+            if patch.next_retry_at is not None
+            else str(previous.get("next_retry_at", ""))
+        )
         self.connection.execute(
             """
             INSERT INTO items(
                 canonical_url, source_name, row_id, status, phone, crm_lead_id,
                 error, attempts, funnel_stage, crm_create_count,
-                repeat_crm_lead_id, repeat_phone_attempts, run_id, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                repeat_crm_lead_id, repeat_phone_attempts, next_retry_at,
+                run_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(canonical_url) DO UPDATE SET
                 source_name=excluded.source_name,
                 row_id=excluded.row_id,
@@ -169,6 +177,7 @@ class StateStore:
                 crm_create_count=excluded.crm_create_count,
                 repeat_crm_lead_id=excluded.repeat_crm_lead_id,
                 repeat_phone_attempts=excluded.repeat_phone_attempts,
+                next_retry_at=excluded.next_retry_at,
                 run_id=excluded.run_id,
                 updated_at=excluded.updated_at
             """,
@@ -185,6 +194,7 @@ class StateStore:
                 int(crm_create_count),
                 str(repeat_crm_lead_id),
                 int(repeat_phone_attempts),
+                str(next_retry_at),
                 patch.run_id,
                 utc_now(),
             ),
