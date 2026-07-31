@@ -18,6 +18,7 @@ from avito_crm.models import CrmDestination, CrmWriteResult, ItemStatus
 from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
+COMMENT_INVALID_LEAD_RETRY_DELAYS = (1.0, 2.0, 4.0)
 
 
 class RateLimiter:
@@ -274,7 +275,22 @@ class LpTrackerClient:
 
     def add_listing_comment(self, lead_id: str | int, listing_url: str) -> None:
         canonical_url = canonical_avito_url(listing_url)
-        self._request("POST", f"/lead/{lead_id}/comment", json={"text": canonical_url})
+        for attempt in range(len(COMMENT_INVALID_LEAD_RETRY_DELAYS) + 1):
+            try:
+                self._request("POST", f"/lead/{lead_id}/comment", json={"text": canonical_url})
+                return
+            except CrmError as exc:
+                if "invalid lead id" not in str(exc).casefold() or attempt >= len(
+                    COMMENT_INVALID_LEAD_RETRY_DELAYS
+                ):
+                    raise
+                delay = COMMENT_INVALID_LEAD_RETRY_DELAYS[attempt]
+                LOGGER.info(
+                    "LPTracker ещё не видит лид %s для комментария; повтор через %.0f сек.",
+                    lead_id,
+                    delay,
+                )
+                time.sleep(delay)
 
     def create_for_phone(
         self,

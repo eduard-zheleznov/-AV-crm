@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from avito_crm.crm import LpTrackerClient, RateLimiter
-from avito_crm.errors import ConfigurationError
+from avito_crm.errors import ConfigurationError, CrmError
 from avito_crm.models import ItemStatus
 
 
@@ -114,6 +114,112 @@ def test_crm_forced_repeat_creates_new_lead_with_funnel_and_listing_comment(sett
         "/lead",
         "/lead/778/comment",
     ]
+
+
+def test_created_lead_retries_comment_while_lptracker_indexes_id(settings, monkeypatch):
+    requests = []
+    comment_attempts = 0
+    delays = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal comment_attempts
+        requests.append(request)
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/contact/search":
+            return _success([])
+        if request.url.path == "/lead":
+            return _success({"id": 779, "contact_id": 100})
+        if request.url.path == "/lead/779/comment":
+            comment_attempts += 1
+            if comment_attempts <= 3:
+                return _failure(400, "Invalid lead ID")
+            return _success(None)
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    monkeypatch.setattr("avito_crm.crm.time.sleep", delays.append)
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        result = crm.create_for_phone(
+            "+79991234567",
+            "https://www.avito.ru/moskva/item_123456789",
+            _destination(),
+        )
+
+    assert result.status == ItemStatus.DONE
+    assert result.lead_id == "779"
+    assert result.detail == "Лид создан"
+    assert delays == [1.0, 2.0, 4.0]
+    assert [request.url.path for request in requests].count("/lead") == 1
+    assert [request.url.path for request in requests].count("/lead/779/comment") == 4
+
+
+def test_comment_does_not_retry_other_lptracker_400_errors(settings, monkeypatch):
+    requests = []
+    delays = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/lead/779/comment":
+            return _failure(400, "Comment is forbidden")
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    monkeypatch.setattr("avito_crm.crm.time.sleep", delays.append)
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        with pytest.raises(CrmError, match="Comment is forbidden"):
+            crm.add_listing_comment(779, "https://www.avito.ru/moskva/item_123456789")
+
+    assert delays == []
+    assert [request.url.path for request in requests].count("/lead/779/comment") == 1
+
+
+def test_created_lead_stays_successful_after_comment_retries_are_exhausted(settings, monkeypatch):
+    requests = []
+    delays = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/contact/search":
+            return _success([])
+        if request.url.path == "/lead":
+            return _success({"id": 779, "contact_id": 100})
+        if request.url.path == "/lead/779/comment":
+            return _failure(400, "Invalid lead ID")
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    monkeypatch.setattr("avito_crm.crm.time.sleep", delays.append)
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        result = crm.create_for_phone(
+            "+79991234567",
+            "https://www.avito.ru/moskva/item_123456789",
+            _destination(),
+        )
+
+    assert result.status == ItemStatus.DONE
+    assert result.lead_id == "779"
+    assert "ссылку в комментарий записать не удалось" in result.detail
+    assert "Invalid lead ID" in result.detail
+    assert delays == [1.0, 2.0, 4.0]
+    assert [request.url.path for request in requests].count("/lead") == 1
+    assert [request.url.path for request in requests].count("/lead/779/comment") == 4
 
 
 def test_crm_reads_funnel_stage_from_lead(settings):
@@ -316,6 +422,13 @@ def test_crm_accepts_configured_category_when_project_list_omits_options(setting
 
 def _success(result):
     return httpx.Response(200, json={"status": "success", "result": result})
+
+
+def _failure(code, message):
+    return httpx.Response(
+        code,
+        json={"status": "error", "errors": [{"code": code, "message": message}]},
+    )
 
 
 def _destination():
