@@ -519,10 +519,20 @@ class GoogleSheetsQueueSource(QueueSource):
         patch_values = _patch_values(self.columns, patch)
         cells = []
         for name, value in patch_values.items():
-            cells.append({"range": rowcol_to_a1(row_number, index[name] + 1), "values": [[value]]})
+            cells.append((rowcol_to_a1(row_number, index[name] + 1), value))
+
+        def update_cells() -> Any:
+            # gspread qualifies every relative A1 range with the worksheet title and
+            # mutates the supplied dictionaries in place.  google_api_call may invoke
+            # this operation again after a transient 429/5xx response, so each attempt
+            # must receive a fresh payload or a range such as B401 becomes
+            # 'Sheet'!'Sheet'!B401 on the retry.
+            payload = [{"range": range_name, "values": [[value]]} for range_name, value in cells]
+            return self.sheet.batch_update(payload, value_input_option="RAW")
+
         try:
             google_api_call(
-                lambda: self.sheet.batch_update(cells, value_input_option="RAW"),
+                update_cells,
                 label=f"Обновление строки Google Sheet {row_number}",
             )
         except Exception as exc:
