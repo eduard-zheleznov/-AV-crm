@@ -1,9 +1,12 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import pytest
 from gspread.utils import absolute_range_name
 
 import avito_crm.queue as queue_module
 from avito_crm.google_api import google_api_call
-from avito_crm.models import ItemStatus, QueuePatch
+from avito_crm.models import ItemStatus, QueueItem, QueuePatch
 from avito_crm.queue import GoogleSheetsQueueSource, QueueColumns
 
 
@@ -155,3 +158,37 @@ def test_google_sheet_retry_rebuilds_relative_ranges(
     assert source.sheet.qualified_ranges[0][0] == qualified_status_cell
     assert source.sheet.qualified_ranges[1][0] == qualified_status_cell
     assert "!" not in source.sheet.batch[0]["range"].split("!", 1)[1]
+
+
+@pytest.mark.parametrize("offset", range(5))
+def test_google_queue_enforces_local_1000_to_1945_window(offset):
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.timezone_guard_enabled = True
+    source.local_call_start = datetime.strptime("10:00", "%H:%M").time()
+    source.local_lead_cutoff = datetime.strptime("19:45", "%H:%M").time()
+    item = QueueItem("2", "https://www.avito.ru/item_123", values={"__moscow_offset": offset})
+    moscow = ZoneInfo("Europe/Moscow")
+
+    assert source.is_local_window_open(
+        item, now=datetime(2026, 7, 31, 10 - offset, 0, tzinfo=moscow)
+    )
+    assert source.is_local_window_open(
+        item, now=datetime(2026, 7, 31, 19 - offset, 45, tzinfo=moscow)
+    )
+    assert not source.is_local_window_open(
+        item, now=datetime(2026, 7, 31, 9 - offset, 59, tzinfo=moscow)
+    )
+    assert not source.is_local_window_open(
+        item, now=datetime(2026, 7, 31, 19 - offset, 46, tzinfo=moscow)
+    )
+
+
+def test_google_queue_blocks_urls_missing_from_plan():
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.timezone_guard_enabled = True
+    source.local_call_start = datetime.strptime("10:00", "%H:%M").time()
+    source.local_lead_cutoff = datetime.strptime("19:45", "%H:%M").time()
+    assert not source.is_local_window_open(
+        QueueItem("3", "https://www.avito.ru/item_456"),
+        now=datetime(2026, 7, 31, 12, 0, tzinfo=ZoneInfo("Europe/Moscow")),
+    )

@@ -22,6 +22,9 @@ class ItemStatus(StrEnum):
     REPEAT_RETRY_PHONE = "repeat_retry_phone"
     REPEAT_RETRY_TECHNICAL = "repeat_retry_technical"
     REPEAT_EXHAUSTED = "repeat_exhausted"
+    CRM_MONITORING = "crm_monitoring"
+    CRM_COMMENT_PENDING = "crm_comment_pending"
+    CRM_MONITOR_EXPIRED = "crm_monitor_expired"
     RECREATE_PENDING = "recreate_pending"
     INVALID = "invalid"
 
@@ -33,6 +36,7 @@ TERMINAL_STATUSES = {
     ItemStatus.UNAVAILABLE.value,
     ItemStatus.NO_PHONE.value,
     ItemStatus.REPEAT_EXHAUSTED.value,
+    ItemStatus.CRM_MONITOR_EXPIRED.value,
     ItemStatus.INVALID.value,
 }
 
@@ -111,3 +115,4 @@ class QueuePatch:
     crm_create_count: int | None = None
     repeat_crm_lead_id: str | None = None
     repeat_phone_attempts: int | None = None
+    next_retry_at: str | None = None

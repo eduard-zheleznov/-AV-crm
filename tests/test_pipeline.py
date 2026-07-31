@@ -86,7 +86,12 @@ class RoundQueue(QueueSource):
         return [
             item
             for item in self.items
-            if self._is_actionable(item.status, item.attempts, include_manual)
+            if self._is_actionable(
+                item.status,
+                item.attempts,
+                include_manual,
+                next_retry_at=str(item.values.get(self.columns.next_retry_at, "") or ""),
+            )
         ]
 
     def update(self, item, patch):
@@ -95,6 +100,9 @@ class RoundQueue(QueueSource):
         item.attempts = patch.attempts
         item.values[self.columns.status] = str(patch.status)
         item.values[self.columns.phone] = patch.phone
+        item.values[self.columns.processed_at] = patch.processed_at
+        if patch.next_retry_at is not None:
+            item.values[self.columns.next_retry_at] = patch.next_retry_at
 
 
 class FakeOcr:
@@ -109,9 +117,11 @@ class SequencedBrowser:
     def __init__(self, outcomes):
         self.outcomes = {row_id: iter(values) for row_id, values in outcomes.items()}
         self.calls = []
+        self.click_budgets = []
 
-    def reveal_phone(self, _url, row_id):
+    def reveal_phone(self, _url, row_id, *, max_clicks=2):
         self.calls.append(row_id)
+        self.click_budgets.append(max_clicks)
         outcome = next(self.outcomes[row_id])
         if isinstance(outcome, Exception):
             raise outcome
@@ -133,6 +143,10 @@ def _run_with_browser(tmp_path, settings, monkeypatch, source, browser):
             mode="full",
             live=False,
         ).run(10)
+
+
+def _make_retry_due(item, columns):
+    item.values[columns.next_retry_at] = "2000-01-01T00:00:00+00:00"
 
 
 @pytest.mark.parametrize(
@@ -171,12 +185,15 @@ def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
         }
     )
 
+    first = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+    _make_retry_due(source.items[0], source.columns)
     summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
 
     assert browser.calls == ["2", "3", "2"]
-    assert summary.rounds == 2
-    assert summary.retries == 1
-    assert summary.captured == 2
+    assert browser.click_budgets == [2, 2, 1]
+    assert summary.rounds == 1
+    assert first.retries == 1
+    assert summary.captured == 1
     assert summary.errors == 0
 
 
@@ -211,30 +228,31 @@ def test_phone_failure_becomes_normal_terminal_outcome_after_all_attempts(
     tmp_path, settings, monkeypatch
 ):
     source = RoundQueue(settings)
-    browser = SequencedBrowser(
-        {"2": [PhoneNotFoundError("не открылся") for _ in range(settings.max_attempts)]}
-    )
+    browser = SequencedBrowser({"2": [PhoneNotFoundError("не открылся")] * 2})
 
+    first = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+    _make_retry_due(source.items[0], source.columns)
     summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
 
-    assert browser.calls == ["2", "2", "2"]
+    assert browser.calls == ["2", "2"]
+    assert browser.click_budgets == [2, 1]
     assert source.items[0].status == ItemStatus.NO_PHONE
     assert summary.phone_failed == 1
-    assert summary.retries == settings.max_attempts - 1
+    assert first.retries == 1
     assert summary.errors == 0
 
 
 def test_only_unresolved_technical_failure_counts_as_error(tmp_path, settings, monkeypatch):
     source = RoundQueue(settings)
-    browser = SequencedBrowser(
-        {"2": [BrowserOperationError("сеть") for _ in range(settings.max_attempts)]}
-    )
+    browser = SequencedBrowser({"2": [BrowserOperationError("сеть")] * 2})
 
+    first = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+    _make_retry_due(source.items[0], source.columns)
     summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
 
     assert source.items[0].status == ItemStatus.ERROR
     assert summary.errors == 1
-    assert summary.retries == settings.max_attempts - 1
+    assert first.retries == 1
 
 
 def test_recovered_technical_failure_is_removed_from_final_error_count(
@@ -243,12 +261,14 @@ def test_recovered_technical_failure_is_removed_from_final_error_count(
     source = RoundQueue(settings)
     browser = SequencedBrowser({"2": [BrowserOperationError("сеть"), "+79991234567"]})
 
+    first = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+    _make_retry_due(source.items[0], source.columns)
     summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
 
     assert browser.calls == ["2", "2"]
     assert source.items[0].status == ItemStatus.CAPTURED
     assert summary.captured == 1
-    assert summary.retries == 1
+    assert first.retries == 1
     assert summary.errors == 0
 
 
@@ -262,7 +282,7 @@ class RepeatQueue(QueueSource):
         self.item = QueueItem(
             row_id="2",
             url="https://www.avito.ru/moskva/item_123456789",
-            status=ItemStatus.DONE,
+            status=ItemStatus.CRM_MONITORING,
             attempts=1,
             values={
                 settings.phone_column: "+79990000000",
@@ -271,8 +291,10 @@ class RepeatQueue(QueueSource):
                 settings.funnel_stage_column: "Новый лид",
                 settings.repeat_crm_lead_column: "",
                 settings.repeat_phone_attempts_column: str(repeat_failures),
-                settings.status_column: ItemStatus.DONE,
+                settings.status_column: ItemStatus.CRM_MONITORING,
                 settings.error_column: "",
+                settings.processed_at_column: "",
+                settings.next_retry_at_column: "",
             },
         )
         self.patches = []
@@ -291,6 +313,7 @@ class RepeatQueue(QueueSource):
                 include_manual,
                 count,
                 repeat_attempts,
+                str(self.item.values.get(self.columns.next_retry_at, "") or ""),
             )
             else []
         )
@@ -305,10 +328,13 @@ class FakeRepeatCrm:
     stage_name = "Автоответчик"
     call_delay_seconds = None
     delete_error = None
+    create_detail = ""
+    comment_error = None
 
     def __init__(self, _settings):
         self.created = []
         self.deleted = []
+        self.comments = []
         self.__class__.instances.append(self)
 
     def __enter__(self):
@@ -348,7 +374,17 @@ class FakeRepeatCrm:
 
     def create_for_phone(self, phone, listing_url, destination, **kwargs):
         self.created.append((phone, listing_url, destination, kwargs))
-        return CrmWriteResult(ItemStatus.DONE, contact_id="99", lead_id="222")
+        return CrmWriteResult(
+            ItemStatus.DONE,
+            contact_id="99",
+            lead_id="222",
+            detail=self.__class__.create_detail,
+        )
+
+    def add_listing_comment(self, lead_id, listing_url):
+        if self.__class__.comment_error is not None:
+            raise self.__class__.comment_error
+        self.comments.append((str(lead_id), listing_url))
 
 
 def _run_repeat(
@@ -362,6 +398,8 @@ def _run_repeat(
     stage_name="Автоответчик",
     call_delay_seconds=None,
     delete_error=None,
+    create_detail="",
+    comment_error=None,
     phase_messages=None,
 ):
     FakeRepeatCrm.instances.clear()
@@ -369,6 +407,8 @@ def _run_repeat(
     FakeRepeatCrm.stage_name = stage_name
     FakeRepeatCrm.call_delay_seconds = call_delay_seconds
     FakeRepeatCrm.delete_error = delete_error
+    FakeRepeatCrm.create_detail = create_detail
+    FakeRepeatCrm.comment_error = comment_error
     monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
     monkeypatch.setattr("avito_crm.pipeline.LpTrackerClient", FakeRepeatCrm)
     monkeypatch.setattr(
@@ -413,6 +453,62 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     assert summary.stage_synced == 1
 
 
+def test_historical_autoresponder_row_is_not_reactivated(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    source.item.status = ItemStatus.DONE
+    source.item.values[source.columns.status] = ItemStatus.DONE
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == []
+    assert crm.created == []
+    assert summary.stage_synced == 0
+    assert source.item.values[source.columns.crm_create_count] == "1"
+
+
+def test_second_crm_lead_can_never_create_a_third(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    source.item.status = ItemStatus.DONE
+    source.item.values[source.columns.status] = ItemStatus.DONE
+    source.item.values[source.columns.crm_create_count] = 2
+    source.item.values[source.columns.repeat_crm_lead_id] = "222"
+    source.item.values[source.columns.funnel_stage] = "Автоответчики"
+    browser = SequencedBrowser({"2": []})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == []
+    assert crm.created == []
+    assert summary.stage_synced == 0
+    assert source.list_actionable() == []
+
+
+def test_repeat_comment_is_repaired_without_creating_a_third_lead(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+
+    first, _crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        create_detail="Лид создан; ссылку в комментарий записать не удалось",
+    )
+
+    assert first.created == 1
+    assert source.item.status == ItemStatus.CRM_COMMENT_PENDING
+    assert source.item.values[source.columns.crm_create_count] == 2
+
+    second, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert second.created == 0
+    assert crm.created == []
+    assert crm.comments == [("222", source.item.url)]
+    assert source.item.status == ItemStatus.DONE
+
+
 def test_live_pipeline_reports_crm_preflight_and_browser_phases(tmp_path, settings, monkeypatch):
     source = RepeatQueue(settings)
     browser = SequencedBrowser({"2": ["+79997654321"]})
@@ -455,7 +551,9 @@ def test_stop_during_crm_preflight_skips_browser_and_queue(tmp_path, settings, m
     assert source.item.values[source.columns.crm_create_count] == "1"
 
 
-def test_no_answer_after_late_first_call_recreates_as_new_lead(tmp_path, settings, monkeypatch):
+def test_no_answer_after_late_first_call_is_terminal_without_delete(
+    tmp_path, settings, monkeypatch
+):
     source = RepeatQueue(settings)
     browser = SequencedBrowser({"2": []})
 
@@ -470,20 +568,16 @@ def test_no_answer_after_late_first_call_recreates_as_new_lead(tmp_path, setting
     )
 
     assert browser.calls == []
-    assert crm.deleted == ["111"]
-    assert len(crm.created) == 1
-    phone, listing_url, _destination, options = crm.created[0]
-    assert phone == "+79990000000"
-    assert listing_url.endswith("item_123456789")
-    assert options == {"force_create": True, "funnel_id": 11, "repeat": False}
+    assert crm.deleted == []
+    assert crm.created == []
     assert source.item.values[source.columns.crm_create_count] == 1
-    assert source.item.values[source.columns.crm_lead_id] == "222"
+    assert source.item.values[source.columns.crm_lead_id] == "111"
     assert source.item.values[source.columns.repeat_crm_lead_id] == ""
-    assert source.item.values[source.columns.funnel_stage] == "Новый Лид"
+    assert source.item.values[source.columns.funnel_stage] == "Не дозвон"
     assert source.item.status == ItemStatus.DONE
     assert summary.stage_synced == 1
     assert summary.no_answer_synced == 1
-    assert summary.created == 1
+    assert summary.created == 0
     assert summary.repeat_created == 0
 
 
@@ -559,7 +653,7 @@ def test_no_answer_delete_error_never_creates_replacement(tmp_path, settings, mo
     assert source.item.values[source.columns.crm_lead_id] == "111"
     assert source.item.values[source.columns.funnel_stage] == "Недозвон"
     assert summary.no_answer_synced == 1
-    assert summary.crm_sync_errors == 1
+    assert summary.crm_sync_errors == 0
     assert summary.errors == 0
 
 
@@ -567,11 +661,14 @@ def test_repeat_phone_reveal_stops_forever_after_three_failed_attempts(
     tmp_path, settings, monkeypatch
 ):
     source = RepeatQueue(settings)
-    browser = SequencedBrowser({"2": [PhoneNotFoundError("номер не открылся") for _ in range(3)]})
+    browser = SequencedBrowser({"2": [PhoneNotFoundError("номер не открылся")] * 2})
 
+    first, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+    _make_retry_due(source.item, source.columns)
     summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
 
-    assert browser.calls == ["2", "2", "2"]
+    assert browser.calls == ["2", "2"]
+    assert browser.click_budgets == [2, 1]
     assert crm.created == []
     assert source.item.status == ItemStatus.REPEAT_EXHAUSTED
     assert source.item.values[source.columns.crm_lead_id] == "111"
@@ -599,7 +696,7 @@ def test_already_exhausted_repeat_stays_skipped_without_inflating_summary(
     assert int(source.item.values[source.columns.repeat_phone_attempts]) == 3
     assert source.list_actionable() == []
     assert summary.repeat_exhausted == 0
-    assert summary.stage_synced == 1
+    assert summary.stage_synced == 0
 
 
 def test_repeat_lead_is_recovered_before_another_phone_attempt(tmp_path, settings, monkeypatch):
