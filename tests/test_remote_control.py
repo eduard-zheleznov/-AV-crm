@@ -197,6 +197,28 @@ def test_panel_reads_remote_command_from_fixed_cells(settings):
     assert command == PanelCommand(True, False, 3, "Новые", True, 8)
 
 
+def test_claim_consumes_start_and_retry_captcha_checkboxes(settings):
+    values = [[""] * 6 for _ in range(12)]
+    values[3][1] = True
+    values[7][1] = True
+    panel = GoogleControlPanel(settings, spreadsheet=object(), worksheet_not_found=KeyError)
+    panel.control = MatrixSheet(values)
+    state = CommandState(
+        command_id="cmd-once",
+        target=1,
+        worksheet="Лист1",
+        retry_manual=True,
+        phase="claiming",
+        started_at="2026-08-01T10:00:00+00:00",
+        max_inspected=2,
+    )
+
+    panel.claim(state)
+
+    assert panel.control.values[3][1] is False
+    assert panel.control.values[7][1] is False
+
+
 def test_existing_user_control_sheet_is_never_overwritten(settings):
     existing = MatrixSheet([["Мои важные данные"]])
     spreadsheet = FakeSpreadsheet({settings.google_control_worksheet: existing})

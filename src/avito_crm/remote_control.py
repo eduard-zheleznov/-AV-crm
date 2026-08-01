@@ -296,6 +296,7 @@ class GoogleControlPanel:
         self._batch_control(
             {
                 "B4": False,
+                "B8": False,
                 "E4": "ПРИНЯТО",
                 "E5": state.command_id,
                 "E6": f"0 / {_target_label(state.target)}",
