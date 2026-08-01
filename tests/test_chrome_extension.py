@@ -134,6 +134,10 @@ class _FakeNotifier:
 
 
 class _FakeOcr:
+    def read_avito_screen_png(self, png: bytes) -> PhoneResult:
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        return PhoneResult("+79991234567", "fake-avito-screen")
+
     def read_png(self, png: bytes, _artifact_path=None, *, psm: int = 7) -> PhoneResult:
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
         return PhoneResult("+79991234567", f"fake-ocr-region-{psm}")
@@ -198,7 +202,7 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
     monkeypatch.setattr(
         chrome_extension_module,
         "_capture_interactive_desktop_png",
-        lambda crop: png,
+        lambda _crop=None: png,
     )
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
@@ -222,7 +226,7 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "ocr-confirmed-region"
+    assert result.source == "ocr-confirmed-avito-screen"
 
 
 def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monkeypatch):
@@ -231,7 +235,7 @@ def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monke
     monkeypatch.setattr(
         chrome_extension_module,
         "_capture_interactive_desktop_png",
-        lambda crop: png,
+        lambda _crop=None: png,
     )
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
@@ -256,7 +260,7 @@ def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monke
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "ocr-confirmed-region"
+    assert result.source == "ocr-confirmed-avito-screen"
 
 
 def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):

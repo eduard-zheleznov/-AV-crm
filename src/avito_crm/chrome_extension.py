@@ -413,35 +413,33 @@ class ChromeExtensionBrowser:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         return self.settings.screenshot_dir / f"{stamp}-{digest}-{suffix}.png"
 
-    def _read_screen_capture(self, crop: dict[str, Any], url: str) -> PhoneResult:
-        crop_kind = str(crop.get("kind", "control"))
-        psm = 6 if crop_kind in {"dialog", "panel"} else 7
+    def _read_screen_capture(self, _crop: dict[str, Any], url: str) -> PhoneResult:
         recognized: dict[str, tuple[int, PhoneResult]] = {}
         errors: list[str] = []
         for attempt in range(1, 4):
             if attempt > 1:
                 time.sleep(0.8)
-            png = _capture_interactive_desktop_png(crop)
-            artifact = self._artifact_path(url, f"extension-phone-{attempt}")
+            png = _capture_interactive_desktop_png()
+            artifact = self._artifact_path(url, f"extension-screen-{attempt}")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
             try:
-                result = self.ocr.read_png(png, artifact, psm=psm)
+                result = self.ocr.read_avito_screen_png(png)
             except PhoneNotFoundError as exc:
                 errors.append(str(exc))
                 continue
             count, _previous = recognized.get(result.phone, (0, result))
             recognized[result.phone] = (count + 1, result)
             if count + 1 >= 2:
-                result.source = "ocr-confirmed-region"
+                result.source = "ocr-confirmed-avito-screen"
                 return result
         if recognized:
             raise PhoneNotFoundError(
                 "OCR увидел номер только на одном из трёх снимков; "
                 "результат отклонён как неподтверждённый"
             )
-        detail = errors[-1] if errors else "область номера осталась пустой"
-        raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках области: {detail}")
+        detail = errors[-1] if errors else "номер не попал в проверенные области"
+        raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках экрана: {detail}")
 
 
 def open_ordinary_chrome() -> None:

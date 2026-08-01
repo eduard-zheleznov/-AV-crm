@@ -6,6 +6,9 @@ from urllib.parse import urlsplit, urlunsplit
 from avito_crm.errors import InvalidListingError
 
 PHONE_CANDIDATE_RE = re.compile(r"(?<!\d)(?:\+?7|8)?(?:[\s()\-.]*\d){10,11}(?!\d)")
+FORMATTED_PHONE_RE = re.compile(
+    r"(?<!\d)(?:\+?7|8)[\s(.\-]+\d{3}[\s).\-]+\d{3}[\s.\-]+\d{2}[\s.\-]+\d{2}(?!\d)"
+)
 
 
 def normalize_phone(value: str) -> str | None:
@@ -31,6 +34,16 @@ def extract_phones(text: str) -> list[str]:
     if not found:
         normalized = normalize_phone(text or "")
         if normalized:
+            found.append(normalized)
+    return found
+
+
+def extract_formatted_phones(text: str) -> list[str]:
+    """Extract only visibly formatted Russian phones from noisy full-screen OCR."""
+    found: list[str] = []
+    for match in FORMATTED_PHONE_RE.finditer(text or ""):
+        normalized = normalize_phone(match.group(0))
+        if normalized and normalized not in found:
             found.append(normalized)
     return found
 
