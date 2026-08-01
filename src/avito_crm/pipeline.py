@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from avito_crm.avito import AvitoBrowser
+from avito_crm.chrome_extension import ChromeExtensionBrowser
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import (
@@ -79,7 +80,7 @@ class Pipeline:
             with ExitStack() as stack:
                 crm: LpTrackerClient | None = None
                 destination = None
-                browser: AvitoBrowser | None = None
+                browser: AvitoBrowser | ChromeExtensionBrowser | None = None
 
                 if self.mode in {"crm", "full"} and self.live:
                     self._report_phase(phase, "Подготовка CRM: подключаемся к LPTracker.")
@@ -124,13 +125,23 @@ class Pipeline:
                     and (not self.live or self.source.is_local_window_open(item))
                 )
                 if needs_browser:
+                    browser_label = (
+                        "обычный Chrome через локальное расширение"
+                        if self.settings.avito_browser_driver == "chrome_extension"
+                        else "Chromium"
+                    )
                     self._report_phase(
                         phase,
-                        "Запускаем Chromium и открываем очередь Avito.",
+                        f"Подключаем {browser_label} и открываем очередь Avito.",
                     )
                     ocr = PhoneOcr(self.settings.tesseract_cmd, self.settings.ocr_min_agreement)
                     ocr.check_available()
-                    browser = stack.enter_context(AvitoBrowser(self.settings, ocr, notifier))
+                    browser_type = (
+                        ChromeExtensionBrowser
+                        if self.settings.avito_browser_driver == "chrome_extension"
+                        else AvitoBrowser
+                    )
+                    browser = stack.enter_context(browser_type(self.settings, ocr, notifier))
                 self._report_phase(phase, "Обрабатываем очередь Avito по одной строке.")
 
                 round_number = 0

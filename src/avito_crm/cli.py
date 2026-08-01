@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright
 
 from avito_crm import __version__
 from avito_crm.avito import open_avito_profile
+from avito_crm.chrome_extension import ChromeExtensionBrowser, open_ordinary_chrome
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError
@@ -56,6 +57,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "avito-profile",
         help="Открыть постоянный Chromium для необязательного входа или выхода из Avito",
+    )
+    extension_test = subparsers.add_parser(
+        "avito-extension-test",
+        help="Получить один номер через обычный Chrome без записи в CRM",
+    )
+    extension_test.add_argument("url", help="Ссылка на объявление Avito")
+    extension_test.add_argument(
+        "--max-clicks",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Число кликов; для первого теста оставьте 1",
     )
 
     remote = subparsers.add_parser(
@@ -172,8 +185,22 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _max_recipients(settings)
     if args.command == "avito-profile":
         with SingleInstanceLock(settings.data_dir / "worker.lock"):
-            open_avito_profile(settings)
-        print("Профиль браузера сохранён. Следующий запуск использует это состояние.")
+            if settings.avito_browser_driver == "chrome_extension":
+                open_ordinary_chrome()
+                print("Avito открыт в обычном браузере Windows.")
+            else:
+                open_avito_profile(settings)
+                print("Профиль браузера сохранён. Следующий запуск использует это состояние.")
+        return 0
+    if args.command == "avito-extension-test":
+        if settings.avito_browser_driver != "chrome_extension":
+            raise ConfigurationError("Сначала выполните scripts\\install-chrome-extension.ps1")
+        with SingleInstanceLock(settings.data_dir / "worker.lock"):
+            ocr = PhoneOcr(settings.tesseract_cmd, settings.ocr_min_agreement)
+            ocr.check_available()
+            with ChromeExtensionBrowser(settings, ocr) as browser:
+                result = browser.reveal_phone(args.url, "manual-test", max_clicks=args.max_clicks)
+        print(f"Номер получен без CRM: {result.phone} ({result.source})")
         return 0
     if args.command == "remote-control":
         from avito_crm.remote_control import run_remote_control
@@ -274,14 +301,29 @@ def _doctor(args: argparse.Namespace, settings: Settings) -> int:
     checks: list[tuple[str, str]] = []
     ocr = PhoneOcr(settings.tesseract_cmd, settings.ocr_min_agreement)
     checks.append(("Tesseract OCR", ocr.check_available().splitlines()[0]))
-    with sync_playwright() as playwright:
-        executable = Path(playwright.chromium.executable_path)
-        if not executable.is_file():
+    if settings.avito_browser_driver == "chrome_extension":
+        extension_manifest = settings.root_dir / "chrome-extension" / "manifest.json"
+        extension_config = settings.root_dir / "chrome-extension" / "config.local.js"
+        if not extension_manifest.is_file() or not extension_config.is_file():
             raise ConfigurationError(
-                "Chromium Playwright не установлен; выполните "
-                "`python -m playwright install chromium`"
+                "Расширение обычного Chrome не подготовлено; выполните "
+                "scripts\\install-chrome-extension.ps1"
             )
-        checks.append(("Chromium", str(executable)))
+        checks.append(
+            (
+                "Обычный Chrome",
+                f"локальное расширение; мост 127.0.0.1:{settings.avito_extension_port}",
+            )
+        )
+    else:
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+            if not executable.is_file():
+                raise ConfigurationError(
+                    "Chromium Playwright не установлен; выполните "
+                    "`python -m playwright install chromium`"
+                )
+            checks.append(("Chromium", str(executable)))
     if args.source:
         source = build_queue_source(settings, args.source, args.file, args.sheet)
         actionable = source.list_actionable()

@@ -1,5 +1,6 @@
 # Secrets and local configuration
 .env
+chrome-extension/config.local.js
 .env.*
 !.env.example
 *.pem

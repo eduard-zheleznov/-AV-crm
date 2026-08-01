@@ -115,6 +115,10 @@ class Settings:
     state_db: Path
     browser_profile_dir: Path
     avito_browser_channel: str
+    avito_browser_driver: str
+    avito_extension_port: int
+    avito_extension_token: str
+    avito_extension_connect_timeout: float
     screenshot_dir: Path
 
     lptracker_base_url: str
@@ -243,6 +247,10 @@ class Settings:
             .expanduser()
             .resolve(),
             avito_browser_channel=os.getenv("AVITO_BROWSER_CHANNEL", "").strip().casefold(),
+            avito_browser_driver=os.getenv("AVITO_BROWSER_DRIVER", "playwright").strip().casefold(),
+            avito_extension_port=_int("AVITO_EXTENSION_PORT", 8765) or 8765,
+            avito_extension_token=os.getenv("AVITO_EXTENSION_TOKEN", "").strip(),
+            avito_extension_connect_timeout=_float("AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS", 30.0),
             screenshot_dir=Path(os.getenv("AVITO_SCREENSHOT_DIR", output / "diagnostics"))
             .expanduser()
             .resolve(),
@@ -427,6 +435,20 @@ class Settings:
             raise ConfigurationError("AVITO_PHONE_FIRST_ROUND_ATTEMPTS должен быть больше нуля")
         if self.avito_browser_channel not in {"", "chrome"}:
             raise ConfigurationError("AVITO_BROWSER_CHANNEL должен быть пустым или равен chrome")
+        if self.avito_browser_driver not in {"playwright", "chrome_extension"}:
+            raise ConfigurationError(
+                "AVITO_BROWSER_DRIVER должен быть playwright или chrome_extension"
+            )
+        if not 1024 <= self.avito_extension_port <= 65535:
+            raise ConfigurationError("AVITO_EXTENSION_PORT должен быть от 1024 до 65535")
+        if self.avito_extension_connect_timeout <= 0:
+            raise ConfigurationError(
+                "AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS должен быть больше нуля"
+            )
+        if self.avito_browser_driver == "chrome_extension" and len(self.avito_extension_token) < 32:
+            raise ConfigurationError(
+                "Для chrome_extension задайте AVITO_EXTENSION_TOKEN длиной не менее 32 символов"
+            )
         if self.avito_phone_second_round_attempts < 0:
             raise ConfigurationError(
                 "AVITO_PHONE_SECOND_ROUND_ATTEMPTS не может быть отрицательным"
