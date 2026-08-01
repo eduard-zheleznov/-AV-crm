@@ -1,3 +1,3 @@
 """Avito to LPTracker CRM automation pipeline."""
 
-__version__ = "1.11.8"
+__version__ = "1.11.9"
