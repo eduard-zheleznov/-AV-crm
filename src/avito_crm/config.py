@@ -139,6 +139,20 @@ class Settings:
     crm_monitor_batch_size: int
     duplicate_policy: str
 
+    robot_handoff_enabled: bool
+    robot_handoff_source_funnel_name: str
+    robot_handoff_target_funnel_name: str
+    robot_handoff_field_name: str
+    robot_handoff_field_value: str
+    robot_handoff_poll_seconds: float
+    robot_handoff_lookback_hours: float
+    robot_handoff_batch_size: int
+    robot_handoff_min_confidence: float
+    gemini_api_key: str
+    gemini_model: str
+    gemini_api_base_url: str
+    gemini_max_audio_bytes: int
+
     google_credentials_file: Path | None
     google_spreadsheet_id: str
     google_worksheet: str
@@ -293,6 +307,33 @@ class Settings:
             crm_monitor_max_hours=_float("CRM_MONITOR_MAX_HOURS", 24.0),
             crm_monitor_batch_size=_int("CRM_MONITOR_BATCH_SIZE", 20) or 20,
             duplicate_policy=os.getenv("CRM_DUPLICATE_POLICY", "skip").strip().lower(),
+            robot_handoff_enabled=_bool("ROBOT_HANDOFF_ENABLED", False),
+            robot_handoff_source_funnel_name=os.getenv(
+                "ROBOT_HANDOFF_SOURCE_FUNNEL_NAME", "⚙️ Лид с робота"
+            ).strip(),
+            robot_handoff_target_funnel_name=os.getenv(
+                "ROBOT_HANDOFF_TARGET_FUNNEL_NAME", "Новый лид"
+            ).strip(),
+            robot_handoff_field_name=os.getenv(
+                "ROBOT_HANDOFF_FIELD_NAME", "Тег+ для новых с Ав и Ян"
+            ).strip(),
+            robot_handoff_field_value=os.getenv(
+                "ROBOT_HANDOFF_FIELD_VALUE", "Предлагаем бесплатный аудит авито"
+            ).strip(),
+            robot_handoff_poll_seconds=_float("ROBOT_HANDOFF_POLL_SECONDS", 120.0),
+            robot_handoff_lookback_hours=_float("ROBOT_HANDOFF_LOOKBACK_HOURS", 72.0),
+            robot_handoff_batch_size=int(_int("ROBOT_HANDOFF_BATCH_SIZE", 3) or 0),
+            robot_handoff_min_confidence=_float("ROBOT_HANDOFF_MIN_CONFIDENCE", 0.93),
+            gemini_api_key=os.getenv("GEMINI_API_KEY", "").strip(),
+            gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
+            gemini_api_base_url=os.getenv(
+                "GEMINI_API_BASE_URL", "https://generativelanguage.googleapis.com"
+            )
+            .strip()
+            .rstrip("/"),
+            gemini_max_audio_bytes=int(
+                _int("GEMINI_MAX_AUDIO_BYTES", 14 * 1024 * 1024) or 0
+            ),
             google_credentials_file=Path(credentials).expanduser().resolve()
             if credentials
             else None,
@@ -399,6 +440,43 @@ class Settings:
     def validate(self) -> None:
         if self.avito_min_delay < 0 or self.avito_max_delay < self.avito_min_delay:
             raise ConfigurationError("Некорректный диапазон задержек Avito")
+        if self.robot_handoff_poll_seconds < 30:
+            raise ConfigurationError("ROBOT_HANDOFF_POLL_SECONDS должен быть не меньше 30")
+        if not 1 <= self.robot_handoff_lookback_hours <= 24 * 14:
+            raise ConfigurationError("ROBOT_HANDOFF_LOOKBACK_HOURS: допустимо от 1 до 336")
+        if not 1 <= self.robot_handoff_batch_size <= 10:
+            raise ConfigurationError("ROBOT_HANDOFF_BATCH_SIZE: допустимо от 1 до 10")
+        if not 0.5 <= self.robot_handoff_min_confidence <= 1.0:
+            raise ConfigurationError("ROBOT_HANDOFF_MIN_CONFIDENCE: допустимо от 0.5 до 1")
+        if not 1024 * 1024 <= self.gemini_max_audio_bytes <= 14 * 1024 * 1024:
+            raise ConfigurationError(
+                "GEMINI_MAX_AUDIO_BYTES: допустимо от 1 до 14 МБ для inline-запроса"
+            )
+        gemini_base = urlsplit(self.gemini_api_base_url)
+        if (
+            gemini_base.scheme != "https"
+            or gemini_base.hostname != "generativelanguage.googleapis.com"
+            or gemini_base.username
+            or gemini_base.password
+        ):
+            raise ConfigurationError(
+                "GEMINI_API_BASE_URL должен быть официальным HTTPS-адресом "
+                "https://generativelanguage.googleapis.com"
+            )
+        if self.robot_handoff_enabled:
+            required = {
+                "ROBOT_HANDOFF_SOURCE_FUNNEL_NAME": self.robot_handoff_source_funnel_name,
+                "ROBOT_HANDOFF_TARGET_FUNNEL_NAME": self.robot_handoff_target_funnel_name,
+                "ROBOT_HANDOFF_FIELD_NAME": self.robot_handoff_field_name,
+                "ROBOT_HANDOFF_FIELD_VALUE": self.robot_handoff_field_value,
+                "GEMINI_API_KEY": self.gemini_api_key,
+                "GEMINI_MODEL": self.gemini_model,
+            }
+            missing = [name for name, value in required.items() if not value]
+            if missing:
+                raise ConfigurationError(
+                    "Для ROBOT_HANDOFF_ENABLED=true не заполнено: " + ", ".join(missing)
+                )
         if self.avito_manual_timeout < 0 or 0 < self.avito_manual_timeout < 60:
             raise ConfigurationError(
                 "AVITO_MANUAL_TIMEOUT_SECONDS: 0 означает ждать до решения; "

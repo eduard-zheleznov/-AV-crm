@@ -527,7 +527,12 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     phone, listing_url, _destination, options = crm.created[0]
     assert phone == "+79997654321"
     assert listing_url.endswith("item_123456789")
-    assert options == {"force_create": True, "funnel_id": 88, "repeat": True}
+    assert options == {
+        "force_create": True,
+        "funnel_id": 88,
+        "repeat": True,
+        "moscow_offset": 0,
+    }
     assert source.item.status == ItemStatus.DONE
     assert source.item.values[source.columns.crm_lead_id] == "111"
     assert source.item.values[source.columns.repeat_crm_lead_id] == "222"

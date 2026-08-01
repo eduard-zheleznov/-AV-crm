@@ -97,6 +97,10 @@ class QueueSource(ABC):
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         raise NotImplementedError
 
+    def moscow_offset(self, item: QueueItem) -> int:
+        """Return the row's Moscow offset; absent/invalid values safely map to zero."""
+        return _safe_int(item.values.get(_MOSCOW_OFFSET))
+
     def _is_actionable(
         self,
         status: str,

@@ -71,3 +71,17 @@ def test_extension_driver_accepts_loopback_configuration(settings):
     )
 
     configured.validate()
+
+
+def test_robot_handoff_requires_local_gemini_key_when_enabled(settings):
+    configured = replace(settings, robot_handoff_enabled=True, gemini_api_key="")
+
+    with pytest.raises(ConfigurationError, match="GEMINI_API_KEY"):
+        configured.validate()
+
+
+def test_gemini_inline_audio_limit_accounts_for_base64_overhead(settings):
+    configured = replace(settings, gemini_max_audio_bytes=15 * 1024 * 1024)
+
+    with pytest.raises(ConfigurationError, match="GEMINI_MAX_AUDIO_BYTES"):
+        configured.validate()

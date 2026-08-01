@@ -38,6 +38,10 @@ class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 
 
+class ManualReviewRequired(AppError):
+    """A downstream CRM lead is unsafe to change without a human review."""
+
+
 class OperatorStopRequested(AppError):
     """The operator stopped the current browser operation without failing its row."""
 

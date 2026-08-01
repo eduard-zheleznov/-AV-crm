@@ -254,6 +254,21 @@ class TelegramNotifier:
         )
         return self.send(body, recipients) if recipients else 0
 
+    def send_robot_handoff_required(self, *, lead_id: str, reason: str) -> int:
+        recipients = _deduplicate((*self.primary_chat_ids, *self.backup_chat_ids))
+        return self.send(
+            "\n".join(
+                (
+                    "⚠️ Нужна ручная проверка лида после звонка робота.",
+                    f"Компьютер: {self.computer_name}",
+                    f"CRM ID: {lead_id}",
+                    f"Причина: {reason}",
+                    "Телефон и запись разговора в уведомление не включены.",
+                )
+            ),
+            recipients,
+        )
+
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_chat_ids, *self.backup_chat_ids))
         return self.send(
@@ -509,6 +524,21 @@ class MaxNotifier:
             backup=self.completion_backup,
         )
         return self.send(body, recipients) if recipients else 0
+
+    def send_robot_handoff_required(self, *, lead_id: str, reason: str) -> int:
+        recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "\n".join(
+                (
+                    "⚠️ Нужна ручная проверка лида после звонка робота.",
+                    f"Компьютер: {self.computer_name}",
+                    f"CRM ID: {lead_id}",
+                    f"Причина: {reason}",
+                    "Телефон и запись разговора в уведомление не включены.",
+                )
+            ),
+            recipients,
+        )
 
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
@@ -810,6 +840,22 @@ class EmailNotifier:
         )
         return self.send(subject, body, recipients) if recipients else 0
 
+    def send_robot_handoff_required(self, *, lead_id: str, reason: str) -> int:
+        recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
+        return self.send(
+            "[Avito CRM] Нужна ручная проверка лида после звонка робота",
+            "\n".join(
+                (
+                    "Нужна ручная проверка лида после звонка робота.",
+                    f"Компьютер: {self.computer_name}",
+                    f"CRM ID: {lead_id}",
+                    f"Причина: {reason}",
+                    "Телефон и запись разговора в уведомление не включены.",
+                )
+            ),
+            recipients,
+        )
+
     def send_test(self) -> int:
         recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
         return self.send(
@@ -929,6 +975,9 @@ class NotificationRouter:
 
     def send_run_completed(self, **kwargs: object) -> int:
         return self._dispatch("send_run_completed", **kwargs)
+
+    def send_robot_handoff_required(self, **kwargs: object) -> int:
+        return self._dispatch("send_robot_handoff_required", **kwargs)
 
 
 def split_telegram_text(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:

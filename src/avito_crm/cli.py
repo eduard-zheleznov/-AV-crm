@@ -149,6 +149,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("status", help="Показать итог последнего запуска без телефонов")
     subparsers.add_parser("stop", help="Мягко остановить работающий процесс после текущего шага")
+    handoff = subparsers.add_parser(
+        "robot-handoff",
+        help="Проверить и передать лиды со шага «Лид с робота»",
+    )
+    handoff.add_argument("--lead-id", help="Один точный CRM ID для контролируемого теста")
+    handoff.add_argument("--limit", type=int, default=0, help="Не больше N подходящих лидов")
+    handoff.add_argument(
+        "--apply",
+        action="store_true",
+        help="Разрешить замену телефона, тег и перевод шага; без флага только проверка",
+    )
+    handoff.add_argument(
+        "--retry-analysis",
+        action="store_true",
+        help="Повторно распознать запись, ранее отправленную на ручную проверку",
+    )
     return parser
 
 
@@ -258,6 +274,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         path = request_stop(settings.data_dir)
         print(f"Запрошена мягкая остановка: {path}")
         return 0
+    if args.command == "robot-handoff":
+        return _robot_handoff(args, settings)
     if args.command == "sync-crm" and not args.live:
         raise ConfigurationError(
             "sync-crm ничего не записал: для создания лидов требуется явный флаг --live"
@@ -305,6 +323,54 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
             return 5
         return 0
     raise ConfigurationError(f"Неизвестная команда: {args.command}")
+
+
+def _robot_handoff(args: argparse.Namespace, settings: Settings) -> int:
+    from avito_crm.notifications import NotificationRouter
+    from avito_crm.robot_handoff import RobotLeadHandoff
+
+    if args.limit < 0 or args.limit > 10:
+        raise ConfigurationError("--limit должен быть от 0 до 10")
+    limit = args.limit or settings.robot_handoff_batch_size
+    notifier = NotificationRouter(settings)
+
+    def manual_notifier(lead_id: str, reason: str) -> None:
+        if notifier.enabled:
+            notifier.send_robot_handoff_required(lead_id=lead_id, reason=reason)
+
+    try:
+        with (
+            SingleInstanceLock(settings.data_dir / "worker.lock"),
+            StateStore(settings.state_db) as state,
+            RobotLeadHandoff(
+                settings,
+                state,
+                manual_notifier=manual_notifier,
+            ) as handler,
+        ):
+            summary = handler.run_once(
+                apply=bool(args.apply),
+                lead_id=args.lead_id,
+                limit=limit,
+                retry_analysis=bool(args.retry_analysis),
+            )
+    finally:
+        notifier.close()
+    mode = "ИЗМЕНЕНИЯ ПРИМЕНЕНЫ" if args.apply else "ПРЕДВАРИТЕЛЬНАЯ ПРОВЕРКА"
+    print(f"Обработка «Лид с робота»: {mode}")
+    print(f"  Проверено лидов: {summary.inspected}")
+    print(f"  Подходящих: {summary.eligible}")
+    print(f"  Завершено: {summary.completed}")
+    print(f"  Готово к применению: {summary.ready}")
+    print(f"  Нужна ручная проверка: {summary.manual_required}")
+    print(f"  Технических ошибок: {summary.errors}")
+    for detail in summary.details:
+        print(f"  - {detail}")
+    if summary.errors:
+        return 3
+    if summary.manual_required:
+        return 5
+    return 0
 
 
 def _init_files(settings: Settings) -> int:

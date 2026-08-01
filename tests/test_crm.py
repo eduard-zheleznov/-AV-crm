@@ -6,9 +6,14 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from avito_crm.crm import LpTrackerClient, RateLimiter
+from avito_crm.crm import (
+    LpTrackerClient,
+    RateLimiter,
+    format_avito_lead_name,
+    normalize_moscow_offset,
+)
 from avito_crm.errors import ConfigurationError, CrmError
-from avito_crm.models import ItemStatus
+from avito_crm.models import CrmDestination, ItemStatus
 
 
 def test_crm_resolves_category_and_creates_lead(settings):
@@ -65,6 +70,89 @@ def test_crm_resolves_category_and_creates_lead(settings):
     assert len(requests) == 6
 
 
+def test_lead_name_contains_approved_moscow_offset_prefix():
+    assert format_avito_lead_name("123456789", moscow_offset=2) == "2 Авито — 123456789"
+    assert format_avito_lead_name("123456789", moscow_offset=-1) == "0 Авито — 123456789"
+    assert normalize_moscow_offset("0") == 0
+    assert normalize_moscow_offset("3") == 3
+    assert normalize_moscow_offset("2.5") == 0
+
+
+def test_crm_handoff_write_contracts_match_lptracker_api(settings):
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/contact/details/501":
+            assert request.method == "PUT"
+            assert json.loads(request.content) == {"value": "+79991234567"}
+            return _success({"id": "501", "type": "phone", "data": "+79991234567"})
+        if request.url.path == "/lead/700":
+            assert request.method == "PUT"
+            assert json.loads(request.content) == {
+                "custom": {"42": ["Предлагаем бесплатный аудит авито"]}
+            }
+            return _success({"id": 700})
+        if request.url.path == "/lead/700/funnel":
+            assert request.method == "PUT"
+            assert json.loads(request.content) == {"funnel": 20}
+            return _success({"id": 700, "funnel": 20})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        crm.update_contact_detail(501, "+79991234567")
+        crm.update_lead_custom(
+            700,
+            CrmDestination(
+                project_id=1,
+                project_name="Project",
+                field_id=42,
+                field_name="Тег+ для новых с Ав и Ян",
+                field_type="cats",
+                field_value=["Предлагаем бесплатный аудит авито"],
+            ),
+        )
+        crm.set_lead_funnel(700, 20)
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/login"),
+        ("PUT", "/contact/details/501"),
+        ("PUT", "/lead/700"),
+        ("PUT", "/lead/700/funnel"),
+    ]
+
+
+def test_crm_recent_lead_scan_uses_documented_pagination_and_filter(settings):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/lead/1/list":
+            assert request.url.params["offset"] == "100"
+            assert request.url.params["limit"] == "50"
+            assert request.url.params["sort[updated_at]"] == "3"
+            assert request.url.params["filter[updated_at_from]"] == "123456"
+            assert request.url.params["is_deal"] == "false"
+            return _success([{"id": 700}])
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        leads = crm.list_recent_leads(1, updated_from=123456, limit=50, offset=100)
+
+    assert leads == [{"id": 700}]
+
+
 def test_crm_forced_repeat_creates_new_lead_with_funnel_and_listing_comment(settings):
     requests = []
 
@@ -79,7 +167,7 @@ def test_crm_forced_repeat_creates_new_lead_with_funnel_and_listing_comment(sett
             return _success([])
         if path == "/lead":
             body = json.loads(request.content)
-            assert body["name"] == "Авито — 123456789 — повторный лид"
+            assert body["name"] == "0 Авито — 123456789 — повторный лид"
             assert body["contact_id"] == "99"
             assert body["funnel"] == 88
             return _success({"id": 778, "contact_id": 99})

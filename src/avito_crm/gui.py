@@ -68,6 +68,10 @@ class DesktopApp:
         self.worksheet_var = tk.StringVar(value=values.get("GOOGLE_WORKSHEET", "Лист1"))
         self.credentials_var = tk.StringVar(value=values.get("GOOGLE_CREDENTIALS_FILE", ""))
         self.limit_var = tk.StringVar(value=values.get("GUI_DEFAULT_LIMIT", "0"))
+        self.gemini_key_var = tk.StringVar(value=values.get("GEMINI_API_KEY", ""))
+        self.robot_handoff_enabled_var = tk.BooleanVar(
+            value=_env_flag(values, "ROBOT_HANDOFF_ENABLED", False)
+        )
         self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
         self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
         self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
@@ -305,8 +309,28 @@ class DesktopApp:
         )
         self.avito_profile_button.grid(row=0, column=2, sticky="e", padx=(10, 0))
 
+        handoff_row = ttk.Frame(settings_card, style="Card.TFrame")
+        handoff_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        handoff_row.columnconfigure(1, weight=1)
+        self.robot_handoff_checkbox = ttk.Checkbutton(
+            handoff_row,
+            text="Обрабатывать «Лид с робота»",
+            variable=self.robot_handoff_enabled_var,
+        )
+        self.robot_handoff_checkbox.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        ttk.Label(handoff_row, text="Gemini API key", style="Field.TLabel").grid(
+            row=0, column=1, sticky="e", padx=(0, 8)
+        )
+        self.gemini_key_entry = ttk.Entry(
+            handoff_row,
+            textvariable=self.gemini_key_var,
+            show="●",
+            width=34,
+        )
+        self.gemini_key_entry.grid(row=0, column=2, columnspan=2, sticky="ew")
+
         notification_row = ttk.Frame(settings_card, style="Card.TFrame")
-        notification_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(14, 0))
+        notification_row.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         notification_row.columnconfigure(1, weight=1)
         ttk.Label(
             notification_row,
@@ -1151,6 +1175,11 @@ class DesktopApp:
         credentials = Path(self.credentials_var.get().strip()).expanduser()
         service_account_email(credentials)
         limit = parse_limit(self.limit_var.get())
+        gemini_key = self.gemini_key_var.get().strip()
+        if self.robot_handoff_enabled_var.get() and not gemini_key:
+            raise ValueError(
+                "Для обработки шага «Лид с робота» укажите Gemini API key"
+            )
         notification_updates = self._notification_env_values()
         update_env_values(
             self.env_path,
@@ -1159,6 +1188,10 @@ class DesktopApp:
                 "GOOGLE_SPREADSHEET_ID": spreadsheet_id,
                 "GOOGLE_WORKSHEET": worksheet,
                 "GUI_DEFAULT_LIMIT": str(limit),
+                "GEMINI_API_KEY": gemini_key,
+                "ROBOT_HANDOFF_ENABLED": _bool_text(
+                    self.robot_handoff_enabled_var.get()
+                ),
                 **notification_updates,
             },
         )
@@ -1361,6 +1394,8 @@ class DesktopApp:
         self.email_button.configure(state=state)
         self.max_button.configure(state=state)
         self.avito_profile_button.configure(state=state)
+        self.robot_handoff_checkbox.configure(state=state)
+        self.gemini_key_entry.configure(state=state)
         can_stop = running and self.process_kind != "avito-profile"
         self.stop_button.configure(state="normal" if can_stop else "disabled")
         if running:

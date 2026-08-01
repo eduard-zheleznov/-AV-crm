@@ -407,6 +407,7 @@ class Pipeline:
                                 force_create=repeat_flow or recreate_flow,
                                 funnel_id=recreate_funnel_id or repeat_funnel_id,
                                 repeat=repeat_flow,
+                                moscow_offset=self.source.moscow_offset(item),
                             )
                             comment_pending = (
                                 "комментар" in write.detail.casefold()

@@ -77,6 +77,16 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
             CREATE INDEX IF NOT EXISTS idx_items_phone ON items(phone);
+            CREATE TABLE IF NOT EXISTS robot_handoffs (
+                lead_id TEXT PRIMARY KEY,
+                record_key TEXT NOT NULL,
+                phone TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_robot_handoffs_status
+                ON robot_handoffs(status);
             """
         )
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
@@ -268,6 +278,45 @@ class StateStore:
             "SELECT status, COUNT(*) AS count FROM items GROUP BY status"
         ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
+
+    def get_robot_handoff(self, lead_id: str | int) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM robot_handoffs WHERE lead_id = ?",
+            (str(lead_id).strip(),),
+        ).fetchone()
+        return dict(row) if row else None
+
+    def record_robot_handoff(
+        self,
+        lead_id: str | int,
+        *,
+        record_key: str,
+        phone: str = "",
+        status: str,
+        error: str = "",
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO robot_handoffs(
+                lead_id, record_key, phone, status, error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lead_id) DO UPDATE SET
+                record_key=excluded.record_key,
+                phone=excluded.phone,
+                status=excluded.status,
+                error=excluded.error,
+                updated_at=excluded.updated_at
+            """,
+            (
+                str(lead_id).strip(),
+                str(record_key).strip(),
+                str(phone).strip(),
+                str(status).strip(),
+                str(error).strip()[:1000],
+                utc_now(),
+            ),
+        )
+        self.connection.commit()
 
     def close(self) -> None:
         self.connection.close()

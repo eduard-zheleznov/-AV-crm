@@ -1170,6 +1170,9 @@ class RemoteController:
         self._progress = ProgressSnapshot()
         self._phase_message = ""
         self._stop_event = threading.Event()
+        self._handoff_worker: threading.Thread | None = None
+        self._handoff_result: tuple[str, object] | None = None
+        self._next_handoff_at = time.monotonic() + settings.robot_handoff_poll_seconds
 
     def setup(self) -> None:
         self.panel.ensure_layout()
@@ -1199,7 +1202,8 @@ class RemoteController:
             self._stop_event.wait(delay)
 
     def tick(self) -> None:
-        if self._state is None and self._source_version_changed():
+        handoff_active = bool(self._handoff_worker and self._handoff_worker.is_alive())
+        if self._state is None and not handoff_active and self._source_version_changed():
             raise _ControllerReloadRequired
 
         if self._state and self._state.phase == "finalizing":
@@ -1207,6 +1211,7 @@ class RemoteController:
             return
 
         command = self.panel.read_command()
+        self._collect_handoff_result()
         try:
             self.panel.refresh_analytics_if_needed()
         except Exception as exc:
@@ -1231,6 +1236,9 @@ class RemoteController:
                 )
             else:
                 self._accept(command)
+
+        if self._state is None and not command.start:
+            self._start_handoff_if_due()
 
         if self._state:
             if self._worker and self._worker.is_alive():
@@ -1263,6 +1271,86 @@ class RemoteController:
                 self.panel.heartbeat()
         else:
             self.panel.heartbeat()
+
+    def _start_handoff_if_due(self) -> None:
+        try:
+            current_settings = self._load_worker_settings()
+        except ConfigurationError as exc:
+            LOGGER.warning("Фоновая передача лидов выключена из-за настройки: %s", exc)
+            return
+        if not current_settings.robot_handoff_enabled:
+            return
+        if self._handoff_worker and self._handoff_worker.is_alive():
+            return
+        if time.monotonic() < self._next_handoff_at:
+            return
+        self._handoff_result = None
+        self._handoff_worker = threading.Thread(
+            target=self._run_robot_handoff,
+            name="avito-crm-robot-handoff",
+            daemon=True,
+        )
+        self._handoff_worker.start()
+
+    def _run_robot_handoff(self) -> None:
+        from avito_crm.notifications import NotificationRouter
+        from avito_crm.robot_handoff import RobotLeadHandoff
+
+        try:
+            worker_settings = self._load_worker_settings()
+            notifier = NotificationRouter(worker_settings)
+
+            def manual_notifier(lead_id: str, reason: str) -> None:
+                if notifier.enabled:
+                    notifier.send_robot_handoff_required(lead_id=lead_id, reason=reason)
+
+            try:
+                with (
+                    SingleInstanceLock(worker_settings.data_dir / "worker.lock"),
+                    StateStore(worker_settings.state_db) as store,
+                    RobotLeadHandoff(
+                        worker_settings,
+                        store,
+                        manual_notifier=manual_notifier,
+                    ) as handler,
+                ):
+                    summary = handler.run_once(apply=True)
+                result: tuple[str, object] = ("finished", summary)
+            finally:
+                notifier.close()
+        except InstanceAlreadyRunning:
+            result = ("busy", "")
+        except Exception as exc:
+            LOGGER.exception("Фоновая передача лидов с робота завершилась с ошибкой")
+            result = ("error", exc.__class__.__name__)
+        with self._worker_guard:
+            self._handoff_result = result
+
+    def _collect_handoff_result(self) -> None:
+        if self._handoff_worker is None or self._handoff_worker.is_alive():
+            return
+        with self._worker_guard:
+            result = self._handoff_result
+        self._handoff_worker = None
+        self._handoff_result = None
+        try:
+            poll_seconds = self._load_worker_settings().robot_handoff_poll_seconds
+        except ConfigurationError:
+            poll_seconds = self.settings.robot_handoff_poll_seconds
+        self._next_handoff_at = time.monotonic() + poll_seconds
+        if not result or result[0] == "busy":
+            return
+        if result[0] == "error":
+            LOGGER.warning("Фоновая передача лидов отложена после технической ошибки")
+            return
+        summary = result[1]
+        LOGGER.info(
+            "Фоновая передача лидов: проверено=%s, завершено=%s, ручная проверка=%s, ошибок=%s",
+            getattr(summary, "inspected", 0),
+            getattr(summary, "completed", 0),
+            getattr(summary, "manual_required", 0),
+            getattr(summary, "errors", 0),
+        )
 
     def stop(self) -> None:
         self._stop_event.set()

@@ -87,24 +87,37 @@ class LpTrackerClient:
         projects = self.list_projects()
         project = self._select_project(projects)
         project_id = int(project["id"])
+        return self.resolve_custom_destination(
+            project_id,
+            self.settings.lptracker_field_name,
+            self.settings.lptracker_field_value,
+            project_name=str(project.get("name", "")),
+        )
+
+    def resolve_custom_destination(
+        self,
+        project_id: int,
+        field_name: str,
+        field_value: str,
+        *,
+        project_name: str = "",
+    ) -> CrmDestination:
         fields = self.list_custom_fields(project_id)
-        wanted = _normalized_name(self.settings.lptracker_field_name)
+        wanted = _normalized_name(field_name)
         matches = [
             field for field in fields if _normalized_name(str(field.get("name", ""))) == wanted
         ]
         if len(matches) != 1:
             available = ", ".join(str(field.get("name", "")) for field in fields[:25])
             if not matches:
-                raise ConfigurationError(
-                    f"Поле {self.settings.lptracker_field_name!r} не найдено. Поля: {available}"
-                )
+                raise ConfigurationError(f"Поле {field_name!r} не найдено. Поля: {available}")
             raise ConfigurationError(
-                f"Найдено несколько полей {self.settings.lptracker_field_name!r}; "
+                f"Найдено несколько полей {field_name!r}; "
                 "укажите ID проекта точнее"
             )
         field = matches[0]
         field_type = str(field.get("type", ""))
-        value: Any = self.settings.lptracker_field_value
+        value: Any = field_value
         if field_type == "cats":
             categories = field.get("categories") or []
             if categories:
@@ -113,11 +126,11 @@ class LpTrackerClient:
                     for category in categories
                 ]
                 category_map = {_normalized_name(name): name for name in category_names}
-                target = category_map.get(_normalized_name(self.settings.lptracker_field_value))
+                target = category_map.get(_normalized_name(field_value))
                 if not target:
                     raise ConfigurationError(
-                        f"В поле {self.settings.lptracker_field_name!r} нет значения "
-                        f"{self.settings.lptracker_field_value!r}. Доступно: "
+                        f"В поле {field_name!r} нет значения "
+                        f"{field_value!r}. Доступно: "
                         f"{', '.join(category_names)}"
                     )
                 value = [target] if _truthy(field.get("is_multi_select")) else target
@@ -128,7 +141,7 @@ class LpTrackerClient:
                 )
         return CrmDestination(
             project_id=project_id,
-            project_name=str(project.get("name", "")),
+            project_name=project_name,
             field_id=int(field["id"]),
             field_name=str(field.get("name", "")),
             field_type=field_type,
@@ -202,6 +215,55 @@ class LpTrackerClient:
             raise CrmError("LPTracker вернул неожиданные данные лида")
         return result
 
+    def list_recent_leads(
+        self,
+        project_id: int,
+        *,
+        updated_from: int,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        if limit < 1 or limit > 200:
+            raise ValueError("limit списка лидов должен быть от 1 до 200")
+        if offset < 0:
+            raise ValueError("offset списка лидов не может быть отрицательным")
+        result = self._request(
+            "GET",
+            f"/lead/{project_id}/list",
+            params={
+                "offset": offset,
+                "limit": limit,
+                "sort[updated_at]": 3,
+                "filter[updated_at_from]": int(updated_from),
+                "is_deal": "false",
+            },
+        )
+        return _ensure_list(result, "список лидов")
+
+    def update_contact_detail(self, detail_id: str | int, phone: str) -> None:
+        normalized = normalize_phone(phone)
+        if not normalized:
+            raise CrmError("Нельзя заменить контакт: номер имеет неверный формат")
+        self._request(
+            "PUT",
+            f"/contact/details/{str(detail_id).strip()}",
+            json={"value": normalized},
+        )
+
+    def update_lead_custom(self, lead_id: str | int, destination: CrmDestination) -> None:
+        self._request(
+            "PUT",
+            f"/lead/{str(lead_id).strip()}",
+            json={"custom": {str(destination.field_id): destination.field_value}},
+        )
+
+    def set_lead_funnel(self, lead_id: str | int, funnel_id: int) -> None:
+        self._request(
+            "PUT",
+            f"/lead/{str(lead_id).strip()}/funnel",
+            json={"funnel": int(funnel_id)},
+        )
+
     def get_lead_stage_name(
         self,
         lead_id: str | int,
@@ -256,20 +318,15 @@ class LpTrackerClient:
         normalized = normalize_phone(phone)
         if not normalized:
             return None
-        base_name = f"Авито — {_listing_id(canonical_avito_url(listing_url))}"
-        lead_names = (
-            {f"{base_name} — повторный лид"}
-            if repeat is True
-            else {base_name}
-            if repeat is False
-            else {base_name, f"{base_name} — повторный лид"}
-        )
+        listing_id = _listing_id(canonical_avito_url(listing_url))
         for contact in self.search_contacts(project_id, normalized):
             contact_id = contact.get("id")
             if contact_id is None:
                 continue
             for lead in self.contact_leads(contact_id):
-                if str(lead.get("name", "")).strip() in lead_names:
+                if _lead_name_matches_listing(
+                    str(lead.get("name", "")), listing_id, repeat=repeat
+                ):
                     return lead
         return None
 
@@ -301,15 +358,18 @@ class LpTrackerClient:
         force_create: bool = False,
         funnel_id: int | None = None,
         repeat: bool = False,
+        moscow_offset: object = 0,
     ) -> CrmWriteResult:
         normalized = normalize_phone(phone)
         if not normalized:
             raise CrmError("Нельзя создать лид: номер имеет неверный формат")
         canonical_url = canonical_avito_url(listing_url)
         listing_id = _listing_id(canonical_url)
-        lead_name = f"Авито — {listing_id}"
-        if repeat:
-            lead_name += " — повторный лид"
+        lead_name = format_avito_lead_name(
+            listing_id,
+            moscow_offset=moscow_offset,
+            repeat=repeat,
+        )
         contacts = self.search_contacts(destination.project_id, normalized)
         contact_ids = [
             str(contact.get("id", "")).strip()
@@ -323,7 +383,8 @@ class LpTrackerClient:
         for existing_contact_id in contact_ids:
             existing = self._find_existing_lead(
                 existing_contact_id,
-                lead_name,
+                listing_id,
+                repeat,
                 destination.field_id,
             )
             if not existing:
@@ -398,10 +459,12 @@ class LpTrackerClient:
         )
 
     def _find_existing_lead(
-        self, contact_id: str, lead_name: str, field_id: int
+        self, contact_id: str, listing_id: str, repeat: bool, field_id: int
     ) -> dict[str, Any] | None:
         for lead in self.contact_leads(contact_id):
-            if _normalized_name(str(lead.get("name", ""))) != _normalized_name(lead_name):
+            if not _lead_name_matches_listing(
+                str(lead.get("name", "")), listing_id, repeat=repeat
+            ):
                 continue
             custom = lead.get("custom") or []
             # Some LPTracker list responses omit custom fields even though the
@@ -492,6 +555,59 @@ def _truthy(value: Any) -> bool:
 def _listing_id(url: str) -> str:
     numbers = re.findall(r"\d{5,}", url)
     return numbers[-1] if numbers else url.rstrip("/").rsplit("/", 1)[-1][:80]
+
+
+def normalize_moscow_offset(value: object) -> int:
+    """Return the approved non-negative lead prefix; Kaliningrad maps to zero."""
+    try:
+        parsed = float(str(value if value is not None else 0).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return 0
+    if parsed <= 0 or not parsed.is_integer():
+        return 0
+    return int(parsed)
+
+
+def format_avito_lead_name(
+    listing_id: str,
+    *,
+    moscow_offset: object = 0,
+    repeat: bool = False,
+) -> str:
+    name = f"{normalize_moscow_offset(moscow_offset)} Авито — {listing_id}"
+    return f"{name} — повторный лид" if repeat else name
+
+
+def is_managed_avito_lead(lead: dict[str, Any]) -> bool:
+    """Identify only leads created by this application, including legacy names."""
+    name = str(lead.get("name", "")).strip()
+    if not re.fullmatch(r"(?:\d+\s+)?Авито\s+—\s+\S+(?:\s+—\s+повторный лид)?", name):
+        return False
+    view = lead.get("view")
+    if not isinstance(view, dict) or not str(view.get("campaign", "")).strip():
+        return True
+    return _normalized_name(str(view.get("campaign", ""))) == _normalized_name(
+        "Avito CRM Pipeline"
+    )
+
+
+def _lead_name_matches_listing(
+    name: str,
+    listing_id: str,
+    *,
+    repeat: bool | None,
+) -> bool:
+    normalized = " ".join(str(name).split())
+    suffix = " — повторный лид"
+    is_repeat = normalized.endswith(suffix)
+    if repeat is not None and is_repeat is not repeat:
+        return False
+    if is_repeat:
+        normalized = normalized[: -len(suffix)]
+    prefixes = (f"Авито — {listing_id}",)
+    if normalized in prefixes:
+        return True
+    return bool(re.fullmatch(rf"\d+\s+Авито\s+—\s+{re.escape(listing_id)}", normalized))
 
 
 def _extract_funnel_stage(lead: dict[str, Any]) -> tuple[str, str]:
