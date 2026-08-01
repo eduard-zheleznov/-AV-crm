@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 
 import pytest
 
@@ -526,8 +527,38 @@ def test_live_pipeline_reports_crm_preflight_and_browser_phases(tmp_path, settin
     assert summary.created == 1
     assert any(message.startswith("Подготовка CRM") for message in phases)
     assert any(message.startswith("Синхронизация CRM: 1/1") for message in phases)
-    assert "Запускаем Chromium и открываем очередь Avito." in phases
+    assert "Подключаем Chromium и открываем очередь Avito." in phases
     assert phases[-1] == "Обрабатываем очередь Avito по одной строке."
+
+
+def test_extension_driver_uses_ordinary_chrome_browser_adapter(tmp_path, settings, monkeypatch):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+    )
+    source = RepeatQueue(configured)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+    phases = []
+    monkeypatch.setattr(
+        "avito_crm.pipeline.ChromeExtensionBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+
+    summary, _crm = _run_repeat(
+        tmp_path,
+        configured,
+        monkeypatch,
+        source,
+        browser,
+        phase_messages=phases,
+    )
+
+    assert summary.created == 1
+    assert browser.calls == ["2"]
+    assert (
+        "Подключаем обычный Chrome через локальное расширение и открываем очередь Avito." in phases
+    )
 
 
 def test_stop_during_crm_preflight_skips_browser_and_queue(tmp_path, settings, monkeypatch):

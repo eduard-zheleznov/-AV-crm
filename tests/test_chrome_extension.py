@@ -1,0 +1,187 @@
+from __future__ import annotations
+
+import base64
+import json
+import socket
+import threading
+import urllib.error
+import urllib.request
+from dataclasses import replace
+
+import pytest
+
+from avito_crm.chrome_extension import ChromeExtensionBrowser, ExtensionBridge, ExtensionEvent
+from avito_crm.models import PhoneResult
+
+
+def _free_port() -> int:
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
+def _request(
+    port: int,
+    token: str,
+    path: str,
+    *,
+    payload: dict[str, object] | None = None,
+) -> tuple[int, dict[str, object] | None]:
+    body = None if payload is None else json.dumps(payload).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}",
+        data=body,
+        method="POST" if payload is not None else "GET",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        raw = response.read()
+        return response.status, json.loads(raw) if raw else None
+
+
+def test_bridge_requires_the_per_install_token(settings):
+    port = _free_port()
+    configured = replace(
+        settings,
+        avito_extension_port=port,
+        avito_extension_token="a" * 64,
+    )
+    bridge = ExtensionBridge(configured)
+    bridge.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc_info:
+            _request(port, "wrong-token", "/v1/health")
+        assert exc_info.value.code == 401
+    finally:
+        bridge.close()
+
+
+def test_bridge_delivers_one_command_and_correlates_the_result(settings):
+    port = _free_port()
+    token = "b" * 64
+    configured = replace(
+        settings,
+        avito_extension_port=port,
+        avito_extension_token=token,
+        avito_extension_connect_timeout=2,
+        avito_page_timeout=2,
+        avito_manual_timeout=2,
+    )
+    bridge = ExtensionBridge(configured)
+    bridge.start()
+    failures: list[BaseException] = []
+
+    def extension() -> None:
+        try:
+            status, command = _request(port, token, "/v1/poll")
+            assert status == 200
+            assert command is not None
+            assert command["type"] == "reveal_phone"
+            _request(
+                port,
+                token,
+                "/v1/event",
+                payload={
+                    "id": command["id"],
+                    "type": "status",
+                    "status": "manual_required",
+                    "reason": "ручная проверка",
+                },
+            )
+            _request(
+                port,
+                token,
+                "/v1/event",
+                payload={
+                    "id": command["id"],
+                    "type": "result",
+                    "status": "phone",
+                    "phone": "+79991234567",
+                },
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced in the main thread
+            failures.append(exc)
+
+    thread = threading.Thread(target=extension)
+    thread.start()
+    statuses = []
+    try:
+        result = bridge.execute(
+            url="https://www.avito.ru/moskva/test_123",
+            row_id="2",
+            max_clicks=1,
+            status_callback=statuses.append,
+        )
+    finally:
+        thread.join(timeout=5)
+        bridge.close()
+
+    assert not failures
+    assert result.status == "phone"
+    assert result.payload["phone"] == "+79991234567"
+    assert [event.status for event in statuses] == ["manual_required"]
+
+
+class _FakeNotifier:
+    enabled = False
+
+    def close(self) -> None:
+        return
+
+
+class _FakeOcr:
+    def read_viewport_png(self, png: bytes) -> PhoneResult:
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        return PhoneResult("+79991234567", "fake-ocr")
+
+
+class _FakeBridge:
+    def __init__(self, result: ExtensionEvent) -> None:
+        self.result = result
+
+    def start(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def execute(self, **_kwargs: object) -> ExtensionEvent:
+        return self.result
+
+
+def test_extension_browser_normalizes_a_dom_phone(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "phone",
+            {"phone": "8 (999) 123-45-67", "source": "chrome-extension-dom"},
+        )
+    )
+
+    with browser:
+        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert result.phone == "+79991234567"
+    assert result.source == "chrome-extension-dom"
+
+
+def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):
+    png = b"\x89PNG\r\n\x1a\nplaceholder"
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "screenshot",
+            {"screenshot": "data:image/png;base64," + base64.b64encode(png).decode()},
+        )
+    )
+
+    with browser:
+        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert result.phone == "+79991234567"
+    assert result.source == "fake-ocr"

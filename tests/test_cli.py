@@ -57,6 +57,15 @@ def test_avito_profile_command_is_available_without_login_arguments():
     assert args.command == "avito-profile"
 
 
+def test_safe_extension_test_command_is_available():
+    args = build_parser().parse_args(
+        ["avito-extension-test", "https://www.avito.ru/moskva/test_123"]
+    )
+
+    assert args.command == "avito-extension-test"
+    assert args.max_clicks == 1
+
+
 def test_avito_profile_starts_even_when_crm_timezone_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setenv("LPTRACKER_TIMEZONE", "Missing/Timezone")
     opened_profiles = []
