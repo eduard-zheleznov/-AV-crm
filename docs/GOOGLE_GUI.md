@@ -23,11 +23,20 @@
 
 ## Профиль Avito и необязательный вход
 
-Программа использует браузер, поставляемый Playwright. В зависимости от версии у
-него может быть синий значок Chromium либо подпись **Chrome for Testing**. Это
-один и тот же поддерживаемый механизм, а не временный гостевой профиль. Кнопка **«Открыть профиль»**
-запускает тот же профиль `data\browser-profile`, который затем используется при
-обработке ссылок.
+По умолчанию программа использует поставляемый Playwright Chromium / Chrome for Testing. На Windows можно
+выбрать установленный Chrome Stable, указав `AVITO_BROWSER_CHANNEL=chrome`. Кнопка
+**«Открыть профиль»** всегда запускает тот же channel и `AVITO_PROFILE_DIR`, которые затем используются
+при обработке ссылок.
+
+Для Chrome Stable выделите новый профиль, например:
+
+```dotenv
+AVITO_BROWSER_CHANNEL=chrome
+AVITO_PROFILE_DIR=C:\avito-crm\data\browser-profile-chrome
+```
+
+Не копируйте в него старый Chromium-профиль и не удаляйте старую папку. Пустой `AVITO_BROWSER_CHANNEL`
+сохраняет Chromium fallback.
 
 Вход в аккаунт Avito не обязателен:
 
