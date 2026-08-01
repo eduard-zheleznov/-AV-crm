@@ -95,8 +95,12 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup.add_argument(
         "--run-id",
         action="append",
-        required=True,
         help="Run ID теста; параметр можно повторить",
+    )
+    cleanup.add_argument(
+        "--row-id",
+        action="append",
+        help="Точный номер строки; используйте, если Run ID изменил CRM-монитор",
     )
     cleanup.add_argument("--sheet", help="Имя листа Google-очереди")
     cleanup.add_argument(
@@ -405,11 +409,14 @@ def _crm_projects(settings: Settings) -> int:
 
 
 def _cleanup_test_runs(args: argparse.Namespace, settings: Settings) -> int:
-    run_ids = {str(value).strip() for value in args.run_id if str(value).strip()}
-    if not run_ids:
-        raise ConfigurationError("Не указано ни одного непустого Run ID")
+    run_ids = {str(value).strip() for value in (args.run_id or []) if str(value).strip()}
+    row_ids = {str(value).strip() for value in (args.row_id or []) if str(value).strip()}
+    if not run_ids and not row_ids:
+        raise ConfigurationError("Укажите хотя бы один --run-id или --row-id")
     source = build_queue_source(settings, "google", None, args.sheet)
-    candidates = _test_cleanup_candidates(source.list_all(), source.columns, run_ids)
+    candidates = _test_cleanup_candidates(
+        source.list_all(), source.columns, run_ids=run_ids, row_ids=row_ids
+    )
     unique_lead_ids = {lead_id for _item, lead_id in candidates}
 
     print("Тестовые лиды, подготовленные к удалению:")
@@ -470,12 +477,16 @@ def _cleanup_test_runs(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
-def _test_cleanup_candidates(items, columns, run_ids: set[str]):
-    allowed_statuses = {ItemStatus.CRM_MONITORING.value, ItemStatus.PROCESSING.value}
+def _test_cleanup_candidates(items, columns, *, run_ids: set[str], row_ids: set[str]):
+    allowed_statuses = {
+        ItemStatus.CRM_MONITORING.value,
+        ItemStatus.PROCESSING.value,
+        ItemStatus.DONE.value,
+    }
     result = []
     for item in items:
         item_run_id = str(item.values.get(columns.run_id, "") or "").strip()
-        if item_run_id not in run_ids:
+        if item_run_id not in run_ids and str(item.row_id).strip() not in row_ids:
             continue
         lead_id = str(item.values.get(columns.crm_lead_id, "") or "").strip()
         create_count = _safe_int(item.values.get(columns.crm_create_count))

@@ -151,7 +151,30 @@ def test_cleanup_candidates_include_only_created_active_test_leads(settings):
     )
 
     candidates = cli._test_cleanup_candidates(
-        [created, retry_without_lead, unrelated], columns, {"test-run"}
+        [created, retry_without_lead, unrelated],
+        columns,
+        run_ids={"test-run"},
+        row_ids=set(),
     )
 
     assert candidates == [(created, "777001")]
+
+
+def test_cleanup_can_target_exact_row_after_crm_monitor_changed_run_id(settings):
+    columns = QueueColumns.from_settings(settings)
+    created = QueueItem(
+        row_id="503",
+        url="https://www.avito.ru/moskva/test_423456789",
+        status="done",
+        attempts=1,
+        values={
+            columns.run_id: "crm-monitor",
+            columns.crm_lead_id: "777003",
+            columns.crm_create_count: "1",
+            columns.repeat_crm_lead_id: "",
+        },
+    )
+
+    candidates = cli._test_cleanup_candidates([created], columns, run_ids=set(), row_ids={"503"})
+
+    assert candidates == [(created, "777003")]
