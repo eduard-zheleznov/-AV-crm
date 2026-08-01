@@ -59,7 +59,7 @@ async function revealOnce(command) {
     return { status: "phone", phone: existing, source: "chrome-extension-dom" };
   }
 
-  const button = findPhoneButton();
+  const button = await waitForPhoneButton(Math.min(10000, command.phoneWaitMs));
   if (!button) {
     if (hasTemporaryNumberLabel()) {
       return { status: "screenshot" };
@@ -68,9 +68,11 @@ async function revealOnce(command) {
   }
 
   button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
-  await delay(300);
+  await delay(750);
   button.focus({ preventScroll: true });
+  notifyStatus("clicking", "кнопка показа телефона найдена");
   button.click();
+  notifyStatus("clicked", "команда клика отправлена");
 
   const deadline = Date.now() + Math.max(3000, command.phoneWaitMs);
   while (Date.now() < deadline) {
@@ -140,10 +142,28 @@ function manualReason() {
   ) {
     return "ручная проверка Avito";
   }
-  if (AUTH_PATTERNS.some((pattern) => content.includes(pattern))) {
+  if (isAuthPage(currentUrl) || hasVisibleAuthDialog()) {
     return "авторизация Avito";
   }
   return "";
+}
+
+function isAuthPage(currentUrl) {
+  return /\/(?:auth|login)(?:[/?#]|$)/i.test(currentUrl);
+}
+
+function hasVisibleAuthDialog() {
+  const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]');
+  for (const dialog of dialogs) {
+    if (!isVisible(dialog)) {
+      continue;
+    }
+    const text = (dialog.innerText || dialog.textContent || "").toLowerCase();
+    if (AUTH_PATTERNS.some((pattern) => text.includes(pattern))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function inactiveReason() {
@@ -198,12 +218,31 @@ function findPhone() {
 }
 
 function findPhoneButton() {
-  const candidates = document.querySelectorAll('button, a, [role="button"]');
+  const candidates = document.querySelectorAll(
+    '[data-marker*="phone" i], button, a, [role="button"]'
+  );
   for (const element of candidates) {
     const label = `${element.textContent || ""} ${element.getAttribute("aria-label") || ""}`;
-    if (isVisible(element) && PHONE_BUTTON_RE.test(label) && !element.disabled) {
-      return element;
+    if (
+      isVisible(element) &&
+      PHONE_BUTTON_RE.test(label) &&
+      !element.disabled &&
+      element.getAttribute("aria-disabled") !== "true"
+    ) {
+      return element.closest('button, a, [role="button"]') || element;
     }
+  }
+  return null;
+}
+
+async function waitForPhoneButton(timeoutMs) {
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  while (Date.now() < deadline) {
+    const button = findPhoneButton();
+    if (button) {
+      return button;
+    }
+    await delay(250);
   }
   return null;
 }

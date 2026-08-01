@@ -382,6 +382,10 @@ class ChromeExtensionBrowser:
             )
         elif event.status == "manual_cleared":
             LOGGER.info("Ручная проверка в обычном Chrome завершена; продолжаем текущую строку")
+        elif event.status == "clicking":
+            LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
+        elif event.status == "clicked":
+            LOGGER.info("Обычный Chrome: команда клика отправлена")
 
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:
