@@ -426,9 +426,7 @@ class Settings:
         if self.avito_phone_first_round_attempts < 1:
             raise ConfigurationError("AVITO_PHONE_FIRST_ROUND_ATTEMPTS должен быть больше нуля")
         if self.avito_browser_channel not in {"", "chrome"}:
-            raise ConfigurationError(
-                "AVITO_BROWSER_CHANNEL должен быть пустым или равен chrome"
-            )
+            raise ConfigurationError("AVITO_BROWSER_CHANNEL должен быть пустым или равен chrome")
         if self.avito_phone_second_round_attempts < 0:
             raise ConfigurationError(
                 "AVITO_PHONE_SECOND_ROUND_ATTEMPTS не может быть отрицательным"
