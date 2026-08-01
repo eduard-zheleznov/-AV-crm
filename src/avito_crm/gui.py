@@ -386,7 +386,7 @@ class DesktopApp:
         self.stop_button.grid(row=0, column=2, padx=(10, 0))
         ttk.Checkbutton(
             controls,
-            text="Повторить строки, ожидающие ручной проверки",
+            text="Вернуть в очередь после решённой капчи",
             variable=self.retry_manual_var,
             style="Body.TCheckbutton",
         ).grid(row=0, column=3, padx=(18, 0))

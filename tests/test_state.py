@@ -39,6 +39,7 @@ def test_state_store_persists_outcome_and_round_counters(tmp_path):
             processed=4,
             inspected=6,
             rounds=3,
+            captchas_solved=2,
         )
         state.begin_run(summary)
         state.finish_run(summary)
@@ -50,6 +51,7 @@ def test_state_store_persists_outcome_and_round_counters(tmp_path):
     assert run["retries"] == 2
     assert run["processed"] == 4
     assert run["rounds"] == 3
+    assert run["captchas_solved"] == 2
 
 
 def test_state_store_accumulates_a_resumed_run(tmp_path):

@@ -19,6 +19,7 @@ from avito_crm.errors import ConfigurationError, InstanceAlreadyRunning, SourceE
 from avito_crm.models import ItemStatus, RunSummary
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import build_queue_source
+from avito_crm.reporting import format_run_report
 from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 
 LOGGER = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ LEGACY_HISTORY_HEADERS = (
     "Сообщение",
     "Компьютер",
 )
-HISTORY_HEADERS = (
+PREVIOUS_HISTORY_HEADERS = (
     "Команда ID",
     "Лимит",
     "Лист очереди",
@@ -67,6 +68,34 @@ HISTORY_HEADERS = (
     "Строк со статусом «Недозвон»",
     "Предупреждений синхронизации CRM",
     "Предел просмотра",
+)
+HISTORY_HEADERS = (
+    "Команда ID",
+    "Лимит",
+    "Лист очереди",
+    "Вернуть после решённой капчи",
+    "Запущено",
+    "Завершено",
+    "Статус",
+    "Создано лидов",
+    "Дубликатов",
+    "Технических ошибок",
+    "Сообщение",
+    "Компьютер",
+    "Обработано ссылок",
+    "Всего попыток",
+    "Номеров открыто",
+    "Неактивных",
+    "Без кнопки телефона",
+    "Не открыто после попыток",
+    "Ожидает решения капчи",
+    "Повторных попыток",
+    "Некорректных ссылок",
+    "Дата завершения",
+    "Строк со статусом «Недозвон»",
+    "Предупреждений синхронизации CRM",
+    "Предел просмотра",
+    "Решено капч",
 )
 
 
@@ -105,6 +134,7 @@ class CommandState:
     base_phone_failed: int = 0
     base_retries: int = 0
     base_manual_required: int = 0
+    base_captchas_solved: int = 0
     base_processed: int = 0
     base_inspected: int = 0
     base_no_answer_synced: int = 0
@@ -128,6 +158,7 @@ class ProgressSnapshot:
     phone_failed: int = 0
     retries: int = 0
     manual_required: int = 0
+    captchas_solved: int = 0
     processed: int = 0
     inspected: int = 0
     no_answer_synced: int = 0
@@ -200,6 +231,7 @@ class GoogleControlPanel:
             history_headers = tuple(history_values[0]) if history_values else ()
             if history_headers and history_headers not in {
                 LEGACY_HISTORY_HEADERS,
+                PREVIOUS_HISTORY_HEADERS,
                 HISTORY_HEADERS[:-3],
                 HISTORY_HEADERS[:-2],
                 HISTORY_HEADERS[:-1],
@@ -318,7 +350,7 @@ class GoogleControlPanel:
                 "E5": state.command_id,
                 "E6": (f"{int(result.get('created', 0))} / {_target_label(state.target)}"),
                 "E8": utc_now(),
-                "E9": str(result.get("message", ""))[:500],
+                "E9": str(result.get("message", ""))[:1000],
                 "E11": _computer_name(self.settings),
                 "E12": __version__,
             }
@@ -366,9 +398,10 @@ class GoogleControlPanel:
                         0,
                         0,
                         state.max_inspected,
+                        0,
                     ]
                 ],
-                f"A{row_number}:Y{row_number}",
+                f"A{row_number}:Z{row_number}",
                 value_input_option="RAW",
             )
             return row_number
@@ -389,7 +422,7 @@ class GoogleControlPanel:
                         int(result.get("created", 0)),
                         int(result.get("duplicates", 0)),
                         int(result.get("errors", 0)),
-                        str(result.get("message", ""))[:500],
+                        str(result.get("message", ""))[:1000],
                         _computer_name(self.settings),
                         int(result.get("processed", 0)),
                         int(result.get("inspected", 0)),
@@ -403,9 +436,11 @@ class GoogleControlPanel:
                         str(result.get("finished_at", utc_now()))[:10],
                         int(result.get("no_answer_synced", 0)),
                         int(result.get("crm_sync_errors", 0)),
+                        state.max_inspected,
+                        int(result.get("captchas_solved", 0)),
                     ]
                 ],
-                f"F{state.history_row}:X{state.history_row}",
+                f"F{state.history_row}:Z{state.history_row}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -434,7 +469,7 @@ class GoogleControlPanel:
             if summary.errors:
                 status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
             elif summary.manual_required:
-                status = "ТРЕБУЕТ ВНИМАНИЯ"
+                status = "ОЖИДАЕТ РЕШЕНИЯ КАПЧИ"
             elif "останов" in summary.stopped_reason.casefold():
                 status = "ОСТАНОВЛЕНО"
             elif summary.stopped_reason.casefold().startswith("отложено по времени"):
@@ -444,14 +479,7 @@ class GoogleControlPanel:
             else:
                 status = "ЗАВЕРШЕНО"
             finished_at = utc_now()
-            message = (
-                f"Создано {summary.created}; открыто номеров {summary.captured}; "
-                f"неактивных {summary.inactive}; без кнопки {summary.unavailable}; "
-                f"не открыто после попыток {summary.phone_failed}; "
-                f"технических ошибок {summary.errors}; "
-                f"предупреждений синхронизации CRM {summary.crm_sync_errors}. "
-                f"Остановка: {summary.stopped_reason or 'не указана'}."
-            )
+            message = format_run_report(summary, reason=summary.stopped_reason)
             row = [
                 summary.run_id,
                 summary.requested,
@@ -463,7 +491,7 @@ class GoogleControlPanel:
                 summary.created,
                 summary.duplicates,
                 summary.errors,
-                message[:500],
+                message[:1000],
                 _computer_name(self.settings),
                 summary.processed,
                 summary.inspected,
@@ -478,10 +506,11 @@ class GoogleControlPanel:
                 summary.no_answer_synced,
                 summary.crm_sync_errors,
                 "",
+                summary.captchas_solved,
             ]
             history.update(
                 [row],
-                f"A{row_number}:Y{row_number}",
+                f"A{row_number}:Z{row_number}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -572,7 +601,7 @@ class GoogleControlPanel:
         matrix[5] = ["Цель по новым лидам (0 = все)", 0, "", "Прогресс", "0 / все", ""]
         matrix[6] = ["Лист очереди", self.settings.google_worksheet, "", "Запущено", "", ""]
         matrix[7] = [
-            "Повторить строки после капчи (обычно выкл.)",
+            "Вернуть в очередь после решённой капчи",
             False,
             "",
             "Последняя связь с компьютером",
@@ -588,7 +617,11 @@ class GoogleControlPanel:
             "",
         ]
         matrix[10] = [
-            "Капча не решается автоматически. По уведомлению нужно зайти на удалённый ПК.",
+            (
+                "B8 нужна только если запуск уже завершился из-за капчи: "
+                "решите капчу на Windows-ПК, включите B8 и запустите снова. "
+                "Пока запуск сам ждёт капчу, B8 не трогайте."
+            ),
             "",
             "",
             "Компьютер",
@@ -609,7 +642,7 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A8",
-                    "values": [["Повторить строки после капчи (обычно выкл.)"]],
+                    "values": [["Вернуть в очередь после решённой капчи"]],
                 },
                 {
                     "range": "D8",
@@ -618,6 +651,14 @@ class GoogleControlPanel:
                 {
                     "range": "A9",
                     "values": [["Предел просмотра (0 = авто)"]],
+                },
+                {
+                    "range": "A11",
+                    "values": [[(
+                        "B8 нужна только если запуск уже завершился из-за капчи: "
+                        "решите её на Windows-ПК, включите B8 и запустите снова. "
+                        "В остальных случаях B8 выключена."
+                    )]],
                 },
             ]
             if not self._cell(control.get("B9"), 1, 1).strip():
@@ -990,7 +1031,7 @@ class GoogleControlPanel:
             (2, 3, 18),
             (3, 8, 38),
             (8, 10, 34),
-            (10, 12, 38),
+            (10, 12, 54),
         ):
             requests.append(_row_height_request(sheet_id, start, end, size))
         for row_index in (3, 4, 7):
@@ -1240,7 +1281,10 @@ class RemoteController:
         if state.history_row < 2:
             state.history_row = self.panel.append_history(state)
             self._save_state(state)
-        recovered = self.panel.count_command(state.worksheet, state.command_id)
+        recovered = replace(
+            self.panel.count_command(state.worksheet, state.command_id),
+            captchas_solved=self._recovered_captchas_solved(state.command_id),
+        )
         state.base_created = recovered.created
         state.base_captured = recovered.captured
         state.base_duplicates = recovered.duplicates
@@ -1251,6 +1295,7 @@ class RemoteController:
         state.base_phone_failed = recovered.phone_failed
         state.base_retries = recovered.retries
         state.base_manual_required = recovered.manual_required
+        state.base_captchas_solved = recovered.captchas_solved
         state.base_processed = recovered.processed
         state.base_inspected = recovered.inspected
         state.base_no_answer_synced = recovered.no_answer_synced
@@ -1262,7 +1307,10 @@ class RemoteController:
             state.result = self._result_dict(
                 state,
                 status="ЗАВЕРШЕНО",
-                message="Лимит уже достигнут; повторный запуск не потребовался.",
+                message=format_run_report(
+                    recovered,
+                    reason="Лимит уже достигнут; повторный запуск не потребовался",
+                ),
                 progress=recovered,
             )
             state.phase = "finalizing"
@@ -1273,9 +1321,9 @@ class RemoteController:
             state.result = self._result_dict(
                 state,
                 status="ЗАВЕРШЕНО",
-                message=(
-                    f"Достигнут предел просмотра {state.max_inspected}; "
-                    f"создано лидов {recovered.created}."
+                message=format_run_report(
+                    recovered,
+                    reason=f"Достигнут предел просмотра {state.max_inspected}",
                 ),
                 progress=recovered,
             )
@@ -1340,6 +1388,16 @@ class RemoteController:
     def _load_worker_settings(self) -> Settings:
         return Settings.load(self.settings.root_dir, refresh_env=True)
 
+    def _recovered_captchas_solved(self, command_id: str) -> int:
+        """Recover the operational CAPTCHA counter after a controller restart."""
+        try:
+            with StateStore(self.settings.state_db) as store:
+                run = store.get_run(command_id)
+            return max(0, int((run or {}).get("captchas_solved", 0)))
+        except Exception as exc:
+            LOGGER.warning("Не удалось восстановить счётчик капч: %s", exc)
+            return 0
+
     def _source_version_changed(self) -> bool:
         """Let Windows reload Python modules once an update is safely idle."""
         project_file = self.settings.root_dir / "pyproject.toml"
@@ -1363,6 +1421,7 @@ class RemoteController:
                 phone_failed=state.base_phone_failed + summary.phone_failed,
                 retries=state.base_retries + summary.retries,
                 manual_required=state.base_manual_required + summary.manual_required,
+                captchas_solved=state.base_captchas_solved + summary.captchas_solved,
                 processed=state.base_processed + summary.processed,
                 inspected=state.base_inspected + summary.inspected,
                 no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
@@ -1398,10 +1457,11 @@ class RemoteController:
             self._save_state(self._state)
             return
         if result.kind == "error":
+            reason = f"Ошибка запуска: {result.message}"
             self._state.result = self._result_dict(
                 self._state,
                 status="ОШИБКА",
-                message=result.message,
+                message=format_run_report(self._progress, reason=reason),
                 progress=self._progress,
             )
         else:
@@ -1430,12 +1490,17 @@ class RemoteController:
             self.panel.reject_start("Команда STOP передана; активного запуска пульта нет.")
 
     def _prepare_stopped_result(self, state: CommandState) -> None:
-        progress = self.panel.count_command(state.worksheet, state.command_id)
+        progress = replace(
+            self.panel.count_command(state.worksheet, state.command_id),
+            captchas_solved=self._recovered_captchas_solved(state.command_id),
+        )
         self._progress = progress
         state.result = self._result_dict(
             state,
             status="ОСТАНОВЛЕНО",
-            message="Запуск остановлен по команде оператора.",
+            message=format_run_report(
+                progress, reason="Запуск остановлен по команде оператора"
+            ),
             progress=progress,
         )
         state.phase = "finalizing"
@@ -1449,28 +1514,14 @@ class RemoteController:
         elif summary.stopped_reason.casefold().startswith("отложено по времени"):
             status = "ОТЛОЖЕНО ПО ВРЕМЕНИ"
         elif progress.manual_required:
-            status = "ТРЕБУЕТ ВНИМАНИЯ"
+            status = "ОЖИДАЕТ РЕШЕНИЯ КАПЧИ"
         elif progress.errors:
             status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
         elif progress.crm_sync_errors:
             status = "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
         else:
             status = "ЗАВЕРШЕНО"
-        goal_message = (
-            f"Создано {progress.created}; обработаны все доступные строки; "
-            if state.target == 0
-            else f"Создано {progress.created} из цели {state.target}; "
-        )
-        message = (
-            goal_message + f"открыто номеров {progress.captured}; "
-            f"просмотрено {progress.inspected} из предела {state.max_inspected}; "
-            f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
-            f"статус «Недозвон» {progress.no_answer_synced}; "
-            f"не открыто после попыток {progress.phone_failed}; "
-            f"технических ошибок {progress.errors}; "
-            f"предупреждений синхронизации CRM {progress.crm_sync_errors}. "
-            f"Остановка: {summary.stopped_reason or 'не указана'}."
-        )
+        message = format_run_report(progress, reason=summary.stopped_reason)
         return self._result_dict(state, status=status, message=message, progress=progress)
 
     @staticmethod
@@ -1495,6 +1546,7 @@ class RemoteController:
             "phone_failed": progress.phone_failed,
             "retries": progress.retries,
             "manual_required": progress.manual_required,
+            "captchas_solved": progress.captchas_solved,
             "processed": progress.processed,
             "inspected": progress.inspected,
             "no_answer_synced": progress.no_answer_synced,

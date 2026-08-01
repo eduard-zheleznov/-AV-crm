@@ -319,6 +319,8 @@ class ChromeExtensionBrowser:
         self._owns_notifier = notifier is None
         self.bridge = ExtensionBridge(settings)
         self._manual_notified = False
+        self._manual_pending = False
+        self.captchas_solved = 0
 
     def __enter__(self) -> ChromeExtensionBrowser:
         self.bridge.start()
@@ -336,6 +338,7 @@ class ChromeExtensionBrowser:
             raise ValueError("max_clicks должен быть равен 1 или 2")
         canonical_url = canonical_avito_url(url)
         self._manual_notified = False
+        self._manual_pending = False
         event = self.bridge.execute(
             url=canonical_url,
             row_id=row_id,
@@ -384,6 +387,7 @@ class ChromeExtensionBrowser:
     def _handle_status(self, event: ExtensionEvent, url: str) -> None:
         if event.status == "manual_required" and not self._manual_notified:
             self._manual_notified = True
+            self._manual_pending = True
             LOGGER.warning("Обычный Chrome ждёт ручного решения капчи; страница не перезагружается")
             self._notify_safely(
                 "send_captcha_detected",
@@ -392,6 +396,9 @@ class ChromeExtensionBrowser:
                 wait_seconds=self.settings.avito_manual_timeout,
             )
         elif event.status == "manual_cleared":
+            if self._manual_pending:
+                self.captchas_solved += 1
+                self._manual_pending = False
             LOGGER.info("Ручная проверка в обычном Chrome завершена; продолжаем текущую строку")
         elif event.status == "clicking":
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")

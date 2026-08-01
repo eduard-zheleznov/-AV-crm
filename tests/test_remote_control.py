@@ -11,6 +11,7 @@ from avito_crm.remote_control import (
     ANALYTICS_WORKSHEET,
     HISTORY_HEADERS,
     LEGACY_HISTORY_HEADERS,
+    PREVIOUS_HISTORY_HEADERS,
     CommandState,
     GoogleControlPanel,
     PanelCommand,
@@ -220,7 +221,8 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
 
     panel.ensure_layout()
 
-    assert control.values[7][0] == "Повторить строки после капчи (обычно выкл.)"
+    assert control.values[7][0] == "Вернуть в очередь после решённой капчи"
+    assert "B8 нужна только" in control.values[10][0]
     assert tuple(history.values[0]) == HISTORY_HEADERS
     analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
     assert analytics.values[0][0] == ANALYTICS_MARKER
@@ -228,8 +230,25 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
     assert analytics.values[6][0] == "Запусков"
     assert analytics.values[6][1] == 0
     assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", analytics.values[17][0])
-    assert HISTORY_HEADERS[-2] == "Предупреждений синхронизации CRM"
-    assert HISTORY_HEADERS[-1] == "Предел просмотра"
+    assert HISTORY_HEADERS[-2] == "Предел просмотра"
+    assert HISTORY_HEADERS[-1] == "Решено капч"
+
+
+def test_setup_migrates_exact_history_header_from_previous_release(settings):
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    history = MatrixSheet([list(PREVIOUS_HISTORY_HEADERS), ["old-run"]])
+    spreadsheet = FakeSpreadsheet(
+        {
+            settings.google_control_worksheet: control,
+            settings.google_history_worksheet: history,
+        }
+    )
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel.ensure_layout()
+
+    assert tuple(history.values[0]) == HISTORY_HEADERS
+    assert history.values[1][0] == "old-run"
 
 
 def test_history_append_is_idempotent_after_a_crash(settings):
@@ -459,7 +478,8 @@ def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):
     )
 
     assert result["status"] == "ЗАВЕРШЕНО"
-    assert "технических ошибок 0" in result["message"]
+    assert "Общая воронка запуска" in result["message"]
+    assert "Итог: Очередь обработана" in result["message"]
 
 
 def test_remote_run_reports_time_deferred_status(settings):

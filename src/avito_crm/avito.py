@@ -177,6 +177,7 @@ class AvitoBrowser:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.next_long_break_at = 0.0
+        self.captchas_solved = 0
 
     def __enter__(self) -> AvitoBrowser:
         self.playwright = sync_playwright().start()
@@ -644,6 +645,7 @@ class AvitoBrowser:
                 raise ManualActionRequired("Ожидание ручной проверки Avito остановлено оператором")
             if not self._manual_action_reason(page):
                 LOGGER.info("Ручное действие завершено")
+                self.captchas_solved += 1
                 return True
         self._notify_safely(
             "send_captcha_timeout",

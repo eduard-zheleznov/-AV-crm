@@ -91,6 +91,7 @@ class RunSummary:
     phone_failed: int = 0
     retries: int = 0
     manual_required: int = 0
+    captchas_solved: int = 0
     inspected: int = 0
     processed: int = 0
     rounds: int = 0

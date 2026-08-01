@@ -674,6 +674,10 @@ class Pipeline:
             raise
         finally:
             try:
+                if browser is not None:
+                    summary.captchas_solved = int(
+                        getattr(browser, "captchas_solved", summary.captchas_solved)
+                    )
                 self.state.finish_run(summary)
                 self._report_progress(progress, summary, "")
                 self._notify_completion(notifier, summary)

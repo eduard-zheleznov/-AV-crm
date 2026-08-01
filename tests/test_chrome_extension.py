@@ -178,6 +178,18 @@ def test_extension_browser_normalizes_a_dom_phone(settings):
     assert result.source == "chrome-extension-dom"
 
 
+def test_extension_browser_counts_each_solved_captcha_once(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    required = ExtensionEvent("status", "manual_required", {"reason": "капчу"})
+    cleared = ExtensionEvent("status", "manual_cleared", {})
+
+    browser._handle_status(required, "https://www.avito.ru/moskva/test_123")
+    browser._handle_status(cleared, "https://www.avito.ru/moskva/test_123")
+    browser._handle_status(cleared, "https://www.avito.ru/moskva/test_123")
+
+    assert browser.captchas_solved == 1
+
+
 def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):
     png = b"\x89PNG\r\n\x1a\nplaceholder"
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())

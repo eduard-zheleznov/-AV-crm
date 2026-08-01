@@ -22,6 +22,7 @@ from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url, mask_phone
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import QueueColumns, build_queue_source
+from avito_crm.reporting import format_run_report
 from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 
 
@@ -181,7 +182,7 @@ def _add_source_args(
         parser.add_argument(
             "--retry-manual",
             action="store_true",
-            help="Повторить строки, ожидающие ручной проверки Avito",
+            help="Вернуть в очередь строки после решённой капчи Avito",
         )
 
 
@@ -618,21 +619,6 @@ def _publish_run_analytics(
 
 
 def _print_summary(summary, live: bool) -> None:
-    print("\nИтог запуска:")
-    print(f"  Run ID: {summary.run_id}")
-    print(f"  Обработано ссылок: {summary.processed}")
-    print(f"  Выполнено попыток: {summary.inspected}")
-    print(f"  Кругов обработки: {summary.rounds}")
-    print(f"  Номеров распознано: {summary.captured}")
-    print(f"  Лидов создано: {summary.created}")
-    print(f"  Дубликатов: {summary.duplicates}")
-    print(f"  Неактивных объявлений: {summary.inactive}")
-    print(f"  Без кнопки телефона: {summary.unavailable}")
-    print(f"  Номер не открыт после всех попыток: {summary.phone_failed}")
-    print(f"  Повторных попыток: {summary.retries}")
-    print(f"  Некорректных ссылок: {summary.invalid}")
-    print(f"  Технических ошибок: {summary.errors}")
-    print(f"  Требуют ручного действия: {summary.manual_required}")
-    print(f"  Остановка: {summary.stopped_reason}")
+    print(f"\n{format_run_report(summary, reason=summary.stopped_reason)}")
     if not live:
         print("  CRM не изменялась (без --live).")
