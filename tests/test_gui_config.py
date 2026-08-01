@@ -7,7 +7,6 @@ from avito_crm.gui_config import (
     browser_profile_is_initialized,
     extract_spreadsheet_id,
     google_sheet_url,
-    parse_captcha_wait_hours,
     parse_limit,
     parse_max_recipient_ids,
     parse_notification_emails,
@@ -118,11 +117,6 @@ def test_parse_telegram_reminders_requires_increasing_values():
     assert parse_telegram_reminders("30, 60") == (30.0, 60.0)
     with pytest.raises(ValueError):
         parse_telegram_reminders("60,30")
-
-
-@pytest.mark.parametrize(("raw", "expected"), [("1", 1.0), ("12", 12.0), ("24,5", 24.5)])
-def test_parse_captcha_wait_hours(raw, expected):
-    assert parse_captcha_wait_hours(raw) == expected
 
 
 def test_parse_notification_emails_accepts_unique_addresses():

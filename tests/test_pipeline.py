@@ -7,6 +7,7 @@ from avito_crm.errors import (
     BrowserOperationError,
     CrmError,
     InactiveListingError,
+    OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
@@ -134,6 +135,21 @@ class RoundQueue(QueueSource):
             item.values[self.columns.next_retry_at] = patch.next_retry_at
 
 
+class WindowClosingQueue(RoundQueue):
+    """Open for selection/reveal, then closed immediately before the CRM write."""
+
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.window_checks = 0
+
+    def list_all(self):
+        return self.items
+
+    def is_local_window_open(self, item, *, now=None):
+        self.window_checks += 1
+        return self.window_checks < 3
+
+
 class FakeOcr:
     def __init__(self, *_args):
         pass
@@ -224,6 +240,20 @@ def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
     assert first.retries == 1
     assert summary.captured == 1
     assert summary.errors == 0
+
+
+def test_stop_during_captcha_restores_row_for_the_next_normal_run(tmp_path, settings, monkeypatch):
+    source = RoundQueue(settings)
+    browser = SequencedBrowser({"2": [OperatorStopRequested("остановлено")]})
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert summary.stopped_reason == "Остановлено оператором"
+    assert summary.errors == 0
+    assert summary.manual_required == 0
+    assert source.items[0].status == ItemStatus.PENDING
+    assert source.items[0].attempts == 0
+    assert source.list_actionable() == [source.items[0]]
 
 
 def test_unlimited_mode_processes_more_than_twenty_five_rows(tmp_path, settings, monkeypatch):
@@ -507,6 +537,21 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     assert summary.created == 1
     assert summary.repeat_created == 1
     assert summary.stage_synced == 1
+
+
+def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, settings, monkeypatch):
+    source = WindowClosingQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2"]
+    assert crm.created == []
+    assert summary.created == 0
+    assert source.items[0].status == ItemStatus.PENDING
+    assert source.items[0].attempts == 0
+    assert source.items[0].values[source.columns.phone] == ""
+    assert summary.stopped_reason.startswith("Отложено по времени")
 
 
 def test_historical_autoresponder_row_is_not_reactivated(tmp_path, settings, monkeypatch):

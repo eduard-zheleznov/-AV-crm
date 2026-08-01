@@ -182,7 +182,7 @@ def _add_source_args(
         parser.add_argument(
             "--retry-manual",
             action="store_true",
-            help="Вернуть в очередь строки после решённой капчи Avito",
+            help=argparse.SUPPRESS,
         )
 
 

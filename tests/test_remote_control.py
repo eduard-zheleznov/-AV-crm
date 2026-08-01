@@ -9,6 +9,7 @@ from avito_crm.models import RunSummary
 from avito_crm.remote_control import (
     ANALYTICS_MARKER,
     ANALYTICS_WORKSHEET,
+    CAPTCHA_RETRY_HISTORY_HEADERS,
     HISTORY_HEADERS,
     LEGACY_HISTORY_HEADERS,
     PREVIOUS_HISTORY_HEADERS,
@@ -194,10 +195,10 @@ def test_panel_reads_remote_command_from_fixed_cells(settings):
 
     command = panel.read_command()
 
-    assert command == PanelCommand(True, False, 3, "Новые", True, 8)
+    assert command == PanelCommand(True, False, 3, "Новые", False, 8)
 
 
-def test_claim_consumes_start_and_retry_captcha_checkboxes(settings):
+def test_claim_consumes_start_and_clears_retired_captcha_cell(settings):
     values = [[""] * 6 for _ in range(12)]
     values[3][1] = True
     values[7][1] = True
@@ -216,7 +217,7 @@ def test_claim_consumes_start_and_retry_captcha_checkboxes(settings):
     panel.claim(state)
 
     assert panel.control.values[3][1] is False
-    assert panel.control.values[7][1] is False
+    assert panel.control.values[7][1] == ""
 
 
 def test_existing_user_control_sheet_is_never_overwritten(settings):
@@ -243,8 +244,9 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
 
     panel.ensure_layout()
 
-    assert control.values[7][0] == "Вернуть в очередь после решённой капчи"
-    assert "B8 нужна только" in control.values[10][0]
+    assert control.values[7][0] == "Капча: ждём и продолжаем автоматически"
+    assert control.values[7][1] == ""
+    assert "та же строка продолжится автоматически" in control.values[10][0]
     assert tuple(history.values[0]) == HISTORY_HEADERS
     analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
     assert analytics.values[0][0] == ANALYTICS_MARKER
@@ -254,11 +256,31 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
     assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", analytics.values[17][0])
     assert HISTORY_HEADERS[-2] == "Предел просмотра"
     assert HISTORY_HEADERS[-1] == "Решено капч"
+    assert HISTORY_HEADERS[3] == "Режим капчи"
 
 
 def test_setup_migrates_exact_history_header_from_previous_release(settings):
     control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
     history = MatrixSheet([list(PREVIOUS_HISTORY_HEADERS), ["old-run"]])
+    spreadsheet = FakeSpreadsheet(
+        {
+            settings.google_control_worksheet: control,
+            settings.google_history_worksheet: history,
+        }
+    )
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel.ensure_layout()
+
+    assert tuple(history.values[0]) == HISTORY_HEADERS
+    assert history.values[1][0] == "old-run"
+
+
+@pytest.mark.parametrize("removed_columns", [1, 2, 3])
+def test_setup_migrates_partial_captcha_history_headers(settings, removed_columns):
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    old_headers = CAPTCHA_RETRY_HISTORY_HEADERS[:-removed_columns]
+    history = MatrixSheet([list(old_headers), ["old-run"]])
     spreadsheet = FakeSpreadsheet(
         {
             settings.google_control_worksheet: control,

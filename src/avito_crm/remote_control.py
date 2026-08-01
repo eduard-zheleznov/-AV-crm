@@ -69,7 +69,7 @@ PREVIOUS_HISTORY_HEADERS = (
     "Предупреждений синхронизации CRM",
     "Предел просмотра",
 )
-HISTORY_HEADERS = (
+CAPTCHA_RETRY_HISTORY_HEADERS = (
     "Команда ID",
     "Лимит",
     "Лист очереди",
@@ -96,6 +96,11 @@ HISTORY_HEADERS = (
     "Предупреждений синхронизации CRM",
     "Предел просмотра",
     "Решено капч",
+)
+HISTORY_HEADERS = (
+    *CAPTCHA_RETRY_HISTORY_HEADERS[:3],
+    "Режим капчи",
+    *CAPTCHA_RETRY_HISTORY_HEADERS[4:],
 )
 
 
@@ -235,6 +240,10 @@ class GoogleControlPanel:
                 HISTORY_HEADERS[:-3],
                 HISTORY_HEADERS[:-2],
                 HISTORY_HEADERS[:-1],
+                CAPTCHA_RETRY_HISTORY_HEADERS[:-3],
+                CAPTCHA_RETRY_HISTORY_HEADERS[:-2],
+                CAPTCHA_RETRY_HISTORY_HEADERS[:-1],
+                CAPTCHA_RETRY_HISTORY_HEADERS,
                 HISTORY_HEADERS,
             }:
                 raise SourceError(
@@ -284,7 +293,7 @@ class GoogleControlPanel:
                 stop=_checked(self._cell(values, 5, 2)),
                 limit=limit,
                 worksheet=worksheet,
-                retry_manual=_checked(self._cell(values, 8, 2)),
+                retry_manual=False,
                 max_inspected=max_inspected,
             )
         except (ConfigurationError, SourceError):
@@ -296,7 +305,7 @@ class GoogleControlPanel:
         self._batch_control(
             {
                 "B4": False,
-                "B8": False,
+                "B8": "",
                 "E4": "ПРИНЯТО",
                 "E5": state.command_id,
                 "E6": f"0 / {_target_label(state.target)}",
@@ -377,7 +386,7 @@ class GoogleControlPanel:
                         state.command_id,
                         state.target,
                         state.worksheet,
-                        "да" if state.retry_manual else "нет",
+                        "автоматически",
                         state.started_at,
                         "",
                         "ПРИНЯТО",
@@ -485,7 +494,7 @@ class GoogleControlPanel:
                 summary.run_id,
                 summary.requested,
                 source_label[:145],
-                "да" if retry_manual else "нет",
+                "автоматически",
                 finished_at,
                 finished_at,
                 status,
@@ -602,8 +611,8 @@ class GoogleControlPanel:
         matrix[5] = ["Цель по новым лидам (0 = все)", 0, "", "Прогресс", "0 / все", ""]
         matrix[6] = ["Лист очереди", self.settings.google_worksheet, "", "Запущено", "", ""]
         matrix[7] = [
-            "Вернуть в очередь после решённой капчи",
-            False,
+            "Капча: ждём и продолжаем автоматически",
+            "",
             "",
             "Последняя связь с компьютером",
             utc_now(),
@@ -619,9 +628,9 @@ class GoogleControlPanel:
         ]
         matrix[10] = [
             (
-                "B8 нужна только если запуск уже завершился из-за капчи: "
-                "решите капчу на Windows-ПК, включите B8 и запустите снова. "
-                "Пока запуск сам ждёт капчу, B8 не трогайте."
+                "Если Avito покажет капчу, программа будет ждать её решения. "
+                "После решения та же строка продолжится сама; "
+                "для отмены используйте обычную галочку «Остановить»."
             ),
             "",
             "",
@@ -643,7 +652,11 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A8",
-                    "values": [["Вернуть в очередь после решённой капчи"]],
+                    "values": [["Капча: ждём и продолжаем автоматически"]],
+                },
+                {
+                    "range": "B8",
+                    "values": [[""]],
                 },
                 {
                     "range": "D8",
@@ -655,11 +668,15 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A11",
-                    "values": [[(
-                        "B8 нужна только если запуск уже завершился из-за капчи: "
-                        "решите её на Windows-ПК, включите B8 и запустите снова. "
-                        "В остальных случаях B8 выключена."
-                    )]],
+                    "values": [
+                        [
+                            (
+                                "При капче программа ждёт без ограничения по времени. "
+                                "После решения та же строка продолжится автоматически. "
+                                "Для отмены нажмите «Остановить»."
+                            )
+                        ]
+                    ],
                 },
             ]
             if not self._cell(control.get("B9"), 1, 1).strip():
@@ -1035,7 +1052,7 @@ class GoogleControlPanel:
             (10, 12, 54),
         ):
             requests.append(_row_height_request(sheet_id, start, end, size))
-        for row_index in (3, 4, 7):
+        for row_index in (3, 4):
             requests.append(
                 {
                     "setDataValidation": {
@@ -1054,6 +1071,19 @@ class GoogleControlPanel:
                     }
                 }
             )
+        requests.append(
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 7,
+                        "endRowIndex": 8,
+                        "startColumnIndex": 1,
+                        "endColumnIndex": 2,
+                    }
+                }
+            }
+        )
         for row_index in (5, 8):
             requests.append(
                 {
@@ -1365,7 +1395,7 @@ class RemoteController:
                     ),
                     mode="full",
                     live=True,
-                    include_manual=state.retry_manual,
+                    include_manual=False,
                 ).run(
                     remaining,
                     max_inspected=remaining_inspected,
@@ -1499,9 +1529,7 @@ class RemoteController:
         state.result = self._result_dict(
             state,
             status="ОСТАНОВЛЕНО",
-            message=format_run_report(
-                progress, reason="Запуск остановлен по команде оператора"
-            ),
+            message=format_run_report(progress, reason="Запуск остановлен по команде оператора"),
             progress=progress,
         )
         state.phase = "finalizing"

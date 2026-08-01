@@ -20,7 +20,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from avito_crm.config import Settings
 from avito_crm.errors import (
@@ -28,6 +28,7 @@ from avito_crm.errors import (
     InactiveListingError,
     ManualActionRequired,
     NotificationError,
+    OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
@@ -132,7 +133,9 @@ class ExtensionBridge:
             "rowId": row_id,
             "maxClicks": max_clicks,
             "pageTimeoutMs": round(self.settings.avito_page_timeout * 1000),
-            "manualTimeoutMs": round(self.settings.avito_manual_timeout * 1000),
+            # Ordinary Chrome waits until the operator solves the challenge or
+            # presses STOP. A clock timeout would strand the queue row.
+            "manualTimeoutMs": 0,
             "phoneWaitMs": round(self.settings.avito_temp_number_wait_max * 1000),
             "retryDelayMs": round(self.settings.avito_phone_retry_max * 1000),
         }
@@ -154,12 +157,21 @@ class ExtensionBridge:
             self.state.result = None
             self.state.condition.notify_all()
 
-        deadline = (
-            time.monotonic()
-            + self.settings.avito_page_timeout
-            + self.settings.avito_manual_timeout
-            + 60
+        operation_timeout = max(
+            30.0,
+            self.settings.avito_page_timeout
+            + self.settings.avito_temp_number_wait_max
+            + (self.settings.avito_phone_retry_max * max_clicks)
+            + 30.0,
         )
+        deadline: float | None = time.monotonic() + operation_timeout
+        stop_seen_at: float | None = None
+        manual_started_at: float | None = None
+        manual_reason = "ручная проверка Avito"
+        reminder_seconds = tuple(
+            minutes * 60 for minutes in self.settings.telegram_reminder_minutes
+        )
+        reminder_index = 0
         try:
             while True:
                 event: ExtensionEvent | None = None
@@ -171,15 +183,48 @@ class ExtensionBridge:
                     elif self.state.stopped:
                         raise BrowserOperationError("Локальный мост Chrome остановлен")
                     else:
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            raise ManualActionRequired(
-                                "Обычный Chrome не завершил открытие номера за отведённое время"
+                        now = time.monotonic()
+                        if (self.settings.data_dir / "STOP").exists():
+                            stop_seen_at = stop_seen_at or now
+                            # Let the extension observe /v1/command-status and
+                            # tear down its waiting content-script promise.
+                            if now - stop_seen_at >= 10:
+                                raise OperatorStopRequested(
+                                    "Ожидание Chrome остановлено оператором"
+                                )
+                        if (
+                            manual_started_at is not None
+                            and reminder_index < len(reminder_seconds)
+                            and now - manual_started_at >= reminder_seconds[reminder_index]
+                        ):
+                            event = ExtensionEvent(
+                                "status",
+                                "manual_reminder",
+                                {
+                                    "reason": manual_reason,
+                                    "elapsed_seconds": now - manual_started_at,
+                                    "escalate": reminder_index == len(reminder_seconds) - 1,
+                                },
                             )
-                        self.state.condition.wait(timeout=min(remaining, 1.0))
-                        continue
-                if event is not None and status_callback is not None:
-                    status_callback(event)
+                            reminder_index += 1
+                        elif deadline is not None and now >= deadline:
+                            raise BrowserOperationError(
+                                "Обычный Chrome не завершил открытие номера: нет ответа расширения"
+                            )
+                        else:
+                            self.state.condition.wait(timeout=1.0)
+                            continue
+                if event is not None:
+                    if event.status == "manual_required":
+                        manual_started_at = time.monotonic()
+                        manual_reason = str(event.payload.get("reason", manual_reason))
+                        reminder_index = 0
+                        deadline = None
+                    elif event.status == "manual_cleared":
+                        manual_started_at = None
+                        deadline = time.monotonic() + operation_timeout
+                    if status_callback is not None:
+                        status_callback(event)
         finally:
             with self.state.condition:
                 if self.state.command and self.state.command.get("id") == command_id:
@@ -225,6 +270,15 @@ class ExtensionBridge:
         expected = f"Bearer {self.settings.avito_extension_token}"
         return bool(header) and secrets.compare_digest(header, expected)
 
+    def _command_status(self, command_id: str) -> str:
+        with self.state.condition:
+            active_id = str((self.state.command or {}).get("id", ""))
+            if self.state.stopped or (self.settings.data_dir / "STOP").exists():
+                return "cancelled"
+            if not command_id or command_id != active_id:
+                return "inactive"
+            return "active"
+
     def _handler_type(self) -> type[BaseHTTPRequestHandler]:
         bridge = self
 
@@ -242,9 +296,17 @@ class ExtensionBridge:
                 if not bridge._authorized(self.headers.get("Authorization")):
                     self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                     return
-                path = urlsplit(self.path).path
+                parsed = urlsplit(self.path)
+                path = parsed.path
                 if path == "/v1/health":
                     self._send_json(HTTPStatus.OK, {"ok": True})
+                    return
+                if path == "/v1/command-status":
+                    command_id = str(parse_qs(parsed.query).get("id", [""])[0])
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {"status": bridge._command_status(command_id)},
+                    )
                     return
                 if path != "/v1/poll":
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
@@ -320,6 +382,7 @@ class ChromeExtensionBrowser:
         self.bridge = ExtensionBridge(settings)
         self._manual_notified = False
         self._manual_pending = False
+        self._manual_backup_alerted = False
         self.captchas_solved = 0
 
     def __enter__(self) -> ChromeExtensionBrowser:
@@ -339,12 +402,17 @@ class ChromeExtensionBrowser:
         canonical_url = canonical_avito_url(url)
         self._manual_notified = False
         self._manual_pending = False
-        event = self.bridge.execute(
-            url=canonical_url,
-            row_id=row_id,
-            max_clicks=max_clicks,
-            status_callback=lambda status: self._handle_status(status, canonical_url),
-        )
+        self._manual_backup_alerted = False
+        try:
+            event = self.bridge.execute(
+                url=canonical_url,
+                row_id=row_id,
+                max_clicks=max_clicks,
+                status_callback=lambda status: self._handle_status(status, canonical_url),
+            )
+        except OperatorStopRequested:
+            self._notify_captcha_stopped(canonical_url)
+            raise
         status = event.status
         payload = event.payload
         if status == "phone":
@@ -378,6 +446,11 @@ class ChromeExtensionBrowser:
             raise ManualActionRequired(
                 str(payload.get("reason", "Ручная проверка Avito не завершена"))
             )
+        if status == "cancelled":
+            self._notify_captcha_stopped(canonical_url)
+            raise OperatorStopRequested(
+                str(payload.get("reason", "Ожидание Chrome остановлено оператором"))
+            )
         if status in {"phone_error", "phone_missing"}:
             raise PhoneNotFoundError(str(payload.get("reason", "Avito не показал временный номер")))
         raise BrowserOperationError(
@@ -393,13 +466,23 @@ class ChromeExtensionBrowser:
                 "send_captcha_detected",
                 reason=str(event.payload.get("reason", "ручную проверку")),
                 url=url,
-                wait_seconds=self.settings.avito_manual_timeout,
+                wait_seconds=0,
             )
         elif event.status == "manual_cleared":
             if self._manual_pending:
                 self.captchas_solved += 1
                 self._manual_pending = False
             LOGGER.info("Ручная проверка в обычном Chrome завершена; продолжаем текущую строку")
+        elif event.status == "manual_reminder" and self._manual_pending:
+            escalate = bool(event.payload.get("escalate", False))
+            self._manual_backup_alerted = self._manual_backup_alerted or escalate
+            self._notify_safely(
+                "send_captcha_reminder",
+                reason=str(event.payload.get("reason", "ручную проверку")),
+                url=url,
+                elapsed_seconds=float(event.payload.get("elapsed_seconds", 0.0)),
+                escalate=escalate,
+            )
         elif event.status == "clicking":
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
         elif event.status == "clicked":
@@ -414,6 +497,16 @@ class ChromeExtensionBrowser:
             LOGGER.warning("Уведомление не доставлено: %s", exc)
         except Exception as exc:
             LOGGER.warning("Уведомление не доставлено (%s)", exc.__class__.__name__)
+
+    def _notify_captcha_stopped(self, url: str) -> None:
+        if not self._manual_pending:
+            return
+        self._notify_safely(
+            "send_captcha_stopped",
+            url=url,
+            include_backup=self._manual_backup_alerted,
+        )
+        self._manual_pending = False
 
     def _artifact_path(self, url: str, suffix: str) -> Path:
         digest = hashlib.sha256(url.encode()).hexdigest()[:12]

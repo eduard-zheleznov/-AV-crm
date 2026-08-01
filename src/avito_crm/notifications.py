@@ -1034,6 +1034,8 @@ def _max_error_description(payload: object) -> str:
 
 
 def _format_duration(seconds: float) -> str:
+    if seconds <= 0:
+        return "решения капчи или остановки оператором"
     minutes = max(0, round(seconds / 60))
     hours, remaining = divmod(minutes, 60)
     if hours and remaining:

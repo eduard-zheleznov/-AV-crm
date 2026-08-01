@@ -17,6 +17,7 @@ from avito_crm.errors import (
     InvalidListingError,
     ManualActionRequired,
     NotificationError,
+    OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
     SourceError,
@@ -69,8 +70,7 @@ class Pipeline:
             raise ValueError("Лимит не может быть отрицательным; 0 означает «все строки»")
         if max_inspected < 0:
             raise ValueError(
-                "Предел просмотренных строк не может быть отрицательным; "
-                "0 означает «без предела»"
+                "Предел просмотренных строк не может быть отрицательным; 0 означает «без предела»"
             )
         self.stop_file.unlink(missing_ok=True)
         summary = RunSummary(run_id=run_id or uuid.uuid4().hex[:12], requested=limit)
@@ -195,9 +195,7 @@ class Pipeline:
                             should_stop = True
                             break
                         if max_inspected and summary.inspected >= max_inspected:
-                            summary.stopped_reason = (
-                                "Достигнут предел просмотренных объявлений"
-                            )
+                            summary.stopped_reason = "Достигнут предел просмотренных объявлений"
                             should_stop = True
                             break
                         if self._goal_reached(summary, limit):
@@ -243,7 +241,9 @@ class Pipeline:
                             summary.errors = len(unresolved_technical_rows)
                             continue
 
-                        attempts = item.attempts + 1
+                        previous_status = item.status
+                        previous_attempts = item.attempts
+                        attempts = previous_attempts + 1
                         stored_phone = normalize_phone(
                             str(item.values.get(self.source.columns.phone, "") or "")
                         )
@@ -581,6 +581,39 @@ class Pipeline:
                             unresolved_technical_rows.discard(item.row_id)
                             summary.errors = len(unresolved_technical_rows)
                             self._report_progress(progress, summary, item.row_id)
+                        except OperatorStopRequested:
+                            # STOP during a CAPTCHA is not a failed Avito attempt.
+                            # Restore the row's previous actionable state so the
+                            # next ordinary launch resumes it automatically.
+                            restored_status = previous_status or (
+                                ItemStatus.REPEAT_PENDING if repeat_flow else ItemStatus.PENDING
+                            )
+                            self._finalize(
+                                canonical_url,
+                                item,
+                                QueuePatch(
+                                    status=restored_status,
+                                    attempts=previous_attempts,
+                                    phone=stored_phone or "",
+                                    crm_lead_id=existing_crm_lead_id,
+                                    error=(
+                                        "Остановлено оператором во время ожидания капчи; "
+                                        "строка сохранена для следующего запуска"
+                                    ),
+                                    processed_at=utc_now(),
+                                    run_id=summary.run_id,
+                                    repeat_phone_attempts=(
+                                        repeat_phone_attempts if repeat_flow else None
+                                    ),
+                                    next_retry_at="",
+                                ),
+                            )
+                            unresolved_technical_rows.discard(item.row_id)
+                            summary.errors = len(unresolved_technical_rows)
+                            summary.stopped_reason = "Остановлено оператором"
+                            should_stop = True
+                            self._report_progress(progress, summary, item.row_id)
+                            break
                         except ManualActionRequired as exc:
                             self._finalize_expected(
                                 canonical_url,

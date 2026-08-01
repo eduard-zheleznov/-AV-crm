@@ -153,20 +153,60 @@ async function getManagedTab(url, pageTimeoutMs) {
 
 async function sendRevealMessage(tabId, command) {
   let lastError = null;
-  const deadline = Date.now() + command.manualTimeoutMs + command.pageTimeoutMs + 5000;
-  while (Date.now() < deadline) {
+  const deadline = Date.now() + command.pageTimeoutMs + 5000;
+  const cancellationController = new AbortController();
+  const cancellation = waitForCancellation(tabId, command.id, cancellationController.signal);
+  try {
+    while (Date.now() < deadline) {
+      try {
+        return await Promise.race([
+          chrome.tabs.sendMessage(tabId, {
+            type: "avito_crm_reveal_once",
+            manualTimeoutMs: command.manualTimeoutMs,
+            phoneWaitMs: command.phoneWaitMs
+          }),
+          cancellation
+        ]);
+      } catch (error) {
+        lastError = error;
+        await delay(1000);
+      }
+    }
+    throw new Error(`Расширение не подключилось к странице Avito: ${safeMessage(lastError)}`);
+  } finally {
+    cancellationController.abort();
+  }
+}
+
+async function waitForCancellation(tabId, commandId, signal) {
+  while (!signal.aborted && currentCommandId === commandId) {
+    await delay(1000);
+    if (signal.aborted) {
+      return { status: "watcher_stopped" };
+    }
     try {
-      return await chrome.tabs.sendMessage(tabId, {
-        type: "avito_crm_reveal_once",
-        manualTimeoutMs: command.manualTimeoutMs,
-        phoneWaitMs: command.phoneWaitMs
-      });
-    } catch (error) {
-      lastError = error;
-      await delay(1000);
+      const response = await fetch(
+        `${BASE_URL}/v1/command-status?id=${encodeURIComponent(commandId)}`,
+        { method: "GET", headers: AUTH_HEADERS, cache: "no-store" }
+      );
+      if (!response.ok) {
+        continue;
+      }
+      const payload = await response.json();
+      if (payload.status === "cancelled") {
+        // Destroy the waiting content-script context so the service worker is
+        // immediately ready for the next command after STOP/restart.
+        await chrome.tabs.reload(tabId).catch(() => undefined);
+        return {
+          status: "cancelled",
+          reason: "Ожидание Chrome остановлено оператором"
+        };
+      }
+    } catch (_error) {
+      // The bridge may be restarting; keep the page untouched and retry.
     }
   }
-  throw new Error(`Расширение не подключилось к странице Avito: ${safeMessage(lastError)}`);
+  return { status: "watcher_stopped" };
 }
 
 async function focusTab(tabId) {

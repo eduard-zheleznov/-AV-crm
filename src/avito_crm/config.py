@@ -333,7 +333,7 @@ class Settings:
             avito_min_delay=_float("AVITO_MIN_DELAY_SECONDS", 7.0),
             avito_max_delay=_float("AVITO_MAX_DELAY_SECONDS", 15.0),
             avito_page_timeout=_float("AVITO_PAGE_TIMEOUT_SECONDS", 45.0),
-            avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 43_200.0),
+            avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 0.0),
             avito_phone_first_round_attempts=int(_int("AVITO_PHONE_FIRST_ROUND_ATTEMPTS", 6) or 0),
             avito_phone_second_round_attempts=int(
                 _int("AVITO_PHONE_SECOND_ROUND_ATTEMPTS", 3) or 0
@@ -399,8 +399,11 @@ class Settings:
     def validate(self) -> None:
         if self.avito_min_delay < 0 or self.avito_max_delay < self.avito_min_delay:
             raise ConfigurationError("Некорректный диапазон задержек Avito")
-        if self.avito_manual_timeout < 60:
-            raise ConfigurationError("AVITO_MANUAL_TIMEOUT_SECONDS должен быть не меньше 60")
+        if self.avito_manual_timeout < 0 or 0 < self.avito_manual_timeout < 60:
+            raise ConfigurationError(
+                "AVITO_MANUAL_TIMEOUT_SECONDS: 0 означает ждать до решения; "
+                "иное значение должно быть не меньше 60 секунд"
+            )
         ranges = (
             (
                 "AVITO_PHONE_RETRY",
@@ -509,10 +512,14 @@ class Settings:
             and self.email_primary_recipients
         )
         if (
-            (self.telegram_bot_token and self.telegram_primary_chat_ids)
-            or (self.max_bot_token and self.max_primary_recipients)
-            or email_enabled
-        ) and self.telegram_reminder_minutes:
+            (
+                (self.telegram_bot_token and self.telegram_primary_chat_ids)
+                or (self.max_bot_token and self.max_primary_recipients)
+                or email_enabled
+            )
+            and self.telegram_reminder_minutes
+            and self.avito_manual_timeout > 0
+        ):
             last_reminder_seconds = self.telegram_reminder_minutes[-1] * 60
             if last_reminder_seconds >= self.avito_manual_timeout:
                 raise ConfigurationError("Последнее напоминание должно быть раньше таймаута капчи")

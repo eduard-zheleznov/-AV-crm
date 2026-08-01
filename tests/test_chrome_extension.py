@@ -12,6 +12,7 @@ import pytest
 
 import avito_crm.chrome_extension as chrome_extension_module
 from avito_crm.chrome_extension import ChromeExtensionBrowser, ExtensionBridge, ExtensionEvent
+from avito_crm.errors import OperatorStopRequested
 from avito_crm.models import PhoneResult
 
 
@@ -81,6 +82,7 @@ def test_bridge_delivers_one_command_and_correlates_the_result(settings):
             assert status == 200
             assert command is not None
             assert command["type"] == "reveal_phone"
+            assert command["manualTimeoutMs"] == 0
             _request(
                 port,
                 token,
@@ -126,8 +128,38 @@ def test_bridge_delivers_one_command_and_correlates_the_result(settings):
     assert [event.status for event in statuses] == ["manual_required"]
 
 
+def test_bridge_exposes_stop_to_the_waiting_extension(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.command = {"id": "waiting-command"}
+
+    assert bridge._command_status("waiting-command") == "active"
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / "STOP").write_text("stop", encoding="utf-8")
+
+    assert bridge._command_status("waiting-command") == "cancelled"
+
+
 class _FakeNotifier:
     enabled = False
+
+    def close(self) -> None:
+        return
+
+
+class _RecordingNotifier:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, object]]] = []
+
+    def send_captcha_detected(self, **kwargs: object) -> None:
+        self.events.append(("detected", kwargs))
+
+    def send_captcha_reminder(self, **kwargs: object) -> None:
+        self.events.append(("reminder", kwargs))
+
+    def send_captcha_stopped(self, **kwargs: object) -> None:
+        self.events.append(("stopped", kwargs))
 
     def close(self) -> None:
         return
@@ -178,6 +210,20 @@ def test_extension_browser_normalizes_a_dom_phone(settings):
     assert result.source == "chrome-extension-dom"
 
 
+def test_extension_browser_maps_stop_to_a_non_failure_signal(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "cancelled",
+            {"reason": "остановлено оператором"},
+        )
+    )
+
+    with browser, pytest.raises(OperatorStopRequested):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
 def test_extension_browser_counts_each_solved_captcha_once(settings):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     required = ExtensionEvent("status", "manual_required", {"reason": "капчу"})
@@ -188,6 +234,29 @@ def test_extension_browser_counts_each_solved_captcha_once(settings):
     browser._handle_status(cleared, "https://www.avito.ru/moskva/test_123")
 
     assert browser.captchas_solved == 1
+
+
+def test_extension_browser_reminds_and_reports_operator_stop(settings):
+    notifier = _RecordingNotifier()
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), notifier)
+    url = "https://www.avito.ru/moskva/test_123"
+
+    browser._handle_status(
+        ExtensionEvent("status", "manual_required", {"reason": "ручную проверку"}),
+        url,
+    )
+    browser._handle_status(
+        ExtensionEvent(
+            "status",
+            "manual_reminder",
+            {"reason": "ручную проверку", "elapsed_seconds": 3600, "escalate": True},
+        ),
+        url,
+    )
+    browser._notify_captcha_stopped(url)
+
+    assert [name for name, _kwargs in notifier.events] == ["detected", "reminder", "stopped"]
+    assert notifier.events[-1][1]["include_backup"] is True
 
 
 def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):

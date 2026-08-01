@@ -110,8 +110,9 @@ async function waitForManualAction(timeoutMs) {
     return null;
   }
   notifyStatus("manual_required", initialReason);
-  const deadline = Date.now() + Math.max(1000, timeoutMs);
-  while (Date.now() < deadline) {
+  const hasDeadline = Number.isFinite(timeoutMs) && timeoutMs > 0;
+  const deadline = hasDeadline ? Date.now() + timeoutMs : 0;
+  while (!hasDeadline || Date.now() < deadline) {
     await delay(1000);
     if (!manualReason()) {
       notifyStatus("manual_cleared", initialReason);
