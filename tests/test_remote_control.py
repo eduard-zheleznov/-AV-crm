@@ -129,7 +129,12 @@ class FakePanel:
     def claim(self, state):
         self.claims.append(state.command_id)
         self.command = PanelCommand(
-            False, self.command.stop, self.command.limit, self.command.worksheet, False
+            False,
+            self.command.stop,
+            self.command.limit,
+            self.command.worksheet,
+            False,
+            self.command.max_inspected,
         )
 
     def append_history(self, _state):
@@ -158,9 +163,11 @@ class InstantController(RemoteController):
     def __init__(self, settings, panel):
         super().__init__(settings, panel)
         self.remaining_values = []
+        self.remaining_inspected_values = []
 
-    def _run_worker(self, state, remaining):
+    def _run_worker(self, state, remaining, remaining_inspected):
         self.remaining_values.append(remaining)
+        self.remaining_inspected_values.append(remaining_inspected)
         summary = RunSummary(
             run_id=state.command_id,
             requested=remaining,
@@ -180,12 +187,13 @@ def test_panel_reads_remote_command_from_fixed_cells(settings):
     values[5][1] = "3"
     values[6][1] = "Новые"
     values[7][1] = "TRUE"
+    values[8][1] = "8"
     panel = GoogleControlPanel(settings, spreadsheet=object(), worksheet_not_found=KeyError)
     panel.control = MatrixSheet(values)
 
     command = panel.read_command()
 
-    assert command == PanelCommand(True, False, 3, "Новые", True)
+    assert command == PanelCommand(True, False, 3, "Новые", True, 8)
 
 
 def test_existing_user_control_sheet_is_never_overwritten(settings):
@@ -219,7 +227,8 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
     assert analytics.values[6][0] == "Запусков"
     assert analytics.values[6][1] == 0
     assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", analytics.values[17][0])
-    assert HISTORY_HEADERS[-1] == "Предупреждений синхронизации CRM"
+    assert HISTORY_HEADERS[-2] == "Предупреждений синхронизации CRM"
+    assert HISTORY_HEADERS[-1] == "Предел просмотра"
 
 
 def test_history_append_is_idempotent_after_a_crash(settings):
@@ -274,6 +283,7 @@ def test_remote_command_is_claimed_once_and_finished(settings):
     assert len(panel.claims) == 1
     assert panel.history_appends == 1
     assert controller.remaining_values == [2]
+    assert controller.remaining_inspected_values == [4]
     assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
     assert panel.finishes[0]["created"] == 2
     assert not controller.state_path.exists()
@@ -300,7 +310,7 @@ def test_remote_worker_reloads_env_before_each_command(settings, monkeypatch):
 def test_interrupted_command_resumes_only_remaining_target(settings):
     panel = FakePanel(
         PanelCommand(False, False, 3, "Лист1", False),
-        recovered=ProgressSnapshot(created=1, captured=1),
+        recovered=ProgressSnapshot(created=1, captured=1, inspected=1),
     )
     state = CommandState(
         command_id="cmd-resume",
@@ -320,6 +330,7 @@ def test_interrupted_command_resumes_only_remaining_target(settings):
     controller.tick()
 
     assert controller.remaining_values == [2]
+    assert controller.remaining_inspected_values == [5]
     assert panel.history_appends == 0
     assert panel.finishes[0]["created"] == 3
 
@@ -371,7 +382,48 @@ def test_remote_control_accepts_unlimited_target(settings):
     controller.tick()
 
     assert controller.remaining_values == [0]
+    assert controller.remaining_inspected_values == [50]
     assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
+
+
+def test_remote_control_uses_explicit_inspection_limit(settings):
+    panel = FakePanel(PanelCommand(True, False, 5, "Лист1", False, 7))
+    controller = InstantController(settings, panel)
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller.remaining_values == [5]
+    assert controller.remaining_inspected_values == [7]
+    assert panel.finishes[0]["max_inspected"] == 7
+
+
+def test_resumed_remote_command_does_not_exceed_total_inspection_limit(settings):
+    panel = FakePanel(
+        PanelCommand(False, False, 5, "Лист1", False, 10),
+        recovered=ProgressSnapshot(created=2, captured=2, inspected=7),
+    )
+    controller = InstantController(settings, panel)
+    controller._state = CommandState(
+        command_id="cmd-resume-inspection-limit",
+        target=5,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-08-01T10:00:00+00:00",
+        max_inspected=10,
+        history_row=2,
+    )
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller.remaining_values == [3]
+    assert controller.remaining_inspected_values == [3]
 
 
 def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):

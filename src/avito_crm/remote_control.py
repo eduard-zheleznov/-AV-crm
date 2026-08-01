@@ -66,6 +66,7 @@ HISTORY_HEADERS = (
     "Дата завершения",
     "Строк со статусом «Недозвон»",
     "Предупреждений синхронизации CRM",
+    "Предел просмотра",
 )
 
 
@@ -80,6 +81,7 @@ class PanelCommand:
     limit: int
     worksheet: str
     retry_manual: bool
+    max_inspected: int = 0
 
 
 @dataclass(slots=True)
@@ -90,6 +92,7 @@ class CommandState:
     retry_manual: bool
     phase: str
     started_at: str
+    max_inspected: int = 0
     history_row: int = 0
     stop_requested: bool = False
     base_created: int = 0
@@ -197,6 +200,7 @@ class GoogleControlPanel:
             history_headers = tuple(history_values[0]) if history_values else ()
             if history_headers and history_headers not in {
                 LEGACY_HISTORY_HEADERS,
+                HISTORY_HEADERS[:-3],
                 HISTORY_HEADERS[:-2],
                 HISTORY_HEADERS[:-1],
                 HISTORY_HEADERS,
@@ -240,6 +244,8 @@ class GoogleControlPanel:
             values = control.get("A1:F12")
             raw_limit = self._cell(values, 6, 2)
             limit = _parse_panel_limit(raw_limit)
+            raw_max_inspected = self._cell(values, 9, 2)
+            max_inspected = _parse_panel_limit(raw_max_inspected)
             worksheet = self._cell(values, 7, 2).strip() or self.settings.google_worksheet
             return PanelCommand(
                 start=_checked(self._cell(values, 4, 2)),
@@ -247,6 +253,7 @@ class GoogleControlPanel:
                 limit=limit,
                 worksheet=worksheet,
                 retry_manual=_checked(self._cell(values, 8, 2)),
+                max_inspected=max_inspected,
             )
         except (ConfigurationError, SourceError):
             raise
@@ -262,7 +269,9 @@ class GoogleControlPanel:
                 "E6": f"0 / {_target_label(state.target)}",
                 "E7": state.started_at,
                 "E8": utc_now(),
-                "E9": "Команда зафиксирована; запускаем рабочий процесс.",
+                "E9": (
+                    f"Команда зафиксирована; запускаем. Предел просмотра: {state.max_inspected}."
+                ),
                 "E11": _computer_name(self.settings),
                 "E12": __version__,
             }
@@ -356,9 +365,10 @@ class GoogleControlPanel:
                         "",
                         0,
                         0,
+                        state.max_inspected,
                     ]
                 ],
-                f"A{row_number}:X{row_number}",
+                f"A{row_number}:Y{row_number}",
                 value_input_option="RAW",
             )
             return row_number
@@ -465,10 +475,11 @@ class GoogleControlPanel:
                 finished_at[:10],
                 summary.no_answer_synced,
                 summary.crm_sync_errors,
+                "",
             ]
             history.update(
                 [row],
-                f"A{row_number}:X{row_number}",
+                f"A{row_number}:Y{row_number}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -551,7 +562,7 @@ class GoogleControlPanel:
         matrix: list[list[Any]] = [[""] * 6 for _ in range(12)]
         matrix[0][0] = CONTROL_MARKER
         matrix[1][0] = (
-            "1. Добавьте ссылки в лист очереди.  2. Укажите цель (0 = все строки).  "
+            "1. Добавьте ссылки.  2. Укажите цель и предел просмотра.  "
             "3. Поставьте галочку «ЗАПУСТИТЬ В CRM»."
         )
         matrix[3] = ["ЗАПУСТИТЬ В CRM", False, "", "Статус", "ГОТОВ", ""]
@@ -566,7 +577,14 @@ class GoogleControlPanel:
             utc_now(),
             "",
         ]
-        matrix[8] = ["", "", "", "Сообщение", "Пульт ожидает команду.", ""]
+        matrix[8] = [
+            "Предел просмотра (0 = авто)",
+            0,
+            "",
+            "Сообщение",
+            "Пульт ожидает команду.",
+            "",
+        ]
         matrix[10] = [
             "Капча не решается автоматически. По уведомлению нужно зайти на удалённый ПК.",
             "",
@@ -582,21 +600,28 @@ class GoogleControlPanel:
     def _upgrade_control_labels(self) -> None:
         control = self._require_control()
         with suppress(Exception):
+            updates = [
+                {
+                    "range": "A6",
+                    "values": [["Цель по новым лидам (0 = все)"]],
+                },
+                {
+                    "range": "A8",
+                    "values": [["Повторить строки после ручной проверки"]],
+                },
+                {
+                    "range": "D8",
+                    "values": [["Последняя связь с компьютером"]],
+                },
+                {
+                    "range": "A9",
+                    "values": [["Предел просмотра (0 = авто)"]],
+                },
+            ]
+            if not self._cell(control.get("B9"), 1, 1).strip():
+                updates.append({"range": "B9", "values": [[0]]})
             control.batch_update(
-                [
-                    {
-                        "range": "A6",
-                        "values": [["Цель по новым лидам (0 = все)"]],
-                    },
-                    {
-                        "range": "A8",
-                        "values": [["Повторить строки после ручной проверки"]],
-                    },
-                    {
-                        "range": "D8",
-                        "values": [["Последняя связь с компьютером"]],
-                    },
-                ],
+                updates,
                 value_input_option="RAW",
             )
 
@@ -891,14 +916,14 @@ class GoogleControlPanel:
                 },
             )
             control.format(
-                "A4:B8",
+                "A4:B9",
                 {"backgroundColor": {"red": 0.95, "green": 0.97, "blue": 1.0}},
             )
             control.format(
                 "D4:F12",
                 {"backgroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99}},
             )
-            control.format("A4:A8", {"textFormat": {"bold": True}})
+            control.format("A4:A9", {"textFormat": {"bold": True}})
             control.format("D4:D12", {"textFormat": {"bold": True}})
             control.format("B4:B5", {"backgroundColor": {"red": 0.86, "green": 0.94, "blue": 1.0}})
             control.format("A1:F12", {"verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"})
@@ -985,28 +1010,32 @@ class GoogleControlPanel:
                     }
                 }
             )
-        requests.append(
-            {
-                "setDataValidation": {
-                    "range": {
-                        "sheetId": sheet_id,
-                        "startRowIndex": 5,
-                        "endRowIndex": 6,
-                        "startColumnIndex": 1,
-                        "endColumnIndex": 2,
-                    },
-                    "rule": {
-                        "condition": {
-                            "type": "NUMBER_GREATER_THAN_EQ",
-                            "values": [{"userEnteredValue": "0"}],
+        for row_index in (5, 8):
+            requests.append(
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": 2,
                         },
-                        "inputMessage": "Целое число от 0; 0 означает обработать все строки",
-                        "strict": True,
-                        "showCustomUi": True,
-                    },
+                        "rule": {
+                            "condition": {
+                                "type": "NUMBER_GREATER_THAN_EQ",
+                                "values": [{"userEnteredValue": "0"}],
+                            },
+                            "inputMessage": (
+                                "Целое число от 0; для предела 0 означает "
+                                "автоматический безопасный предел"
+                            ),
+                            "strict": True,
+                            "showCustomUi": True,
+                        },
+                    }
                 }
-            }
-        )
+            )
         widths = ((0, 1, 280), (1, 2, 150), (2, 3, 30), (3, 4, 150), (4, 6, 220))
         for start, end, size in widths:
             requests.append(_column_width_request(sheet_id, start, end, size))
@@ -1173,6 +1202,7 @@ class RemoteController:
             retry_manual=command.retry_manual,
             phase="claiming",
             started_at=utc_now(),
+            max_inspected=_effective_max_inspected(command.limit, command.max_inspected),
         )
         self._state = state
         self._save_state(state)
@@ -1182,6 +1212,9 @@ class RemoteController:
         if command.limit < 0:
             self.panel.reject_start("Цель должна быть целым числом от 0; 0 означает «все».")
             raise ConfigurationError("Некорректный лимит удалённой команды")
+        if command.max_inspected < 0:
+            self.panel.reject_start("Предел просмотра должен быть целым числом от 0.")
+            raise ConfigurationError("Некорректный предел просмотра")
         reserved = {
             self.settings.google_control_worksheet.casefold(),
             self.settings.google_history_worksheet.casefold(),
@@ -1219,6 +1252,8 @@ class RemoteController:
         state.base_processed = recovered.processed
         state.base_inspected = recovered.inspected
         state.base_no_answer_synced = recovered.no_answer_synced
+        if state.max_inspected <= 0:
+            state.max_inspected = _effective_max_inspected(state.target, 0)
         self._progress = recovered
         remaining = max(0, state.target - recovered.created)
         if state.target > 0 and remaining == 0:
@@ -1231,6 +1266,20 @@ class RemoteController:
             state.phase = "finalizing"
             self._save_state(state)
             return
+        remaining_inspected = max(0, state.max_inspected - recovered.inspected)
+        if remaining_inspected == 0:
+            state.result = self._result_dict(
+                state,
+                status="ЗАВЕРШЕНО",
+                message=(
+                    f"Достигнут предел просмотра {state.max_inspected}; "
+                    f"создано лидов {recovered.created}."
+                ),
+                progress=recovered,
+            )
+            state.phase = "finalizing"
+            self._save_state(state)
+            return
         state.phase = "running"
         self._save_state(state)
         self._worker_result = None
@@ -1238,13 +1287,13 @@ class RemoteController:
             self._phase_message = "Рабочий процесс запускается."
         self._worker = threading.Thread(
             target=self._run_worker,
-            args=(replace(state), remaining),
+            args=(replace(state), remaining, remaining_inspected),
             name=f"avito-crm-{state.command_id}",
             daemon=True,
         )
         self._worker.start()
 
-    def _run_worker(self, state: CommandState, remaining: int) -> None:
+    def _run_worker(self, state: CommandState, remaining: int, remaining_inspected: int) -> None:
         try:
             # The controller is a long-running scheduled task.  Reload the
             # local .env for every accepted command so notification recipients,
@@ -1268,6 +1317,7 @@ class RemoteController:
                     include_manual=state.retry_manual,
                 ).run(
                     remaining,
+                    max_inspected=remaining_inspected,
                     run_id=state.command_id,
                     progress=lambda current, row_id: self._progress_callback(
                         state, current, row_id
@@ -1409,6 +1459,7 @@ class RemoteController:
         )
         message = (
             goal_message + f"открыто номеров {progress.captured}; "
+            f"просмотрено {progress.inspected} из предела {state.max_inspected}; "
             f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
             f"статус «Недозвон» {progress.no_answer_synced}; "
             f"не открыто после попыток {progress.phone_failed}; "
@@ -1444,6 +1495,7 @@ class RemoteController:
             "inspected": progress.inspected,
             "no_answer_synced": progress.no_answer_synced,
             "crm_sync_errors": progress.crm_sync_errors,
+            "max_inspected": state.max_inspected,
             "command_id": state.command_id,
         }
 
@@ -1589,6 +1641,15 @@ def _parse_panel_limit(value: object) -> int:
 
 def _target_label(target: int) -> str:
     return "все" if target == 0 else str(target)
+
+
+def _effective_max_inspected(target: int, requested: int) -> int:
+    """Resolve the panel's safe automatic inspection canary."""
+    if requested > 0:
+        return requested
+    if target > 0:
+        return max(1, target * 2)
+    return 50
 
 
 def _new_command_id() -> str:
