@@ -25,6 +25,7 @@ from avito_crm.errors import (
     InactiveListingError,
     ManualActionRequired,
     NotificationError,
+    OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
@@ -177,6 +178,7 @@ class AvitoBrowser:
         self.context: BrowserContext | None = None
         self.page: Page | None = None
         self.next_long_break_at = 0.0
+        self.captchas_solved = 0
 
     def __enter__(self) -> AvitoBrowser:
         self.playwright = sync_playwright().start()
@@ -593,12 +595,16 @@ class AvitoBrowser:
                 f"Avito запросил {reason}; запустите в видимом режиме и завершите действие вручную"
             )
         LOGGER.warning(
-            "Avito запросил %s. Завершите действие в открытом браузере; ожидание до %.0f сек.",
+            "Avito запросил %s. Завершите действие в открытом браузере; "
+            "программа ждёт до решения или STOP.",
             reason,
-            self.settings.avito_manual_timeout,
         )
         started_at = time.monotonic()
-        deadline = started_at + self.settings.avito_manual_timeout
+        deadline = (
+            started_at + self.settings.avito_manual_timeout
+            if self.settings.avito_manual_timeout > 0
+            else None
+        )
         reminders = tuple(minutes * 60 for minutes in self.settings.telegram_reminder_minutes)
         reminder_index = 0
         backup_alerted = False
@@ -609,7 +615,7 @@ class AvitoBrowser:
             wait_seconds=self.settings.avito_manual_timeout,
         )
 
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             now = time.monotonic()
             elapsed = now - started_at
             while reminder_index < len(reminders) and elapsed >= reminders[reminder_index]:
@@ -631,7 +637,7 @@ class AvitoBrowser:
                 )
                 reminder_index += 1
 
-            next_event = deadline
+            next_event = deadline or (now + 3.0)
             if reminder_index < len(reminders):
                 next_event = min(next_event, started_at + reminders[reminder_index])
             time.sleep(max(0.1, min(3.0, next_event - now)))
@@ -641,9 +647,10 @@ class AvitoBrowser:
                     url=url,
                     include_backup=backup_alerted,
                 )
-                raise ManualActionRequired("Ожидание ручной проверки Avito остановлено оператором")
+                raise OperatorStopRequested("Ожидание ручной проверки Avito остановлено оператором")
             if not self._manual_action_reason(page):
                 LOGGER.info("Ручное действие завершено")
+                self.captchas_solved += 1
                 return True
         self._notify_safely(
             "send_captcha_timeout",

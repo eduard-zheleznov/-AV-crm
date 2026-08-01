@@ -49,3 +49,25 @@ def test_browser_channel_rejects_unknown_playwright_channel(settings):
 
     with pytest.raises(ConfigurationError, match="AVITO_BROWSER_CHANNEL"):
         configured.validate()
+
+
+def test_extension_driver_requires_a_long_local_token(settings):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="too-short",
+    )
+
+    with pytest.raises(ConfigurationError, match="AVITO_EXTENSION_TOKEN"):
+        configured.validate()
+
+
+def test_extension_driver_accepts_loopback_configuration(settings):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+        avito_extension_port=8765,
+    )
+
+    configured.validate()

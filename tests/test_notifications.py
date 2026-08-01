@@ -524,7 +524,9 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
     assert subject == "[Avito CRM] Запуск завершён"
     assert "Обработано ссылок: 8" in body
     assert "Неактивных объявлений: 2" in body
-    assert "Номер не открыт после всех попыток: 1" in body
+    assert "Номеров открыто: 4 (50% от ссылок)" in body
+    assert "Лидов создано: 3 (да — 75% от открытых)" in body
+    assert "Другое: 1 (25%)" in body
     assert "secret-id" not in body
     assert "очередь продолжает работу" not in body
 
@@ -545,8 +547,7 @@ def test_crm_sync_warning_does_not_report_a_technical_processing_error():
     )
 
     assert subject == "[Avito CRM] Завершено с предупреждениями"
-    assert "Технических ошибок: 0" in body
-    assert "Предупреждений синхронизации CRM: 3" in body
+    assert "технических ошибок — 0; предупреждений CRM — 3" in body
 
 
 def test_completion_delivery_can_target_backup_without_changing_captcha_routing(

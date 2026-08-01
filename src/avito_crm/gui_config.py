@@ -176,16 +176,6 @@ def parse_max_recipient_ids(value: str) -> tuple[str, ...]:
         raise ValueError(str(exc)) from exc
 
 
-def parse_captcha_wait_hours(value: str) -> float:
-    try:
-        hours = float(value.strip().replace(",", "."))
-    except ValueError as exc:
-        raise ValueError("Время ожидания капчи должно быть числом часов") from exc
-    if not 1 <= hours <= 168:
-        raise ValueError("Время ожидания капчи должно быть от 1 до 168 часов")
-    return hours
-
-
 def _single_line(value: str) -> str:
     result = str(value)
     if "\r" in result or "\n" in result:

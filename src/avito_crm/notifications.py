@@ -17,6 +17,7 @@ import httpx
 from avito_crm.config import Settings
 from avito_crm.errors import ConfigurationError, NotificationError
 from avito_crm.models import RunSummary
+from avito_crm.reporting import format_run_report
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
@@ -964,8 +965,8 @@ def _run_completion_message(
         headline = "⚠️ Запуск завершён с техническими ошибками"
         subject = "[Avito CRM] Завершено с техническими ошибками"
     elif summary.manual_required:
-        headline = "⏸ Запуск остановлен: требуется ручное действие"
-        subject = "[Avito CRM] Требуется ручное действие"
+        headline = "⏸ Запуск завершён: капча не решена"
+        subject = "[Avito CRM] Ожидает решения капчи"
     elif "останов" in reason_lower:
         headline = "⏹ Запуск остановлен оператором"
         subject = "[Avito CRM] Запуск остановлен"
@@ -976,33 +977,8 @@ def _run_completion_message(
         headline = "✅ Запуск Avito → CRM завершён"
         subject = "[Avito CRM] Запуск завершён"
 
-    source_kind = source_name.split(":", 1)[0] or "очередь"
-    lines = (
-        headline,
-        f"Компьютер: {computer_name}",
-        f"Run ID: {summary.run_id}",
-        f"Источник: {source_kind}; режим: {mode}; CRM: {'да' if live else 'нет'}",
-        "",
-        f"Обработано ссылок: {summary.processed}",
-        f"Всего попыток: {summary.inspected}; кругов: {summary.rounds}",
-        f"Номеров открыто: {summary.captured}",
-        f"Лидов создано: {summary.created}",
-        f"Повторных лидов: {summary.repeat_created}",
-        f"Шагов воронки обновлено: {summary.stage_synced}",
-        f"Строк со статусом «Недозвон»: {summary.no_answer_synced}",
-        f"Повторное открытие исчерпано: {summary.repeat_exhausted}",
-        f"Дубликатов: {summary.duplicates}",
-        f"Неактивных объявлений: {summary.inactive}",
-        f"Без кнопки телефона: {summary.unavailable}",
-        f"Номер не открыт после всех попыток: {summary.phone_failed}",
-        f"Повторных попыток: {summary.retries}",
-        f"Некорректных ссылок: {summary.invalid}",
-        f"Технических ошибок: {summary.errors}",
-        f"Предупреждений синхронизации CRM: {summary.crm_sync_errors}",
-        f"Требуют ручного действия: {summary.manual_required}",
-        f"Итог: {reason}",
-    )
-    return subject, "\n".join(lines)
+    del computer_name, source_name, mode, live
+    return subject, f"{headline}\n\n{format_run_report(summary, reason=reason)}"
 
 
 def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -1058,6 +1034,8 @@ def _max_error_description(payload: object) -> str:
 
 
 def _format_duration(seconds: float) -> str:
+    if seconds <= 0:
+        return "решения капчи или остановки оператором"
     minutes = max(0, round(seconds / 60))
     hours, remaining = divmod(minutes, 60)
     if hours and remaining:

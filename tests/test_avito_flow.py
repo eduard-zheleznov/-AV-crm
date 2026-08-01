@@ -333,9 +333,9 @@ def test_stop_request_interrupts_long_captcha_wait(settings, monkeypatch):
     monkeypatch.setattr(browser, "_save_diagnostic", lambda *_args: None)
     monkeypatch.setattr(browser, "_manual_action_reason", lambda _page: "ручную проверку")
 
-    from avito_crm.errors import ManualActionRequired
+    from avito_crm.errors import OperatorStopRequested
 
-    with pytest.raises(ManualActionRequired, match="остановлено оператором"):
+    with pytest.raises(OperatorStopRequested, match="остановлено оператором"):
         browser._wait_for_manual_action(object(), "https://www.avito.ru/x")
 
     assert [name for name, _kwargs in notifier.events] == ["detected", "stopped"]

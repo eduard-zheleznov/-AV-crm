@@ -38,6 +38,10 @@ class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 
 
+class OperatorStopRequested(AppError):
+    """The operator stopped the current browser operation without failing its row."""
+
+
 class NotificationError(AppError):
     """A notification provider rejected or failed to deliver a message."""
 

@@ -47,6 +47,7 @@ class StateStore:
                 phone_failed INTEGER NOT NULL DEFAULT 0,
                 retries INTEGER NOT NULL DEFAULT 0,
                 manual_required INTEGER NOT NULL DEFAULT 0,
+                captchas_solved INTEGER NOT NULL DEFAULT 0,
                 inspected INTEGER NOT NULL DEFAULT 0,
                 processed INTEGER NOT NULL DEFAULT 0,
                 rounds INTEGER NOT NULL DEFAULT 0,
@@ -85,6 +86,7 @@ class StateStore:
             "unavailable": "INTEGER NOT NULL DEFAULT 0",
             "phone_failed": "INTEGER NOT NULL DEFAULT 0",
             "retries": "INTEGER NOT NULL DEFAULT 0",
+            "captchas_solved": "INTEGER NOT NULL DEFAULT 0",
             "processed": "INTEGER NOT NULL DEFAULT 0",
             "rounds": "INTEGER NOT NULL DEFAULT 0",
             "stage_synced": "INTEGER NOT NULL DEFAULT 0",
@@ -214,7 +216,8 @@ class StateStore:
                 duplicates=duplicates + ?, errors=errors + ?, invalid=invalid + ?,
                 inactive=inactive + ?, unavailable=unavailable + ?,
                 phone_failed=phone_failed + ?, retries=retries + ?,
-                manual_required=manual_required + ?, inspected=inspected + ?,
+                manual_required=manual_required + ?, captchas_solved=captchas_solved + ?,
+                inspected=inspected + ?,
                 processed=processed + ?, rounds=rounds + ?, stopped_reason=?
                 , stage_synced=stage_synced + ?, no_answer_synced=no_answer_synced + ?,
                 repeat_created=repeat_created + ?,
@@ -233,6 +236,7 @@ class StateStore:
                 summary.phone_failed,
                 summary.retries,
                 summary.manual_required,
+                summary.captchas_solved,
                 summary.inspected,
                 summary.processed,
                 summary.rounds,
@@ -250,6 +254,12 @@ class StateStore:
     def latest_run(self) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM runs ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_run(self, run_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM runs WHERE run_id = ?", (run_id,)
         ).fetchone()
         return dict(row) if row else None
 

@@ -19,6 +19,7 @@ from avito_crm.errors import ConfigurationError, InstanceAlreadyRunning, SourceE
 from avito_crm.models import ItemStatus, RunSummary
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import build_queue_source
+from avito_crm.reporting import format_run_report
 from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 
 LOGGER = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ LEGACY_HISTORY_HEADERS = (
     "Сообщение",
     "Компьютер",
 )
-HISTORY_HEADERS = (
+PREVIOUS_HISTORY_HEADERS = (
     "Команда ID",
     "Лимит",
     "Лист очереди",
@@ -66,6 +67,40 @@ HISTORY_HEADERS = (
     "Дата завершения",
     "Строк со статусом «Недозвон»",
     "Предупреждений синхронизации CRM",
+    "Предел просмотра",
+)
+CAPTCHA_RETRY_HISTORY_HEADERS = (
+    "Команда ID",
+    "Лимит",
+    "Лист очереди",
+    "Вернуть после решённой капчи",
+    "Запущено",
+    "Завершено",
+    "Статус",
+    "Создано лидов",
+    "Дубликатов",
+    "Технических ошибок",
+    "Сообщение",
+    "Компьютер",
+    "Обработано ссылок",
+    "Всего попыток",
+    "Номеров открыто",
+    "Неактивных",
+    "Без кнопки телефона",
+    "Не открыто после попыток",
+    "Ожидает решения капчи",
+    "Повторных попыток",
+    "Некорректных ссылок",
+    "Дата завершения",
+    "Строк со статусом «Недозвон»",
+    "Предупреждений синхронизации CRM",
+    "Предел просмотра",
+    "Решено капч",
+)
+HISTORY_HEADERS = (
+    *CAPTCHA_RETRY_HISTORY_HEADERS[:3],
+    "Режим капчи",
+    *CAPTCHA_RETRY_HISTORY_HEADERS[4:],
 )
 
 
@@ -80,6 +115,7 @@ class PanelCommand:
     limit: int
     worksheet: str
     retry_manual: bool
+    max_inspected: int = 0
 
 
 @dataclass(slots=True)
@@ -90,6 +126,7 @@ class CommandState:
     retry_manual: bool
     phase: str
     started_at: str
+    max_inspected: int = 0
     history_row: int = 0
     stop_requested: bool = False
     base_created: int = 0
@@ -102,6 +139,7 @@ class CommandState:
     base_phone_failed: int = 0
     base_retries: int = 0
     base_manual_required: int = 0
+    base_captchas_solved: int = 0
     base_processed: int = 0
     base_inspected: int = 0
     base_no_answer_synced: int = 0
@@ -125,6 +163,7 @@ class ProgressSnapshot:
     phone_failed: int = 0
     retries: int = 0
     manual_required: int = 0
+    captchas_solved: int = 0
     processed: int = 0
     inspected: int = 0
     no_answer_synced: int = 0
@@ -197,8 +236,14 @@ class GoogleControlPanel:
             history_headers = tuple(history_values[0]) if history_values else ()
             if history_headers and history_headers not in {
                 LEGACY_HISTORY_HEADERS,
+                PREVIOUS_HISTORY_HEADERS,
+                HISTORY_HEADERS[:-3],
                 HISTORY_HEADERS[:-2],
                 HISTORY_HEADERS[:-1],
+                CAPTCHA_RETRY_HISTORY_HEADERS[:-3],
+                CAPTCHA_RETRY_HISTORY_HEADERS[:-2],
+                CAPTCHA_RETRY_HISTORY_HEADERS[:-1],
+                CAPTCHA_RETRY_HISTORY_HEADERS,
                 HISTORY_HEADERS,
             }:
                 raise SourceError(
@@ -240,13 +285,16 @@ class GoogleControlPanel:
             values = control.get("A1:F12")
             raw_limit = self._cell(values, 6, 2)
             limit = _parse_panel_limit(raw_limit)
+            raw_max_inspected = self._cell(values, 9, 2)
+            max_inspected = _parse_panel_limit(raw_max_inspected)
             worksheet = self._cell(values, 7, 2).strip() or self.settings.google_worksheet
             return PanelCommand(
                 start=_checked(self._cell(values, 4, 2)),
                 stop=_checked(self._cell(values, 5, 2)),
                 limit=limit,
                 worksheet=worksheet,
-                retry_manual=_checked(self._cell(values, 8, 2)),
+                retry_manual=False,
+                max_inspected=max_inspected,
             )
         except (ConfigurationError, SourceError):
             raise
@@ -257,12 +305,15 @@ class GoogleControlPanel:
         self._batch_control(
             {
                 "B4": False,
+                "B8": "",
                 "E4": "ПРИНЯТО",
                 "E5": state.command_id,
                 "E6": f"0 / {_target_label(state.target)}",
                 "E7": state.started_at,
                 "E8": utc_now(),
-                "E9": "Команда зафиксирована; запускаем рабочий процесс.",
+                "E9": (
+                    f"Команда зафиксирована; запускаем. Предел просмотра: {state.max_inspected}."
+                ),
                 "E11": _computer_name(self.settings),
                 "E12": __version__,
             }
@@ -309,7 +360,7 @@ class GoogleControlPanel:
                 "E5": state.command_id,
                 "E6": (f"{int(result.get('created', 0))} / {_target_label(state.target)}"),
                 "E8": utc_now(),
-                "E9": str(result.get("message", ""))[:500],
+                "E9": str(result.get("message", ""))[:1000],
                 "E11": _computer_name(self.settings),
                 "E12": __version__,
             }
@@ -335,7 +386,7 @@ class GoogleControlPanel:
                         state.command_id,
                         state.target,
                         state.worksheet,
-                        "да" if state.retry_manual else "нет",
+                        "автоматически",
                         state.started_at,
                         "",
                         "ПРИНЯТО",
@@ -356,9 +407,11 @@ class GoogleControlPanel:
                         "",
                         0,
                         0,
+                        state.max_inspected,
+                        0,
                     ]
                 ],
-                f"A{row_number}:X{row_number}",
+                f"A{row_number}:Z{row_number}",
                 value_input_option="RAW",
             )
             return row_number
@@ -379,7 +432,7 @@ class GoogleControlPanel:
                         int(result.get("created", 0)),
                         int(result.get("duplicates", 0)),
                         int(result.get("errors", 0)),
-                        str(result.get("message", ""))[:500],
+                        str(result.get("message", ""))[:1000],
                         _computer_name(self.settings),
                         int(result.get("processed", 0)),
                         int(result.get("inspected", 0)),
@@ -393,9 +446,11 @@ class GoogleControlPanel:
                         str(result.get("finished_at", utc_now()))[:10],
                         int(result.get("no_answer_synced", 0)),
                         int(result.get("crm_sync_errors", 0)),
+                        state.max_inspected,
+                        int(result.get("captchas_solved", 0)),
                     ]
                 ],
-                f"F{state.history_row}:X{state.history_row}",
+                f"F{state.history_row}:Z{state.history_row}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -424,34 +479,29 @@ class GoogleControlPanel:
             if summary.errors:
                 status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
             elif summary.manual_required:
-                status = "ТРЕБУЕТ ВНИМАНИЯ"
+                status = "ОЖИДАЕТ РЕШЕНИЯ КАПЧИ"
             elif "останов" in summary.stopped_reason.casefold():
                 status = "ОСТАНОВЛЕНО"
+            elif summary.stopped_reason.casefold().startswith("отложено по времени"):
+                status = "ОТЛОЖЕНО ПО ВРЕМЕНИ"
             elif summary.crm_sync_errors:
                 status = "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
             else:
                 status = "ЗАВЕРШЕНО"
             finished_at = utc_now()
-            message = (
-                f"Создано {summary.created}; открыто номеров {summary.captured}; "
-                f"неактивных {summary.inactive}; без кнопки {summary.unavailable}; "
-                f"не открыто после попыток {summary.phone_failed}; "
-                f"технических ошибок {summary.errors}; "
-                f"предупреждений синхронизации CRM {summary.crm_sync_errors}. "
-                f"Остановка: {summary.stopped_reason or 'не указана'}."
-            )
+            message = format_run_report(summary, reason=summary.stopped_reason)
             row = [
                 summary.run_id,
                 summary.requested,
                 source_label[:145],
-                "да" if retry_manual else "нет",
+                "автоматически",
                 finished_at,
                 finished_at,
                 status,
                 summary.created,
                 summary.duplicates,
                 summary.errors,
-                message[:500],
+                message[:1000],
                 _computer_name(self.settings),
                 summary.processed,
                 summary.inspected,
@@ -465,10 +515,12 @@ class GoogleControlPanel:
                 finished_at[:10],
                 summary.no_answer_synced,
                 summary.crm_sync_errors,
+                "",
+                summary.captchas_solved,
             ]
             history.update(
                 [row],
-                f"A{row_number}:X{row_number}",
+                f"A{row_number}:Z{row_number}",
                 value_input_option="RAW",
             )
             self.refresh_analytics(force=True)
@@ -551,7 +603,7 @@ class GoogleControlPanel:
         matrix: list[list[Any]] = [[""] * 6 for _ in range(12)]
         matrix[0][0] = CONTROL_MARKER
         matrix[1][0] = (
-            "1. Добавьте ссылки в лист очереди.  2. Укажите цель (0 = все строки).  "
+            "1. Добавьте ссылки.  2. Укажите цель и предел просмотра.  "
             "3. Поставьте галочку «ЗАПУСТИТЬ В CRM»."
         )
         matrix[3] = ["ЗАПУСТИТЬ В CRM", False, "", "Статус", "ГОТОВ", ""]
@@ -559,16 +611,27 @@ class GoogleControlPanel:
         matrix[5] = ["Цель по новым лидам (0 = все)", 0, "", "Прогресс", "0 / все", ""]
         matrix[6] = ["Лист очереди", self.settings.google_worksheet, "", "Запущено", "", ""]
         matrix[7] = [
-            "Повторить строки после ручной проверки",
-            False,
+            "Капча: ждём и продолжаем автоматически",
+            "",
             "",
             "Последняя связь с компьютером",
             utc_now(),
             "",
         ]
-        matrix[8] = ["", "", "", "Сообщение", "Пульт ожидает команду.", ""]
+        matrix[8] = [
+            "Предел просмотра (0 = авто)",
+            0,
+            "",
+            "Сообщение",
+            "Пульт ожидает команду.",
+            "",
+        ]
         matrix[10] = [
-            "Капча не решается автоматически. По уведомлению нужно зайти на удалённый ПК.",
+            (
+                "Если Avito покажет капчу, программа будет ждать её решения. "
+                "После решения та же строка продолжится сама; "
+                "для отмены используйте обычную галочку «Остановить»."
+            ),
             "",
             "",
             "Компьютер",
@@ -582,21 +645,44 @@ class GoogleControlPanel:
     def _upgrade_control_labels(self) -> None:
         control = self._require_control()
         with suppress(Exception):
+            updates = [
+                {
+                    "range": "A6",
+                    "values": [["Цель по новым лидам (0 = все)"]],
+                },
+                {
+                    "range": "A8",
+                    "values": [["Капча: ждём и продолжаем автоматически"]],
+                },
+                {
+                    "range": "B8",
+                    "values": [[""]],
+                },
+                {
+                    "range": "D8",
+                    "values": [["Последняя связь с компьютером"]],
+                },
+                {
+                    "range": "A9",
+                    "values": [["Предел просмотра (0 = авто)"]],
+                },
+                {
+                    "range": "A11",
+                    "values": [
+                        [
+                            (
+                                "При капче программа ждёт без ограничения по времени. "
+                                "После решения та же строка продолжится автоматически. "
+                                "Для отмены нажмите «Остановить»."
+                            )
+                        ]
+                    ],
+                },
+            ]
+            if not self._cell(control.get("B9"), 1, 1).strip():
+                updates.append({"range": "B9", "values": [[0]]})
             control.batch_update(
-                [
-                    {
-                        "range": "A6",
-                        "values": [["Цель по новым лидам (0 = все)"]],
-                    },
-                    {
-                        "range": "A8",
-                        "values": [["Повторить строки после ручной проверки"]],
-                    },
-                    {
-                        "range": "D8",
-                        "values": [["Последняя связь с компьютером"]],
-                    },
-                ],
+                updates,
                 value_input_option="RAW",
             )
 
@@ -891,14 +977,14 @@ class GoogleControlPanel:
                 },
             )
             control.format(
-                "A4:B8",
+                "A4:B9",
                 {"backgroundColor": {"red": 0.95, "green": 0.97, "blue": 1.0}},
             )
             control.format(
                 "D4:F12",
                 {"backgroundColor": {"red": 0.97, "green": 0.98, "blue": 0.99}},
             )
-            control.format("A4:A8", {"textFormat": {"bold": True}})
+            control.format("A4:A9", {"textFormat": {"bold": True}})
             control.format("D4:D12", {"textFormat": {"bold": True}})
             control.format("B4:B5", {"backgroundColor": {"red": 0.86, "green": 0.94, "blue": 1.0}})
             control.format("A1:F12", {"verticalAlignment": "MIDDLE", "wrapStrategy": "WRAP"})
@@ -963,10 +1049,10 @@ class GoogleControlPanel:
             (2, 3, 18),
             (3, 8, 38),
             (8, 10, 34),
-            (10, 12, 38),
+            (10, 12, 54),
         ):
             requests.append(_row_height_request(sheet_id, start, end, size))
-        for row_index in (3, 4, 7):
+        for row_index in (3, 4):
             requests.append(
                 {
                     "setDataValidation": {
@@ -990,23 +1076,40 @@ class GoogleControlPanel:
                 "setDataValidation": {
                     "range": {
                         "sheetId": sheet_id,
-                        "startRowIndex": 5,
-                        "endRowIndex": 6,
+                        "startRowIndex": 7,
+                        "endRowIndex": 8,
                         "startColumnIndex": 1,
                         "endColumnIndex": 2,
-                    },
-                    "rule": {
-                        "condition": {
-                            "type": "NUMBER_GREATER_THAN_EQ",
-                            "values": [{"userEnteredValue": "0"}],
-                        },
-                        "inputMessage": "Целое число от 0; 0 означает обработать все строки",
-                        "strict": True,
-                        "showCustomUi": True,
-                    },
+                    }
                 }
             }
         )
+        for row_index in (5, 8):
+            requests.append(
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": row_index,
+                            "endRowIndex": row_index + 1,
+                            "startColumnIndex": 1,
+                            "endColumnIndex": 2,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "NUMBER_GREATER_THAN_EQ",
+                                "values": [{"userEnteredValue": "0"}],
+                            },
+                            "inputMessage": (
+                                "Целое число от 0; для предела 0 означает "
+                                "автоматический безопасный предел"
+                            ),
+                            "strict": True,
+                            "showCustomUi": True,
+                        },
+                    }
+                }
+            )
         widths = ((0, 1, 280), (1, 2, 150), (2, 3, 30), (3, 4, 150), (4, 6, 220))
         for start, end, size in widths:
             requests.append(_column_width_request(sheet_id, start, end, size))
@@ -1173,6 +1276,7 @@ class RemoteController:
             retry_manual=command.retry_manual,
             phase="claiming",
             started_at=utc_now(),
+            max_inspected=_effective_max_inspected(command.limit, command.max_inspected),
         )
         self._state = state
         self._save_state(state)
@@ -1182,6 +1286,9 @@ class RemoteController:
         if command.limit < 0:
             self.panel.reject_start("Цель должна быть целым числом от 0; 0 означает «все».")
             raise ConfigurationError("Некорректный лимит удалённой команды")
+        if command.max_inspected < 0:
+            self.panel.reject_start("Предел просмотра должен быть целым числом от 0.")
+            raise ConfigurationError("Некорректный предел просмотра")
         reserved = {
             self.settings.google_control_worksheet.casefold(),
             self.settings.google_history_worksheet.casefold(),
@@ -1205,7 +1312,10 @@ class RemoteController:
         if state.history_row < 2:
             state.history_row = self.panel.append_history(state)
             self._save_state(state)
-        recovered = self.panel.count_command(state.worksheet, state.command_id)
+        recovered = replace(
+            self.panel.count_command(state.worksheet, state.command_id),
+            captchas_solved=self._recovered_captchas_solved(state.command_id),
+        )
         state.base_created = recovered.created
         state.base_captured = recovered.captured
         state.base_duplicates = recovered.duplicates
@@ -1216,16 +1326,36 @@ class RemoteController:
         state.base_phone_failed = recovered.phone_failed
         state.base_retries = recovered.retries
         state.base_manual_required = recovered.manual_required
+        state.base_captchas_solved = recovered.captchas_solved
         state.base_processed = recovered.processed
         state.base_inspected = recovered.inspected
         state.base_no_answer_synced = recovered.no_answer_synced
+        if state.max_inspected <= 0:
+            state.max_inspected = _effective_max_inspected(state.target, 0)
         self._progress = recovered
         remaining = max(0, state.target - recovered.created)
         if state.target > 0 and remaining == 0:
             state.result = self._result_dict(
                 state,
                 status="ЗАВЕРШЕНО",
-                message="Лимит уже достигнут; повторный запуск не потребовался.",
+                message=format_run_report(
+                    recovered,
+                    reason="Лимит уже достигнут; повторный запуск не потребовался",
+                ),
+                progress=recovered,
+            )
+            state.phase = "finalizing"
+            self._save_state(state)
+            return
+        remaining_inspected = max(0, state.max_inspected - recovered.inspected)
+        if remaining_inspected == 0:
+            state.result = self._result_dict(
+                state,
+                status="ЗАВЕРШЕНО",
+                message=format_run_report(
+                    recovered,
+                    reason=f"Достигнут предел просмотра {state.max_inspected}",
+                ),
                 progress=recovered,
             )
             state.phase = "finalizing"
@@ -1238,13 +1368,13 @@ class RemoteController:
             self._phase_message = "Рабочий процесс запускается."
         self._worker = threading.Thread(
             target=self._run_worker,
-            args=(replace(state), remaining),
+            args=(replace(state), remaining, remaining_inspected),
             name=f"avito-crm-{state.command_id}",
             daemon=True,
         )
         self._worker.start()
 
-    def _run_worker(self, state: CommandState, remaining: int) -> None:
+    def _run_worker(self, state: CommandState, remaining: int, remaining_inspected: int) -> None:
         try:
             # The controller is a long-running scheduled task.  Reload the
             # local .env for every accepted command so notification recipients,
@@ -1265,9 +1395,10 @@ class RemoteController:
                     ),
                     mode="full",
                     live=True,
-                    include_manual=state.retry_manual,
+                    include_manual=False,
                 ).run(
                     remaining,
+                    max_inspected=remaining_inspected,
                     run_id=state.command_id,
                     progress=lambda current, row_id: self._progress_callback(
                         state, current, row_id
@@ -1287,6 +1418,16 @@ class RemoteController:
 
     def _load_worker_settings(self) -> Settings:
         return Settings.load(self.settings.root_dir, refresh_env=True)
+
+    def _recovered_captchas_solved(self, command_id: str) -> int:
+        """Recover the operational CAPTCHA counter after a controller restart."""
+        try:
+            with StateStore(self.settings.state_db) as store:
+                run = store.get_run(command_id)
+            return max(0, int((run or {}).get("captchas_solved", 0)))
+        except Exception as exc:
+            LOGGER.warning("Не удалось восстановить счётчик капч: %s", exc)
+            return 0
 
     def _source_version_changed(self) -> bool:
         """Let Windows reload Python modules once an update is safely idle."""
@@ -1311,6 +1452,7 @@ class RemoteController:
                 phone_failed=state.base_phone_failed + summary.phone_failed,
                 retries=state.base_retries + summary.retries,
                 manual_required=state.base_manual_required + summary.manual_required,
+                captchas_solved=state.base_captchas_solved + summary.captchas_solved,
                 processed=state.base_processed + summary.processed,
                 inspected=state.base_inspected + summary.inspected,
                 no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
@@ -1346,10 +1488,11 @@ class RemoteController:
             self._save_state(self._state)
             return
         if result.kind == "error":
+            reason = f"Ошибка запуска: {result.message}"
             self._state.result = self._result_dict(
                 self._state,
                 status="ОШИБКА",
-                message=result.message,
+                message=format_run_report(self._progress, reason=reason),
                 progress=self._progress,
             )
         else:
@@ -1378,12 +1521,15 @@ class RemoteController:
             self.panel.reject_start("Команда STOP передана; активного запуска пульта нет.")
 
     def _prepare_stopped_result(self, state: CommandState) -> None:
-        progress = self.panel.count_command(state.worksheet, state.command_id)
+        progress = replace(
+            self.panel.count_command(state.worksheet, state.command_id),
+            captchas_solved=self._recovered_captchas_solved(state.command_id),
+        )
         self._progress = progress
         state.result = self._result_dict(
             state,
             status="ОСТАНОВЛЕНО",
-            message="Запуск остановлен по команде оператора.",
+            message=format_run_report(progress, reason="Запуск остановлен по команде оператора"),
             progress=progress,
         )
         state.phase = "finalizing"
@@ -1394,28 +1540,17 @@ class RemoteController:
         self._progress = progress
         if state.stop_requested or "останов" in summary.stopped_reason.casefold():
             status = "ОСТАНОВЛЕНО"
+        elif summary.stopped_reason.casefold().startswith("отложено по времени"):
+            status = "ОТЛОЖЕНО ПО ВРЕМЕНИ"
         elif progress.manual_required:
-            status = "ТРЕБУЕТ ВНИМАНИЯ"
+            status = "ОЖИДАЕТ РЕШЕНИЯ КАПЧИ"
         elif progress.errors:
             status = "ЗАВЕРШЕНО С ТЕХНИЧЕСКИМИ ОШИБКАМИ"
         elif progress.crm_sync_errors:
             status = "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
         else:
             status = "ЗАВЕРШЕНО"
-        goal_message = (
-            f"Создано {progress.created}; обработаны все доступные строки; "
-            if state.target == 0
-            else f"Создано {progress.created} из цели {state.target}; "
-        )
-        message = (
-            goal_message + f"открыто номеров {progress.captured}; "
-            f"неактивных {progress.inactive}; без кнопки {progress.unavailable}; "
-            f"статус «Недозвон» {progress.no_answer_synced}; "
-            f"не открыто после попыток {progress.phone_failed}; "
-            f"технических ошибок {progress.errors}; "
-            f"предупреждений синхронизации CRM {progress.crm_sync_errors}. "
-            f"Остановка: {summary.stopped_reason or 'не указана'}."
-        )
+        message = format_run_report(progress, reason=summary.stopped_reason)
         return self._result_dict(state, status=status, message=message, progress=progress)
 
     @staticmethod
@@ -1440,10 +1575,12 @@ class RemoteController:
             "phone_failed": progress.phone_failed,
             "retries": progress.retries,
             "manual_required": progress.manual_required,
+            "captchas_solved": progress.captchas_solved,
             "processed": progress.processed,
             "inspected": progress.inspected,
             "no_answer_synced": progress.no_answer_synced,
             "crm_sync_errors": progress.crm_sync_errors,
+            "max_inspected": state.max_inspected,
             "command_id": state.command_id,
         }
 
@@ -1591,6 +1728,15 @@ def _target_label(target: int) -> str:
     return "все" if target == 0 else str(target)
 
 
+def _effective_max_inspected(target: int, requested: int) -> int:
+    """Resolve the panel's safe automatic inspection canary."""
+    if requested > 0:
+        return requested
+    if target > 0:
+        return max(1, target * 2)
+    return 50
+
+
 def _new_command_id() -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
     return f"{stamp}-{uuid.uuid4().hex[:6]}"
@@ -1688,6 +1834,7 @@ def _status_conditional_requests(
         ("TEXT_EQ", "ЗАВЕРШЕНО", (0.86, 0.96, 0.9), (0.08, 0.42, 0.2)),
         ("TEXT_EQ", "РАБОТАЕТ", (0.86, 0.92, 1.0), (0.08, 0.31, 0.72)),
         ("TEXT_EQ", "ПРИНЯТО", (0.86, 0.92, 1.0), (0.08, 0.31, 0.72)),
+        ("TEXT_CONTAINS", "ОТЛОЖЕНО", (1.0, 0.95, 0.8), (0.55, 0.32, 0.03)),
         ("TEXT_CONTAINS", "ОШИБ", (1.0, 0.9, 0.9), (0.7, 0.1, 0.1)),
         ("TEXT_CONTAINS", "ВНИМАНИЯ", (1.0, 0.95, 0.8), (0.55, 0.32, 0.03)),
         ("TEXT_CONTAINS", "НЕДОСТАТОЧНО", (1.0, 0.95, 0.8), (0.55, 0.32, 0.03)),

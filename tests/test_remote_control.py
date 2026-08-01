@@ -9,8 +9,10 @@ from avito_crm.models import RunSummary
 from avito_crm.remote_control import (
     ANALYTICS_MARKER,
     ANALYTICS_WORKSHEET,
+    CAPTCHA_RETRY_HISTORY_HEADERS,
     HISTORY_HEADERS,
     LEGACY_HISTORY_HEADERS,
+    PREVIOUS_HISTORY_HEADERS,
     CommandState,
     GoogleControlPanel,
     PanelCommand,
@@ -129,7 +131,12 @@ class FakePanel:
     def claim(self, state):
         self.claims.append(state.command_id)
         self.command = PanelCommand(
-            False, self.command.stop, self.command.limit, self.command.worksheet, False
+            False,
+            self.command.stop,
+            self.command.limit,
+            self.command.worksheet,
+            False,
+            self.command.max_inspected,
         )
 
     def append_history(self, _state):
@@ -158,9 +165,11 @@ class InstantController(RemoteController):
     def __init__(self, settings, panel):
         super().__init__(settings, panel)
         self.remaining_values = []
+        self.remaining_inspected_values = []
 
-    def _run_worker(self, state, remaining):
+    def _run_worker(self, state, remaining, remaining_inspected):
         self.remaining_values.append(remaining)
+        self.remaining_inspected_values.append(remaining_inspected)
         summary = RunSummary(
             run_id=state.command_id,
             requested=remaining,
@@ -180,12 +189,35 @@ def test_panel_reads_remote_command_from_fixed_cells(settings):
     values[5][1] = "3"
     values[6][1] = "Новые"
     values[7][1] = "TRUE"
+    values[8][1] = "8"
     panel = GoogleControlPanel(settings, spreadsheet=object(), worksheet_not_found=KeyError)
     panel.control = MatrixSheet(values)
 
     command = panel.read_command()
 
-    assert command == PanelCommand(True, False, 3, "Новые", True)
+    assert command == PanelCommand(True, False, 3, "Новые", False, 8)
+
+
+def test_claim_consumes_start_and_clears_retired_captcha_cell(settings):
+    values = [[""] * 6 for _ in range(12)]
+    values[3][1] = True
+    values[7][1] = True
+    panel = GoogleControlPanel(settings, spreadsheet=object(), worksheet_not_found=KeyError)
+    panel.control = MatrixSheet(values)
+    state = CommandState(
+        command_id="cmd-once",
+        target=1,
+        worksheet="Лист1",
+        retry_manual=True,
+        phase="claiming",
+        started_at="2026-08-01T10:00:00+00:00",
+        max_inspected=2,
+    )
+
+    panel.claim(state)
+
+    assert panel.control.values[3][1] is False
+    assert panel.control.values[7][1] == ""
 
 
 def test_existing_user_control_sheet_is_never_overwritten(settings):
@@ -212,6 +244,9 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
 
     panel.ensure_layout()
 
+    assert control.values[7][0] == "Капча: ждём и продолжаем автоматически"
+    assert control.values[7][1] == ""
+    assert "та же строка продолжится автоматически" in control.values[10][0]
     assert tuple(history.values[0]) == HISTORY_HEADERS
     analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
     assert analytics.values[0][0] == ANALYTICS_MARKER
@@ -219,7 +254,45 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
     assert analytics.values[6][0] == "Запусков"
     assert analytics.values[6][1] == 0
     assert re.fullmatch(r"\d{2}\.\d{2}\.\d{4}", analytics.values[17][0])
-    assert HISTORY_HEADERS[-1] == "Предупреждений синхронизации CRM"
+    assert HISTORY_HEADERS[-2] == "Предел просмотра"
+    assert HISTORY_HEADERS[-1] == "Решено капч"
+    assert HISTORY_HEADERS[3] == "Режим капчи"
+
+
+def test_setup_migrates_exact_history_header_from_previous_release(settings):
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    history = MatrixSheet([list(PREVIOUS_HISTORY_HEADERS), ["old-run"]])
+    spreadsheet = FakeSpreadsheet(
+        {
+            settings.google_control_worksheet: control,
+            settings.google_history_worksheet: history,
+        }
+    )
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel.ensure_layout()
+
+    assert tuple(history.values[0]) == HISTORY_HEADERS
+    assert history.values[1][0] == "old-run"
+
+
+@pytest.mark.parametrize("removed_columns", [1, 2, 3])
+def test_setup_migrates_partial_captcha_history_headers(settings, removed_columns):
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    old_headers = CAPTCHA_RETRY_HISTORY_HEADERS[:-removed_columns]
+    history = MatrixSheet([list(old_headers), ["old-run"]])
+    spreadsheet = FakeSpreadsheet(
+        {
+            settings.google_control_worksheet: control,
+            settings.google_history_worksheet: history,
+        }
+    )
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel.ensure_layout()
+
+    assert tuple(history.values[0]) == HISTORY_HEADERS
+    assert history.values[1][0] == "old-run"
 
 
 def test_history_append_is_idempotent_after_a_crash(settings):
@@ -274,6 +347,7 @@ def test_remote_command_is_claimed_once_and_finished(settings):
     assert len(panel.claims) == 1
     assert panel.history_appends == 1
     assert controller.remaining_values == [2]
+    assert controller.remaining_inspected_values == [4]
     assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
     assert panel.finishes[0]["created"] == 2
     assert not controller.state_path.exists()
@@ -300,7 +374,7 @@ def test_remote_worker_reloads_env_before_each_command(settings, monkeypatch):
 def test_interrupted_command_resumes_only_remaining_target(settings):
     panel = FakePanel(
         PanelCommand(False, False, 3, "Лист1", False),
-        recovered=ProgressSnapshot(created=1, captured=1),
+        recovered=ProgressSnapshot(created=1, captured=1, inspected=1),
     )
     state = CommandState(
         command_id="cmd-resume",
@@ -320,6 +394,7 @@ def test_interrupted_command_resumes_only_remaining_target(settings):
     controller.tick()
 
     assert controller.remaining_values == [2]
+    assert controller.remaining_inspected_values == [5]
     assert panel.history_appends == 0
     assert panel.finishes[0]["created"] == 3
 
@@ -371,7 +446,48 @@ def test_remote_control_accepts_unlimited_target(settings):
     controller.tick()
 
     assert controller.remaining_values == [0]
+    assert controller.remaining_inspected_values == [50]
     assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
+
+
+def test_remote_control_uses_explicit_inspection_limit(settings):
+    panel = FakePanel(PanelCommand(True, False, 5, "Лист1", False, 7))
+    controller = InstantController(settings, panel)
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller.remaining_values == [5]
+    assert controller.remaining_inspected_values == [7]
+    assert panel.finishes[0]["max_inspected"] == 7
+
+
+def test_resumed_remote_command_does_not_exceed_total_inspection_limit(settings):
+    panel = FakePanel(
+        PanelCommand(False, False, 5, "Лист1", False, 10),
+        recovered=ProgressSnapshot(created=2, captured=2, inspected=7),
+    )
+    controller = InstantController(settings, panel)
+    controller._state = CommandState(
+        command_id="cmd-resume-inspection-limit",
+        target=5,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-08-01T10:00:00+00:00",
+        max_inspected=10,
+        history_row=2,
+    )
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller.remaining_values == [3]
+    assert controller.remaining_inspected_values == [3]
 
 
 def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):
@@ -406,7 +522,36 @@ def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):
     )
 
     assert result["status"] == "ЗАВЕРШЕНО"
-    assert "технических ошибок 0" in result["message"]
+    assert "Общая воронка запуска" in result["message"]
+    assert "Итог: Очередь обработана" in result["message"]
+
+
+def test_remote_run_reports_time_deferred_status(settings):
+    panel = FakePanel(PanelCommand(False, False, 1, "Лист1", False))
+    controller = InstantController(settings, panel)
+    state = CommandState(
+        command_id="cmd-time-deferred",
+        target=1,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-08-01T18:19:40+00:00",
+    )
+
+    result = controller._classify_summary(
+        state,
+        RunSummary(
+            run_id=state.command_id,
+            requested=1,
+            stopped_reason=(
+                "Отложено по времени: для всех доступных строк сейчас нет "
+                "безопасного местного окна 10:00–19:45"
+            ),
+        ),
+    )
+
+    assert result["status"] == "ОТЛОЖЕНО ПО ВРЕМЕНИ"
+    assert "10:00–19:45" in result["message"]
 
 
 def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):

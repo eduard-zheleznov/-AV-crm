@@ -52,3 +52,25 @@ def test_remote_status_reports_lock_owners_and_phase_without_mutating_runtime():
     assert "$State.phase" in script
     assert "worker.lock" in script
     assert "Remove-Item" not in script
+
+
+def test_vds_settings_import_preserves_the_local_chrome_bridge_and_backs_up_env():
+    path = Path(__file__).parents[1] / "scripts" / "import-vds-settings.ps1"
+    script = path.read_text(encoding="utf-8-sig")
+
+    assert '"AVITO_EXTENSION_TOKEN"' in script
+    assert '"AVITO_BROWSER_DRIVER" "chrome_extension"' in script
+    assert '"LOCAL_TIME_GUARD_ENABLED" "true"' in script
+    assert ".env.before-vds-import-" in script
+    assert "ConvertFrom-Json" in script
+    assert "GOOGLE_CREDENTIALS_FILE" in script
+    assert '"GOOGLE_CREDENTIALS_FILE" $TargetGoogle' in script
+    assert "$TargetGoogle.FullName" not in script
+    assert "WrittenGooglePath" in script
+    assert "Write-Host $LocalToken" not in script
+    assert "config.local.js" in script
+    assert "TokenMatch" in script
+    assert '"AVITO_EXTENSION_TOKEN" $LocalToken' in script
+    assert "System.StringComparison]::Ordinal" in script
+    assert '"=([^`r`n]*)"' in script
+    assert '"=[^`r`n]*"' in script

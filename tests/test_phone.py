@@ -1,7 +1,13 @@
 import pytest
 
 from avito_crm.errors import InvalidListingError
-from avito_crm.phone import canonical_avito_url, extract_phones, mask_phone, normalize_phone
+from avito_crm.phone import (
+    canonical_avito_url,
+    extract_formatted_phones,
+    extract_phones,
+    mask_phone,
+    normalize_phone,
+)
 
 
 @pytest.mark.parametrize(
@@ -20,6 +26,12 @@ def test_normalize_phone(raw, expected):
 
 def test_extract_phone_from_noisy_ocr_text():
     assert extract_phones("Тел. 8-999-123-45-67, звоните") == ["+79991234567"]
+
+
+def test_strict_screen_ocr_accepts_only_a_visibly_formatted_phone():
+    text = "от 1 000 ₽; объявление 8066051247; номер 8 999 123-45-67"
+    assert extract_formatted_phones(text) == ["+79991234567"]
+    assert extract_formatted_phones("74010003462") == []
 
 
 def test_mask_phone():

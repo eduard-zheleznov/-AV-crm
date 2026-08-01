@@ -11,15 +11,19 @@ from playwright.sync_api import sync_playwright
 
 from avito_crm import __version__
 from avito_crm.avito import open_avito_profile
+from avito_crm.chrome_extension import ChromeExtensionBrowser, open_ordinary_chrome
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError
 from avito_crm.logging_utils import configure_logging
+from avito_crm.models import ItemStatus, QueuePatch
 from avito_crm.notifications import EmailNotifier, MaxNotifier, TelegramNotifier
 from avito_crm.ocr import PhoneOcr
+from avito_crm.phone import canonical_avito_url, mask_phone
 from avito_crm.pipeline import Pipeline, request_stop
 from avito_crm.queue import QueueColumns, build_queue_source
-from avito_crm.state import SingleInstanceLock, StateStore
+from avito_crm.reporting import format_run_report
+from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +61,18 @@ def build_parser() -> argparse.ArgumentParser:
         "avito-profile",
         help="Открыть постоянный Chromium для необязательного входа или выхода из Avito",
     )
+    extension_test = subparsers.add_parser(
+        "avito-extension-test",
+        help="Получить один номер через обычный Chrome без записи в CRM",
+    )
+    extension_test.add_argument("url", help="Ссылка на объявление Avito")
+    extension_test.add_argument(
+        "--max-clicks",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="Число кликов; для первого теста оставьте 1",
+    )
 
     remote = subparsers.add_parser(
         "remote-control",
@@ -71,6 +87,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-live-crm",
         action="store_true",
         help="Явно разрешить пульту создавать лиды в CRM",
+    )
+
+    cleanup = subparsers.add_parser(
+        "cleanup-test-run",
+        help="Проверить и удалить из CRM лиды конкретных тестовых запусков",
+    )
+    cleanup.add_argument(
+        "--run-id",
+        action="append",
+        help="Run ID теста; параметр можно повторить",
+    )
+    cleanup.add_argument(
+        "--row-id",
+        action="append",
+        help="Точный номер строки; используйте, если Run ID изменил CRM-монитор",
+    )
+    cleanup.add_argument("--sheet", help="Имя листа Google-очереди")
+    cleanup.add_argument(
+        "--apply",
+        action="store_true",
+        help="После предварительного просмотра удалить найденные лиды",
+    )
+    cleanup.add_argument(
+        "--expected-leads",
+        type=int,
+        default=0,
+        help="Обязательное точное число лидов для --apply",
     )
 
     capture = subparsers.add_parser(
@@ -128,9 +171,18 @@ def _add_source_args(
             help="Цель успешных номеров/лидов; 0 (по умолчанию) — обработать все строки",
         )
         parser.add_argument(
+            "--max-inspected",
+            type=int,
+            default=0,
+            help=(
+                "Жёсткий предел попыток обработки строк; 0 (по умолчанию) — "
+                "без дополнительного предела"
+            ),
+        )
+        parser.add_argument(
             "--retry-manual",
             action="store_true",
-            help="Повторить строки, ожидающие ручной проверки Avito",
+            help=argparse.SUPPRESS,
         )
 
 
@@ -172,8 +224,22 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         return _max_recipients(settings)
     if args.command == "avito-profile":
         with SingleInstanceLock(settings.data_dir / "worker.lock"):
-            open_avito_profile(settings)
-        print("Профиль браузера сохранён. Следующий запуск использует это состояние.")
+            if settings.avito_browser_driver == "chrome_extension":
+                open_ordinary_chrome()
+                print("Avito открыт в обычном браузере Windows.")
+            else:
+                open_avito_profile(settings)
+                print("Профиль браузера сохранён. Следующий запуск использует это состояние.")
+        return 0
+    if args.command == "avito-extension-test":
+        if settings.avito_browser_driver != "chrome_extension":
+            raise ConfigurationError("Сначала выполните scripts\\install-chrome-extension.ps1")
+        with SingleInstanceLock(settings.data_dir / "worker.lock"):
+            ocr = PhoneOcr(settings.tesseract_cmd, settings.ocr_min_agreement)
+            ocr.check_available()
+            with ChromeExtensionBrowser(settings, ocr) as browser:
+                result = browser.reveal_phone(args.url, "manual-test", max_clicks=args.max_clicks)
+        print(f"Номер получен без CRM: {result.phone} ({result.source})")
         return 0
     if args.command == "remote-control":
         from avito_crm.remote_control import run_remote_control
@@ -184,6 +250,8 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
             allow_live=bool(args.allow_live_crm),
         )
         return 0
+    if args.command == "cleanup-test-run":
+        return _cleanup_test_runs(args, settings)
     if args.command == "status":
         return _status(settings)
     if args.command == "stop":
@@ -216,7 +284,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 live=live,
                 include_manual=args.retry_manual,
                 interactive_phone_check=bool(getattr(args, "interactive_check", False)),
-            ).run(args.limit)
+            ).run(args.limit, max_inspected=args.max_inspected)
         if live:
             _publish_run_analytics(
                 settings,
@@ -274,14 +342,29 @@ def _doctor(args: argparse.Namespace, settings: Settings) -> int:
     checks: list[tuple[str, str]] = []
     ocr = PhoneOcr(settings.tesseract_cmd, settings.ocr_min_agreement)
     checks.append(("Tesseract OCR", ocr.check_available().splitlines()[0]))
-    with sync_playwright() as playwright:
-        executable = Path(playwright.chromium.executable_path)
-        if not executable.is_file():
+    if settings.avito_browser_driver == "chrome_extension":
+        extension_manifest = settings.root_dir / "chrome-extension" / "manifest.json"
+        extension_config = settings.root_dir / "chrome-extension" / "config.local.js"
+        if not extension_manifest.is_file() or not extension_config.is_file():
             raise ConfigurationError(
-                "Chromium Playwright не установлен; выполните "
-                "`python -m playwright install chromium`"
+                "Расширение обычного Chrome не подготовлено; выполните "
+                "scripts\\install-chrome-extension.ps1"
             )
-        checks.append(("Chromium", str(executable)))
+        checks.append(
+            (
+                "Обычный Chrome",
+                f"локальное расширение; мост 127.0.0.1:{settings.avito_extension_port}",
+            )
+        )
+    else:
+        with sync_playwright() as playwright:
+            executable = Path(playwright.chromium.executable_path)
+            if not executable.is_file():
+                raise ConfigurationError(
+                    "Chromium Playwright не установлен; выполните "
+                    "`python -m playwright install chromium`"
+                )
+            checks.append(("Chromium", str(executable)))
     if args.source:
         source = build_queue_source(settings, args.source, args.file, args.sheet)
         actionable = source.list_actionable()
@@ -324,6 +407,107 @@ def _crm_projects(settings: Settings) -> int:
         print(f"  {project.get('id')} — {project.get('name', '')}")
     print("Скопируйте нужный ID в LPTRACKER_PROJECT_ID локального .env.")
     return 0
+
+
+def _cleanup_test_runs(args: argparse.Namespace, settings: Settings) -> int:
+    run_ids = {str(value).strip() for value in (args.run_id or []) if str(value).strip()}
+    row_ids = {str(value).strip() for value in (args.row_id or []) if str(value).strip()}
+    if not run_ids and not row_ids:
+        raise ConfigurationError("Укажите хотя бы один --run-id или --row-id")
+    source = build_queue_source(settings, "google", None, args.sheet)
+    candidates = _test_cleanup_candidates(
+        source.list_all(), source.columns, run_ids=run_ids, row_ids=row_ids
+    )
+    unique_lead_ids = {lead_id for _item, lead_id in candidates}
+
+    print("Тестовые лиды, подготовленные к удалению:")
+    for item, lead_id in candidates:
+        phone = str(item.values.get(source.columns.phone, "") or "")
+        print(
+            f"  Строка {item.row_id}; CRM ID {lead_id}; "
+            f"номер {mask_phone(phone)}; статус {item.status}"
+        )
+    print(f"Итого уникальных CRM-лидов: {len(unique_lead_ids)}")
+
+    if not args.apply:
+        print("Предварительный просмотр: CRM и Google-таблица не изменялись.")
+        return 0
+    if args.expected_leads <= 0:
+        raise ConfigurationError("Для --apply нужен --expected-leads с точным числом")
+    if len(unique_lead_ids) != args.expected_leads:
+        raise ConfigurationError(
+            f"Очистка остановлена: ожидалось {args.expected_leads}, найдено {len(unique_lead_ids)}"
+        )
+    if len(candidates) != len(unique_lead_ids):
+        raise ConfigurationError("Очистка остановлена: CRM ID встречается в нескольких строках")
+
+    source_name = (
+        f"google:{settings.google_spreadsheet_id}:{args.sheet or settings.google_worksheet}"
+    )
+    removed = 0
+    with (
+        SingleInstanceLock(settings.data_dir / "worker.lock"),
+        LpTrackerClient(settings) as crm,
+        StateStore(settings.state_db) as state,
+    ):
+        for item, lead_id in candidates:
+            crm.delete_lead(lead_id)
+            patch = QueuePatch(
+                status=ItemStatus.DONE,
+                attempts=item.attempts,
+                phone=str(item.values.get(source.columns.phone, "") or ""),
+                crm_lead_id=lead_id,
+                error="Тестовый лид удалён до начала звонков",
+                processed_at=utc_now(),
+                run_id=str(item.values.get(source.columns.run_id, "") or ""),
+                funnel_stage="Тестовый лид удалён",
+                crm_create_count=1,
+                repeat_crm_lead_id=str(
+                    item.values.get(source.columns.repeat_crm_lead_id, "") or ""
+                ),
+                repeat_phone_attempts=_safe_int(
+                    item.values.get(source.columns.repeat_phone_attempts)
+                ),
+                next_retry_at="",
+            )
+            source.update(item, patch)
+            state.record_item(canonical_avito_url(item.url), source_name, item, patch)
+            removed += 1
+            print(f"  OK: CRM ID {lead_id} удалён; строка {item.row_id} закрыта.")
+    print(f"Готово: удалено тестовых лидов: {removed}.")
+    return 0
+
+
+def _test_cleanup_candidates(items, columns, *, run_ids: set[str], row_ids: set[str]):
+    allowed_statuses = {
+        ItemStatus.CRM_MONITORING.value,
+        ItemStatus.PROCESSING.value,
+        ItemStatus.DONE.value,
+    }
+    result = []
+    for item in items:
+        item_run_id = str(item.values.get(columns.run_id, "") or "").strip()
+        if item_run_id not in run_ids and str(item.row_id).strip() not in row_ids:
+            continue
+        lead_id = str(item.values.get(columns.crm_lead_id, "") or "").strip()
+        create_count = _safe_int(item.values.get(columns.crm_create_count))
+        repeat_lead_id = str(item.values.get(columns.repeat_crm_lead_id, "") or "").strip()
+        if repeat_lead_id or create_count > 1:
+            raise ConfigurationError(
+                f"Строка {item.row_id} содержит повторный лид; "
+                "автоматическая тестовая очистка остановлена"
+            )
+        status = str(item.status or "").strip().casefold()
+        if lead_id and create_count == 1 and status in allowed_statuses:
+            result.append((item, lead_id))
+    return result
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(float(str(value or "0").strip()))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _telegram_test(settings: Settings) -> int:
@@ -435,21 +619,6 @@ def _publish_run_analytics(
 
 
 def _print_summary(summary, live: bool) -> None:
-    print("\nИтог запуска:")
-    print(f"  Run ID: {summary.run_id}")
-    print(f"  Обработано ссылок: {summary.processed}")
-    print(f"  Выполнено попыток: {summary.inspected}")
-    print(f"  Кругов обработки: {summary.rounds}")
-    print(f"  Номеров распознано: {summary.captured}")
-    print(f"  Лидов создано: {summary.created}")
-    print(f"  Дубликатов: {summary.duplicates}")
-    print(f"  Неактивных объявлений: {summary.inactive}")
-    print(f"  Без кнопки телефона: {summary.unavailable}")
-    print(f"  Номер не открыт после всех попыток: {summary.phone_failed}")
-    print(f"  Повторных попыток: {summary.retries}")
-    print(f"  Некорректных ссылок: {summary.invalid}")
-    print(f"  Технических ошибок: {summary.errors}")
-    print(f"  Требуют ручного действия: {summary.manual_required}")
-    print(f"  Остановка: {summary.stopped_reason}")
+    print(f"\n{format_run_report(summary, reason=summary.stopped_reason)}")
     if not live:
         print("  CRM не изменялась (без --live).")

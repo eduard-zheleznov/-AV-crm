@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 
 import pytest
 
@@ -6,6 +7,7 @@ from avito_crm.errors import (
     BrowserOperationError,
     CrmError,
     InactiveListingError,
+    OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
@@ -42,6 +44,15 @@ class FakeQueue(QueueSource):
         item.values[self.columns.phone] = patch.phone
 
 
+class ClosedLocalWindowQueue(FakeQueue):
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.item.values[settings.phone_column] = ""
+
+    def is_local_window_open(self, item, *, now=None):
+        return False
+
+
 def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings):
     source = FakeQueue(settings)
     progress = []
@@ -67,6 +78,25 @@ def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings
     assert source.patches[-1].status == ItemStatus.CAPTURED
     assert source.patches[-1].phone == "+79991234567"
     assert progress[-1] == ("remote-command-1", 1, "")
+
+
+def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings):
+    source = ClosedLocalWindowQueue(settings)
+    phases = []
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="capture",
+            live=True,
+        ).run(1, phase=phases.append)
+
+    assert summary.inspected == 0
+    assert summary.stopped_reason.startswith("Отложено по времени")
+    assert "10:00–19:45" in summary.stopped_reason
+    assert phases[-1] == summary.stopped_reason
 
 
 class RoundQueue(QueueSource):
@@ -103,6 +133,21 @@ class RoundQueue(QueueSource):
         item.values[self.columns.processed_at] = patch.processed_at
         if patch.next_retry_at is not None:
             item.values[self.columns.next_retry_at] = patch.next_retry_at
+
+
+class WindowClosingQueue(RoundQueue):
+    """Open for selection/reveal, then closed immediately before the CRM write."""
+
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.window_checks = 0
+
+    def list_all(self):
+        return self.items
+
+    def is_local_window_open(self, item, *, now=None):
+        self.window_checks += 1
+        return self.window_checks < 3
 
 
 class FakeOcr:
@@ -197,6 +242,20 @@ def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
     assert summary.errors == 0
 
 
+def test_stop_during_captcha_restores_row_for_the_next_normal_run(tmp_path, settings, monkeypatch):
+    source = RoundQueue(settings)
+    browser = SequencedBrowser({"2": [OperatorStopRequested("остановлено")]})
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert summary.stopped_reason == "Остановлено оператором"
+    assert summary.errors == 0
+    assert summary.manual_required == 0
+    assert source.items[0].status == ItemStatus.PENDING
+    assert source.items[0].attempts == 0
+    assert source.list_actionable() == [source.items[0]]
+
+
 def test_unlimited_mode_processes_more_than_twenty_five_rows(tmp_path, settings, monkeypatch):
     source = RoundQueue(settings, count=30)
     browser = SequencedBrowser(
@@ -222,6 +281,33 @@ def test_unlimited_mode_processes_more_than_twenty_five_rows(tmp_path, settings,
     assert summary.processed == 30
     assert summary.captured == 30
     assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
+
+
+def test_max_inspected_is_a_hard_canary_boundary(tmp_path, settings, monkeypatch):
+    source = RoundQueue(settings, count=10)
+    browser = SequencedBrowser(
+        {item.row_id: [f"+7999{index:07d}"] for index, item in enumerate(source.items, start=1)}
+    )
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(10, max_inspected=5)
+
+    assert browser.calls == ["2", "3", "4", "5", "6"]
+    assert summary.inspected == 5
+    assert summary.captured == 5
+    assert summary.stopped_reason == "Достигнут предел просмотренных объявлений"
 
 
 def test_phone_failure_becomes_normal_terminal_outcome_after_all_attempts(
@@ -453,6 +539,21 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     assert summary.stage_synced == 1
 
 
+def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, settings, monkeypatch):
+    source = WindowClosingQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+
+    summary, crm = _run_repeat(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2"]
+    assert crm.created == []
+    assert summary.created == 0
+    assert source.items[0].status == ItemStatus.PENDING
+    assert source.items[0].attempts == 0
+    assert source.items[0].values[source.columns.phone] == ""
+    assert summary.stopped_reason.startswith("Отложено по времени")
+
+
 def test_historical_autoresponder_row_is_not_reactivated(tmp_path, settings, monkeypatch):
     source = RepeatQueue(settings)
     source.item.status = ItemStatus.DONE
@@ -526,8 +627,38 @@ def test_live_pipeline_reports_crm_preflight_and_browser_phases(tmp_path, settin
     assert summary.created == 1
     assert any(message.startswith("Подготовка CRM") for message in phases)
     assert any(message.startswith("Синхронизация CRM: 1/1") for message in phases)
-    assert "Запускаем Chromium и открываем очередь Avito." in phases
+    assert "Подключаем Chromium и открываем очередь Avito." in phases
     assert phases[-1] == "Обрабатываем очередь Avito по одной строке."
+
+
+def test_extension_driver_uses_ordinary_chrome_browser_adapter(tmp_path, settings, monkeypatch):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+    )
+    source = RepeatQueue(configured)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+    phases = []
+    monkeypatch.setattr(
+        "avito_crm.pipeline.ChromeExtensionBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+
+    summary, _crm = _run_repeat(
+        tmp_path,
+        configured,
+        monkeypatch,
+        source,
+        browser,
+        phase_messages=phases,
+    )
+
+    assert summary.created == 1
+    assert browser.calls == ["2"]
+    assert (
+        "Подключаем обычный Chrome через локальное расширение и открываем очередь Avito." in phases
+    )
 
 
 def test_stop_during_crm_preflight_skips_browser_and_queue(tmp_path, settings, monkeypatch):

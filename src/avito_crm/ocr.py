@@ -8,7 +8,7 @@ from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
 from avito_crm.errors import ConfigurationError, PhoneNotFoundError
 from avito_crm.models import PhoneResult
-from avito_crm.phone import extract_phones
+from avito_crm.phone import extract_formatted_phones, extract_phones
 
 
 class PhoneOcr:
@@ -103,6 +103,53 @@ class PhoneOcr:
                 errors.append(str(exc))
         detail = errors[-1] if errors else "области номера пусты"
         raise PhoneNotFoundError(f"OCR proven-crop не распознал номер: {detail}")
+
+    def read_avito_screen_png(self, png: bytes) -> PhoneResult:
+        """Recognize only formatted phones in proven inline and modal screen regions."""
+        try:
+            image = Image.open(io.BytesIO(png)).convert("RGB")
+        except Exception as exc:
+            raise PhoneNotFoundError(f"Не удалось открыть снимок экрана: {exc}") from exc
+
+        regions = (
+            ("inline-right", (0.42, 0.22, 0.76, 0.58)),
+            ("legacy-top", (0.15, 0.18, 0.85, 0.40)),
+            ("legacy-lower", (0.15, 0.25, 0.85, 0.70)),
+        )
+        ambiguous = False
+        for name, (left_rel, top_rel, right_rel, bottom_rel) in regions:
+            width, height = image.size
+            region = image.crop(
+                (
+                    int(width * left_rel),
+                    int(height * top_rel),
+                    int(width * right_rel),
+                    int(height * bottom_rel),
+                )
+            )
+            if region.width > 900:
+                scale = 900 / region.width
+                region = region.resize(
+                    (900, max(1, int(region.height * scale))), Image.Resampling.LANCZOS
+                )
+            text = self.pytesseract.image_to_string(
+                region.convert("L"),
+                lang="eng",
+                config="--psm 6",
+            ).strip()
+            phones = extract_formatted_phones(text)
+            if len(phones) == 1:
+                return PhoneResult(
+                    phone=phones[0],
+                    source=f"ocr-avito-{name}",
+                    confidence=0.8,
+                    raw_text=f"{name}: {text}",
+                )
+            if len(phones) > 1:
+                ambiguous = True
+        if ambiguous:
+            raise PhoneNotFoundError("OCR увидел несколько форматированных номеров в одной области")
+        raise PhoneNotFoundError("OCR не нашёл форматированный номер в проверенных областях Avito")
 
     @staticmethod
     def _variants(image: Image.Image) -> list[tuple[str, Image.Image]]:

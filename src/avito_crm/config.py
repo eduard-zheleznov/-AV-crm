@@ -115,6 +115,10 @@ class Settings:
     state_db: Path
     browser_profile_dir: Path
     avito_browser_channel: str
+    avito_browser_driver: str
+    avito_extension_port: int
+    avito_extension_token: str
+    avito_extension_connect_timeout: float
     screenshot_dir: Path
 
     lptracker_base_url: str
@@ -243,6 +247,10 @@ class Settings:
             .expanduser()
             .resolve(),
             avito_browser_channel=os.getenv("AVITO_BROWSER_CHANNEL", "").strip().casefold(),
+            avito_browser_driver=os.getenv("AVITO_BROWSER_DRIVER", "playwright").strip().casefold(),
+            avito_extension_port=_int("AVITO_EXTENSION_PORT", 8765) or 8765,
+            avito_extension_token=os.getenv("AVITO_EXTENSION_TOKEN", "").strip(),
+            avito_extension_connect_timeout=_float("AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS", 30.0),
             screenshot_dir=Path(os.getenv("AVITO_SCREENSHOT_DIR", output / "diagnostics"))
             .expanduser()
             .resolve(),
@@ -325,7 +333,7 @@ class Settings:
             avito_min_delay=_float("AVITO_MIN_DELAY_SECONDS", 7.0),
             avito_max_delay=_float("AVITO_MAX_DELAY_SECONDS", 15.0),
             avito_page_timeout=_float("AVITO_PAGE_TIMEOUT_SECONDS", 45.0),
-            avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 43_200.0),
+            avito_manual_timeout=_float("AVITO_MANUAL_TIMEOUT_SECONDS", 0.0),
             avito_phone_first_round_attempts=int(_int("AVITO_PHONE_FIRST_ROUND_ATTEMPTS", 6) or 0),
             avito_phone_second_round_attempts=int(
                 _int("AVITO_PHONE_SECOND_ROUND_ATTEMPTS", 3) or 0
@@ -391,8 +399,11 @@ class Settings:
     def validate(self) -> None:
         if self.avito_min_delay < 0 or self.avito_max_delay < self.avito_min_delay:
             raise ConfigurationError("Некорректный диапазон задержек Avito")
-        if self.avito_manual_timeout < 60:
-            raise ConfigurationError("AVITO_MANUAL_TIMEOUT_SECONDS должен быть не меньше 60")
+        if self.avito_manual_timeout < 0 or 0 < self.avito_manual_timeout < 60:
+            raise ConfigurationError(
+                "AVITO_MANUAL_TIMEOUT_SECONDS: 0 означает ждать до решения; "
+                "иное значение должно быть не меньше 60 секунд"
+            )
         ranges = (
             (
                 "AVITO_PHONE_RETRY",
@@ -427,6 +438,20 @@ class Settings:
             raise ConfigurationError("AVITO_PHONE_FIRST_ROUND_ATTEMPTS должен быть больше нуля")
         if self.avito_browser_channel not in {"", "chrome"}:
             raise ConfigurationError("AVITO_BROWSER_CHANNEL должен быть пустым или равен chrome")
+        if self.avito_browser_driver not in {"playwright", "chrome_extension"}:
+            raise ConfigurationError(
+                "AVITO_BROWSER_DRIVER должен быть playwright или chrome_extension"
+            )
+        if not 1024 <= self.avito_extension_port <= 65535:
+            raise ConfigurationError("AVITO_EXTENSION_PORT должен быть от 1024 до 65535")
+        if self.avito_extension_connect_timeout <= 0:
+            raise ConfigurationError(
+                "AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS должен быть больше нуля"
+            )
+        if self.avito_browser_driver == "chrome_extension" and len(self.avito_extension_token) < 32:
+            raise ConfigurationError(
+                "Для chrome_extension задайте AVITO_EXTENSION_TOKEN длиной не менее 32 символов"
+            )
         if self.avito_phone_second_round_attempts < 0:
             raise ConfigurationError(
                 "AVITO_PHONE_SECOND_ROUND_ATTEMPTS не может быть отрицательным"
@@ -487,10 +512,14 @@ class Settings:
             and self.email_primary_recipients
         )
         if (
-            (self.telegram_bot_token and self.telegram_primary_chat_ids)
-            or (self.max_bot_token and self.max_primary_recipients)
-            or email_enabled
-        ) and self.telegram_reminder_minutes:
+            (
+                (self.telegram_bot_token and self.telegram_primary_chat_ids)
+                or (self.max_bot_token and self.max_primary_recipients)
+                or email_enabled
+            )
+            and self.telegram_reminder_minutes
+            and self.avito_manual_timeout > 0
+        ):
             last_reminder_seconds = self.telegram_reminder_minutes[-1] * 60
             if last_reminder_seconds >= self.avito_manual_timeout:
                 raise ConfigurationError("Последнее напоминание должно быть раньше таймаута капчи")

@@ -16,7 +16,6 @@ from avito_crm.gui_config import (
     browser_profile_is_initialized,
     extract_spreadsheet_id,
     google_sheet_url,
-    parse_captcha_wait_hours,
     parse_limit,
     parse_max_recipient_ids,
     parse_notification_emails,
@@ -69,10 +68,6 @@ class DesktopApp:
         self.worksheet_var = tk.StringVar(value=values.get("GOOGLE_WORKSHEET", "Лист1"))
         self.credentials_var = tk.StringVar(value=values.get("GOOGLE_CREDENTIALS_FILE", ""))
         self.limit_var = tk.StringVar(value=values.get("GUI_DEFAULT_LIMIT", "0"))
-        self.retry_manual_var = tk.BooleanVar(
-            value=values.get("GUI_RETRY_MANUAL", "false").strip().lower()
-            in {"1", "true", "yes", "on"}
-        )
         self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
         self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
         self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
@@ -93,9 +88,6 @@ class DesktopApp:
         )
         self.telegram_reminders_var = tk.StringVar(
             value=values.get("TELEGRAM_CAPTCHA_REMINDER_MINUTES", "30,60")
-        )
-        self.captcha_wait_hours_var = tk.StringVar(
-            value=self._initial_wait_hours(values.get("AVITO_MANUAL_TIMEOUT_SECONDS", ""))
         )
         self.smtp_host_var = tk.StringVar(value=values.get("SMTP_HOST", "smtp.yandex.ru"))
         self.smtp_port_var = tk.StringVar(value=values.get("SMTP_PORT", "465"))
@@ -384,14 +376,8 @@ class DesktopApp:
             state="disabled",
         )
         self.stop_button.grid(row=0, column=2, padx=(10, 0))
-        ttk.Checkbutton(
-            controls,
-            text="Повторить строки, ожидающие ручной проверки",
-            variable=self.retry_manual_var,
-            style="Body.TCheckbutton",
-        ).grid(row=0, column=3, padx=(18, 0))
         self.progress = ttk.Progressbar(controls, mode="indeterminate", length=130)
-        self.progress.grid(row=0, column=4, sticky="e")
+        self.progress.grid(row=0, column=3, sticky="e")
         self.progress.grid_remove()
 
         log_card = ttk.Frame(outer, style="Card.TFrame", padding=(18, 16))
@@ -487,17 +473,6 @@ class DesktopApp:
             webbrowser.open(GOOGLE_SHEETS_API_URL)
             webbrowser.open(GOOGLE_CREDENTIALS_URL)
 
-    @staticmethod
-    def _initial_wait_hours(raw_seconds: str) -> str:
-        try:
-            hours = float(raw_seconds) / 3600 if raw_seconds.strip() else 12.0
-        except ValueError:
-            hours = 12.0
-        # Older installations used five minutes. Migrate them to an unattended-safe value.
-        if hours < 1:
-            hours = 12.0
-        return f"{hours:g}"
-
     def _refresh_notification_summary(self) -> None:
         channels: list[str] = []
         if self.max_token_var.get().strip() and self.max_primary_var.get().strip():
@@ -516,7 +491,6 @@ class DesktopApp:
             )
             return
         reminders = self.telegram_reminders_var.get().strip() or "30,60"
-        wait_hours = self.captcha_wait_hours_var.get().strip() or "12"
         has_backup = (
             self.max_backup_var.get().strip()
             or self.telegram_backup_var.get().strip()
@@ -524,7 +498,7 @@ class DesktopApp:
         )
         backup = "; есть резервный получатель" if has_backup else ""
         self.telegram_summary_var.set(
-            f"{' + '.join(channels)}: сразу + {reminders} мин; до {wait_hours} ч{backup}"
+            f"{' + '.join(channels)}: сразу + {reminders} мин; ожидание до решения или STOP{backup}"
         )
 
     def _show_telegram_settings(self) -> None:
@@ -618,12 +592,6 @@ class DesktopApp:
         )
         ttk.Entry(timings, textvariable=self.telegram_reminders_var, width=18).grid(
             row=0, column=1, sticky="w"
-        )
-        ttk.Label(timings, text="Максимально ждать, часов", style="Field.TLabel").grid(
-            row=0, column=2, sticky="e", padx=(24, 12)
-        )
-        ttk.Entry(timings, textvariable=self.captcha_wait_hours_var, width=10).grid(
-            row=0, column=3, sticky="e"
         )
 
         ttk.Label(
@@ -762,12 +730,6 @@ class DesktopApp:
         )
         ttk.Entry(timings, textvariable=self.telegram_reminders_var, width=18).grid(
             row=0, column=1, sticky="w"
-        )
-        ttk.Label(timings, text="Максимально ждать, часов", style="Field.TLabel").grid(
-            row=0, column=2, sticky="e", padx=(24, 12)
-        )
-        ttk.Entry(timings, textvariable=self.captcha_wait_hours_var, width=10).grid(
-            row=0, column=3, sticky="e"
         )
 
         buttons = ttk.Frame(card, style="Card.TFrame")
@@ -922,12 +884,6 @@ class DesktopApp:
         ttk.Entry(timings, textvariable=self.telegram_reminders_var, width=18).grid(
             row=0, column=1, sticky="w"
         )
-        ttk.Label(timings, text="Максимально ждать, часов", style="Field.TLabel").grid(
-            row=0, column=2, sticky="e", padx=(24, 12)
-        )
-        ttk.Entry(timings, textvariable=self.captcha_wait_hours_var, width=10).grid(
-            row=0, column=3, sticky="e"
-        )
 
         buttons = ttk.Frame(card, style="Card.TFrame")
         buttons.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(22, 0))
@@ -962,13 +918,9 @@ class DesktopApp:
 
     def _timing_env_values(self) -> dict[str, str]:
         reminders = parse_telegram_reminders(self.telegram_reminders_var.get())
-        wait_hours = parse_captcha_wait_hours(self.captcha_wait_hours_var.get())
-        wait_seconds = wait_hours * 3600
-        if reminders[-1] * 60 >= wait_seconds:
-            raise ValueError("Последнее напоминание должно быть раньше окончания ожидания")
         return {
             "TELEGRAM_CAPTCHA_REMINDER_MINUTES": ",".join(f"{item:g}" for item in reminders),
-            "AVITO_MANUAL_TIMEOUT_SECONDS": f"{wait_seconds:g}",
+            "AVITO_MANUAL_TIMEOUT_SECONDS": "0",
         }
 
     def _telegram_env_values(
@@ -1207,7 +1159,6 @@ class DesktopApp:
                 "GOOGLE_SPREADSHEET_ID": spreadsheet_id,
                 "GOOGLE_WORKSHEET": worksheet,
                 "GUI_DEFAULT_LIMIT": str(limit),
-                "GUI_RETRY_MANUAL": str(self.retry_manual_var.get()).lower(),
                 **notification_updates,
             },
         )
@@ -1254,8 +1205,6 @@ class DesktopApp:
             str(limit),
             "--live",
         ]
-        if self.retry_manual_var.get():
-            arguments.append("--retry-manual")
         self._start_process("live", arguments)
 
     def _start_process(self, kind: str, arguments: list[str]) -> None:

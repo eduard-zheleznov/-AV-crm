@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from avito_crm.avito import AvitoBrowser
+from avito_crm.chrome_extension import ChromeExtensionBrowser
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import (
@@ -16,6 +17,7 @@ from avito_crm.errors import (
     InvalidListingError,
     ManualActionRequired,
     NotificationError,
+    OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
     SourceError,
@@ -59,12 +61,17 @@ class Pipeline:
         self,
         limit: int,
         *,
+        max_inspected: int = 0,
         run_id: str | None = None,
         progress: Callable[[RunSummary, str], None] | None = None,
         phase: Callable[[str], None] | None = None,
     ) -> RunSummary:
         if limit < 0:
             raise ValueError("Лимит не может быть отрицательным; 0 означает «все строки»")
+        if max_inspected < 0:
+            raise ValueError(
+                "Предел просмотренных строк не может быть отрицательным; 0 означает «без предела»"
+            )
         self.stop_file.unlink(missing_ok=True)
         summary = RunSummary(run_id=run_id or uuid.uuid4().hex[:12], requested=limit)
         self.state.begin_run(summary)
@@ -79,7 +86,7 @@ class Pipeline:
             with ExitStack() as stack:
                 crm: LpTrackerClient | None = None
                 destination = None
-                browser: AvitoBrowser | None = None
+                browser: AvitoBrowser | ChromeExtensionBrowser | None = None
 
                 if self.mode in {"crm", "full"} and self.live:
                     self._report_phase(phase, "Подготовка CRM: подключаемся к LPTracker.")
@@ -124,13 +131,23 @@ class Pipeline:
                     and (not self.live or self.source.is_local_window_open(item))
                 )
                 if needs_browser:
+                    browser_label = (
+                        "обычный Chrome через локальное расширение"
+                        if self.settings.avito_browser_driver == "chrome_extension"
+                        else "Chromium"
+                    )
                     self._report_phase(
                         phase,
-                        "Запускаем Chromium и открываем очередь Avito.",
+                        f"Подключаем {browser_label} и открываем очередь Avito.",
                     )
                     ocr = PhoneOcr(self.settings.tesseract_cmd, self.settings.ocr_min_agreement)
                     ocr.check_available()
-                    browser = stack.enter_context(AvitoBrowser(self.settings, ocr, notifier))
+                    browser_type = (
+                        ChromeExtensionBrowser
+                        if self.settings.avito_browser_driver == "chrome_extension"
+                        else AvitoBrowser
+                    )
+                    browser = stack.enter_context(browser_type(self.settings, ocr, notifier))
                 self._report_phase(phase, "Обрабатываем очередь Avito по одной строке.")
 
                 round_number = 0
@@ -154,10 +171,12 @@ class Pipeline:
                     ]
                     if not eligible_items:
                         if mode_eligible and self.live:
-                            LOGGER.info(
-                                "Все доступные строки отложены: сейчас нет безопасного "
-                                "местного окна 10:00–19:45"
+                            summary.stopped_reason = (
+                                "Отложено по времени: для всех доступных строк "
+                                "сейчас нет безопасного местного окна 10:00–19:45"
                             )
+                            LOGGER.info(summary.stopped_reason)
+                            self._report_phase(phase, summary.stopped_reason)
                         break
 
                     round_number += 1
@@ -173,6 +192,10 @@ class Pipeline:
                     for item in eligible_items:
                         if self.stop_file.exists():
                             summary.stopped_reason = "Остановлено оператором"
+                            should_stop = True
+                            break
+                        if max_inspected and summary.inspected >= max_inspected:
+                            summary.stopped_reason = "Достигнут предел просмотренных объявлений"
                             should_stop = True
                             break
                         if self._goal_reached(summary, limit):
@@ -218,7 +241,9 @@ class Pipeline:
                             summary.errors = len(unresolved_technical_rows)
                             continue
 
-                        attempts = item.attempts + 1
+                        previous_status = item.status
+                        previous_attempts = item.attempts
+                        attempts = previous_attempts + 1
                         stored_phone = normalize_phone(
                             str(item.values.get(self.source.columns.phone, "") or "")
                         )
@@ -556,6 +581,39 @@ class Pipeline:
                             unresolved_technical_rows.discard(item.row_id)
                             summary.errors = len(unresolved_technical_rows)
                             self._report_progress(progress, summary, item.row_id)
+                        except OperatorStopRequested:
+                            # STOP during a CAPTCHA is not a failed Avito attempt.
+                            # Restore the row's previous actionable state so the
+                            # next ordinary launch resumes it automatically.
+                            restored_status = previous_status or (
+                                ItemStatus.REPEAT_PENDING if repeat_flow else ItemStatus.PENDING
+                            )
+                            self._finalize(
+                                canonical_url,
+                                item,
+                                QueuePatch(
+                                    status=restored_status,
+                                    attempts=previous_attempts,
+                                    phone=stored_phone or "",
+                                    crm_lead_id=existing_crm_lead_id,
+                                    error=(
+                                        "Остановлено оператором во время ожидания капчи; "
+                                        "строка сохранена для следующего запуска"
+                                    ),
+                                    processed_at=utc_now(),
+                                    run_id=summary.run_id,
+                                    repeat_phone_attempts=(
+                                        repeat_phone_attempts if repeat_flow else None
+                                    ),
+                                    next_retry_at="",
+                                ),
+                            )
+                            unresolved_technical_rows.discard(item.row_id)
+                            summary.errors = len(unresolved_technical_rows)
+                            summary.stopped_reason = "Остановлено оператором"
+                            should_stop = True
+                            self._report_progress(progress, summary, item.row_id)
+                            break
                         except ManualActionRequired as exc:
                             self._finalize_expected(
                                 canonical_url,
@@ -649,6 +707,10 @@ class Pipeline:
             raise
         finally:
             try:
+                if browser is not None:
+                    summary.captchas_solved = int(
+                        getattr(browser, "captchas_solved", summary.captchas_solved)
+                    )
                 self.state.finish_run(summary)
                 self._report_progress(progress, summary, "")
                 self._notify_completion(notifier, summary)
