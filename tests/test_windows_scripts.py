@@ -64,6 +64,9 @@ def test_vds_settings_import_preserves_the_local_chrome_bridge_and_backs_up_env(
     assert ".env.before-vds-import-" in script
     assert "ConvertFrom-Json" in script
     assert "GOOGLE_CREDENTIALS_FILE" in script
+    assert '"GOOGLE_CREDENTIALS_FILE" $TargetGoogle' in script
+    assert "$TargetGoogle.FullName" not in script
+    assert "WrittenGooglePath" in script
     assert "Write-Host $LocalToken" not in script
     assert "config.local.js" in script
     assert "TokenMatch" in script

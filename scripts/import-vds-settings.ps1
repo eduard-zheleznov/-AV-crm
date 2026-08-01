@@ -134,7 +134,7 @@ foreach ($Name in $LocalSettingNames) {
 
 $MergedText = Set-EnvValue $MergedText "AVITO_BROWSER_DRIVER" "chrome_extension"
 $MergedText = Set-EnvValue $MergedText "AVITO_EXTENSION_TOKEN" $LocalToken
-$MergedText = Set-EnvValue $MergedText "GOOGLE_CREDENTIALS_FILE" $TargetGoogle.FullName
+$MergedText = Set-EnvValue $MergedText "GOOGLE_CREDENTIALS_FILE" $TargetGoogle
 # The new computer must never create live leads outside the approved local window.
 $MergedText = Set-EnvValue $MergedText "LOCAL_TIME_GUARD_ENABLED" "true"
 
@@ -164,6 +164,13 @@ if (-not [string]::Equals($WrittenToken, $LocalToken, [System.StringComparison]:
 }
 if ((Get-EnvValue $WrittenText "AVITO_BROWSER_DRIVER") -ne "chrome_extension") {
     throw "Контроль импорта не пройден: не сохранён обычный Chrome"
+}
+[string]$WrittenGooglePath = Get-EnvValue $WrittenText "GOOGLE_CREDENTIALS_FILE"
+if (
+    [string]::IsNullOrWhiteSpace($WrittenGooglePath) -or
+    -not (Test-Path -LiteralPath $WrittenGooglePath -PathType Leaf)
+) {
+    throw "Контроль импорта не пройден: не записан Google JSON"
 }
 
 Write-Host "Настройки VDS импортированы без вывода секретов." -ForegroundColor Green
