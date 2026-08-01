@@ -194,6 +194,7 @@ def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):
 
 def test_extension_browser_can_capture_the_interactive_windows_desktop(settings, monkeypatch):
     png = b"\x89PNG\r\n\x1a\nplaceholder"
+    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         chrome_extension_module,
         "_capture_interactive_desktop_png",
@@ -221,11 +222,12 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "fake-ocr-region-7"
+    assert result.source == "ocr-confirmed-region"
 
 
 def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monkeypatch):
     png = b"\x89PNG\r\n\x1a\nplaceholder"
+    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         chrome_extension_module,
         "_capture_interactive_desktop_png",
@@ -254,7 +256,7 @@ def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monke
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "fake-ocr-region-6"
+    assert result.source == "ocr-confirmed-region"
 
 
 def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):

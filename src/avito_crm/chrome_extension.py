@@ -355,21 +355,15 @@ class ChromeExtensionBrowser:
                     "Chrome открыл номер, но не смог безопасно определить его область; "
                     "широкий снимок намеренно не распознаётся"
                 )
-            png = (
-                _decode_screenshot(str(payload.get("screenshot", "")))
-                if status == "screenshot"
-                else _capture_interactive_desktop_png(payload.get("crop"))
-            )
+            if status == "screen_capture":
+                return self._read_screen_capture(
+                    payload["crop"],
+                    canonical_url,
+                )
+            png = _decode_screenshot(str(payload.get("screenshot", "")))
             artifact = self._artifact_path(canonical_url, "extension-viewport")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
-            if status == "screen_capture" and isinstance(payload.get("crop"), dict):
-                crop_kind = str(payload["crop"].get("kind", "control"))
-                return self.ocr.read_png(
-                    png,
-                    artifact,
-                    psm=6 if crop_kind in {"dialog", "panel"} else 7,
-                )
             return self.ocr.read_viewport_png(png)
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
@@ -418,6 +412,36 @@ class ChromeExtensionBrowser:
         digest = hashlib.sha256(url.encode()).hexdigest()[:12]
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         return self.settings.screenshot_dir / f"{stamp}-{digest}-{suffix}.png"
+
+    def _read_screen_capture(self, crop: dict[str, Any], url: str) -> PhoneResult:
+        crop_kind = str(crop.get("kind", "control"))
+        psm = 6 if crop_kind in {"dialog", "panel"} else 7
+        recognized: dict[str, tuple[int, PhoneResult]] = {}
+        errors: list[str] = []
+        for attempt in range(1, 4):
+            if attempt > 1:
+                time.sleep(0.8)
+            png = _capture_interactive_desktop_png(crop)
+            artifact = self._artifact_path(url, f"extension-phone-{attempt}")
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_bytes(png)
+            try:
+                result = self.ocr.read_png(png, artifact, psm=psm)
+            except PhoneNotFoundError as exc:
+                errors.append(str(exc))
+                continue
+            count, _previous = recognized.get(result.phone, (0, result))
+            recognized[result.phone] = (count + 1, result)
+            if count + 1 >= 2:
+                result.source = "ocr-confirmed-region"
+                return result
+        if recognized:
+            raise PhoneNotFoundError(
+                "OCR увидел номер только на одном из трёх снимков; "
+                "результат отклонён как неподтверждённый"
+            )
+        detail = errors[-1] if errors else "область номера осталась пустой"
+        raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках области: {detail}")
 
 
 def open_ordinary_chrome() -> None:
