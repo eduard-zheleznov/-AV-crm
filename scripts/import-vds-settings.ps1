@@ -11,6 +11,7 @@ $SourceEnv = Join-Path $TransferDir "vds.env"
 $SourceGoogle = Join-Path $TransferDir "google-service-account.json"
 $DataDir = Join-Path $ProjectRoot "data"
 $TargetGoogle = Join-Path $DataDir "google-service-account.json"
+$ExtensionConfigPath = Join-Path $ProjectRoot "chrome-extension\config.local.js"
 
 function Get-EnvValue {
     param(
@@ -67,7 +68,18 @@ $MergedText = [System.IO.File]::ReadAllText($SourceEnv)
 
 $LocalToken = Get-EnvValue $LocalText "AVITO_EXTENSION_TOKEN"
 if ([string]::IsNullOrWhiteSpace($LocalToken) -or $LocalToken.Length -lt 32) {
-    throw "В локальном .env не найден токен моста обычного Chrome"
+    if (-not (Test-Path -LiteralPath $ExtensionConfigPath -PathType Leaf)) {
+        throw "Не найдена локальная конфигурация расширения обычного Chrome"
+    }
+    $ExtensionConfigText = [System.IO.File]::ReadAllText($ExtensionConfigPath)
+    $TokenMatch = [regex]::Match(
+        $ExtensionConfigText,
+        'token\s*:\s*"([A-Za-z0-9_-]{32,})"'
+    )
+    if (-not $TokenMatch.Success) {
+        throw "В config.local.js не найден токен моста обычного Chrome"
+    }
+    $LocalToken = $TokenMatch.Groups[1].Value
 }
 
 $SpreadsheetId = Get-EnvValue $MergedText "GOOGLE_SPREADSHEET_ID"
@@ -124,6 +136,7 @@ foreach ($Name in $LocalSettingNames) {
 }
 
 $MergedText = Set-EnvValue $MergedText "AVITO_BROWSER_DRIVER" "chrome_extension"
+$MergedText = Set-EnvValue $MergedText "AVITO_EXTENSION_TOKEN" $LocalToken
 $MergedText = Set-EnvValue $MergedText "GOOGLE_CREDENTIALS_FILE" $TargetGoogle.FullName
 # The new computer must never create live leads outside the approved local window.
 $MergedText = Set-EnvValue $MergedText "LOCAL_TIME_GUARD_ENABLED" "true"

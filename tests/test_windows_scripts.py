@@ -65,5 +65,8 @@ def test_vds_settings_import_preserves_the_local_chrome_bridge_and_backs_up_env(
     assert "ConvertFrom-Json" in script
     assert "GOOGLE_CREDENTIALS_FILE" in script
     assert "Write-Host $LocalToken" not in script
+    assert "config.local.js" in script
+    assert "TokenMatch" in script
+    assert '"AVITO_EXTENSION_TOKEN" $LocalToken' in script
     assert '"=([^`r`n]*)$"' in script
     assert '"=[^`r`n]*$"' in script
