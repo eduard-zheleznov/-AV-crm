@@ -87,9 +87,10 @@ def launch_avito_context(
     *,
     force_visible: bool = False,
 ) -> BrowserContext:
-    """Launch the one persistent Chromium profile used by every Avito operation."""
+    """Launch the configured browser with one profile shared by every Avito operation."""
     return playwright.chromium.launch_persistent_context(
         user_data_dir=str(settings.browser_profile_dir),
+        channel=settings.avito_browser_channel or None,
         headless=False if force_visible else settings.avito_headless,
         locale="ru-RU",
         viewport={"width": 1440, "height": 900},

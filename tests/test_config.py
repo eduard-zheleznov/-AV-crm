@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+import pytest
+
 from avito_crm.config import Settings
+from avito_crm.errors import ConfigurationError
 
 
 def test_refresh_env_reloads_gui_saved_notification_recipients(tmp_path, monkeypatch):
@@ -21,3 +26,26 @@ def test_invalid_crm_timezone_does_not_block_unrelated_settings_load(tmp_path, m
     settings = Settings.load(tmp_path)
 
     assert settings.lptracker_timezone == "Missing/Timezone"
+
+
+def test_browser_channel_defaults_to_bundled_chromium(tmp_path, monkeypatch):
+    monkeypatch.delenv("AVITO_BROWSER_CHANNEL", raising=False)
+
+    settings = Settings.load(tmp_path)
+
+    assert settings.avito_browser_channel == ""
+
+
+def test_browser_channel_normalizes_installed_chrome(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVITO_BROWSER_CHANNEL", " Chrome ")
+
+    settings = Settings.load(tmp_path)
+
+    assert settings.avito_browser_channel == "chrome"
+
+
+def test_browser_channel_rejects_unknown_playwright_channel(settings):
+    configured = replace(settings, avito_browser_channel="firefox")
+
+    with pytest.raises(ConfigurationError, match="AVITO_BROWSER_CHANNEL"):
+        configured.validate()

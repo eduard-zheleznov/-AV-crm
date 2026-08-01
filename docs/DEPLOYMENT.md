@@ -9,7 +9,7 @@
 3. Tesseract OCR (Windows build). Путь обычно
    `C:\Program Files\Tesseract-OCR\tesseract.exe`.
 
-Система рассчитана на интерактивную Windows-сессию: Playwright Chromium / Chrome for Testing должен быть виден,
+Система рассчитана на интерактивную Windows-сессию: Playwright Chromium или Chrome Stable должен быть виден,
 чтобы оператор при необходимости мог войти или выйти из Avito и вручную пройти
 проверку. Вход в Avito необязателен. Не запускайте систему как скрытый Windows service.
 
@@ -45,6 +45,19 @@ GOOGLE_WORKSHEET=Лист1
 
 JSON не должен находиться внутри репозитория.
 
+Если Avito не показывает телефон в поставляемом Playwright Chromium, но показывает
+его в обычном Chrome на том же Windows-компьютере, можно включить установленный Chrome Stable:
+
+```dotenv
+AVITO_BROWSER_CHANNEL=chrome
+AVITO_PROFILE_DIR=C:\avito-crm\data\browser-profile-chrome
+```
+
+Сначала закройте worker и все окна Playwright, затем откройте `avito-profile`, войдите в Avito
+и вручную проверьте одно объявление. Старый `data\browser-profile` не удаляйте, не копируйте
+и не открывайте одновременно с новым Chrome-профилем. Пустой `AVITO_BROWSER_CHANNEL` сохраняет
+прежний Chromium fallback.
+
 ## 4. Формат таблицы
 
 Первая строка — заголовки. Обязательна только колонка `Ссылка`. Служебные
@@ -71,7 +84,7 @@ JSON не должен находиться внутри репозитория.
 .\scripts\doctor.ps1 -Source google -OnlineCrm
 
 # Откройте общий профиль; войдите, выйдите или оставьте гостевой режим,
-# затем закройте Playwright-браузер. Состояние сохранится в data\browser-profile.
+# затем закройте Playwright-браузер. Состояние сохранится в AVITO_PROFILE_DIR.
 .\.venv\Scripts\python.exe -m avito_crm avito-profile
 
 # Получите один номер без записи в CRM

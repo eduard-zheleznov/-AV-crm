@@ -39,10 +39,39 @@ def test_profile_manager_and_worker_share_profile_without_requiring_login(settin
         str(configured.browser_profile_dir),
     ]
     assert [call["headless"] for call in playwright.chromium.calls] == [False, True]
+    assert [call["channel"] for call in playwright.chromium.calls] == [None, None]
     assert all(
         "username" not in call and "password" not in call for call in playwright.chromium.calls
     )
     assert all("--no-first-run" in call["args"] for call in playwright.chromium.calls)
+
+
+def test_installed_chrome_channel_uses_its_own_persistent_profile(settings, tmp_path):
+    chrome_profile = tmp_path / "browser-profile-chrome"
+    configured = replace(
+        settings,
+        avito_browser_channel="chrome",
+        browser_profile_dir=chrome_profile,
+    )
+    playwright = FakePlaywright()
+
+    launch_avito_context(playwright, configured, force_visible=True)
+
+    assert playwright.chromium.calls == [
+        {
+            "user_data_dir": str(chrome_profile),
+            "channel": "chrome",
+            "headless": False,
+            "locale": "ru-RU",
+            "viewport": {"width": 1440, "height": 900},
+            "accept_downloads": False,
+            "args": [
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-session-crashed-bubble",
+            ],
+        }
+    ]
 
 
 def test_fresh_page_closes_tabs_restored_from_previous_session():

@@ -114,6 +114,7 @@ class Settings:
     logs_dir: Path
     state_db: Path
     browser_profile_dir: Path
+    avito_browser_channel: str
     screenshot_dir: Path
 
     lptracker_base_url: str
@@ -241,6 +242,7 @@ class Settings:
             browser_profile_dir=Path(os.getenv("AVITO_PROFILE_DIR", data / "browser-profile"))
             .expanduser()
             .resolve(),
+            avito_browser_channel=os.getenv("AVITO_BROWSER_CHANNEL", "").strip().casefold(),
             screenshot_dir=Path(os.getenv("AVITO_SCREENSHOT_DIR", output / "diagnostics"))
             .expanduser()
             .resolve(),
@@ -423,6 +425,8 @@ class Settings:
                 raise ConfigurationError(f"Некорректный диапазон {label}")
         if self.avito_phone_first_round_attempts < 1:
             raise ConfigurationError("AVITO_PHONE_FIRST_ROUND_ATTEMPTS должен быть больше нуля")
+        if self.avito_browser_channel not in {"", "chrome"}:
+            raise ConfigurationError("AVITO_BROWSER_CHANNEL должен быть пустым или равен chrome")
         if self.avito_phone_second_round_attempts < 0:
             raise ConfigurationError(
                 "AVITO_PHONE_SECOND_ROUND_ATTEMPTS не может быть отрицательным"
