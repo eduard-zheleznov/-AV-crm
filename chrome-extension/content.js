@@ -62,7 +62,7 @@ async function revealOnce(command) {
   const button = await waitForPhoneButton(Math.min(10000, command.phoneWaitMs));
   if (!button) {
     if (hasTemporaryNumberLabel()) {
-      return { status: "screenshot" };
+      return { status: "screenshot", crop: captureRegion(null, null) };
     }
     return { status: "button_missing", reason: "Кнопка показа телефона не найдена" };
   }
@@ -97,11 +97,11 @@ async function revealOnce(command) {
       if (finalPhone) {
         return { status: "phone", phone: finalPhone, source: "chrome-extension-dom" };
       }
-      return { status: "screenshot", crop: phoneRegion };
+      return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
     }
     await delay(500);
   }
-  return { status: "screenshot", crop: phoneRegion };
+  return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
 }
 
 async function waitForManualAction(timeoutMs) {
@@ -274,8 +274,56 @@ function screenRegion(element) {
     width: rect.width,
     height: rect.height,
     screenWidth: window.screen.width,
-    screenHeight: window.screen.height
+    screenHeight: window.screen.height,
+    kind: "control"
   };
+}
+
+function captureRegion(fallbackElement, fallbackRegion) {
+  const selectors = [
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    '[data-marker*="modal" i]',
+    '[data-marker*="popup" i]',
+    '[data-marker*="phone" i]',
+    '[class*="modal" i]',
+    '[class*="popup" i]',
+    '[class*="popover" i]'
+  ];
+  let selected = null;
+  let selectedScore = 0;
+  const seen = new Set();
+  for (const element of document.querySelectorAll(selectors.join(","))) {
+    if (seen.has(element) || !isVisible(element)) {
+      continue;
+    }
+    seen.add(element);
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 120 || rect.height < 40 || rect.width > window.innerWidth * 0.95) {
+      continue;
+    }
+    const text = (element.innerText || element.textContent || "").toLowerCase();
+    let score = 0;
+    if (text.includes("временный номер")) score += 120;
+    if (text.includes("звонок через авито")) score += 100;
+    if (normalizePhone(text)) score += 140;
+    if (element.matches('[role="dialog"], [aria-modal="true"]')) score += 60;
+    if (fallbackElement && element.contains(fallbackElement)) score += 20;
+    if (score > selectedScore || (score === selectedScore && selected && rect.width < selected.rect.width)) {
+      selected = { element, rect };
+      selectedScore = score;
+    }
+  }
+  if (!selected || selectedScore < 60) {
+    return fallbackRegion;
+  }
+  const region = screenRegion(selected.element);
+  region.kind = selected.element.matches('[role="dialog"], [aria-modal="true"]')
+    ? "dialog"
+    : selected.rect.height > 180
+      ? "panel"
+      : "control";
+  return region;
 }
 
 function isVisible(element) {

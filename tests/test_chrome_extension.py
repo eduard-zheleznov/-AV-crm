@@ -136,8 +136,7 @@ class _FakeNotifier:
 class _FakeOcr:
     def read_png(self, png: bytes, _artifact_path=None, *, psm: int = 7) -> PhoneResult:
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
-        assert psm == 7
-        return PhoneResult("+79991234567", "fake-ocr-region")
+        return PhoneResult("+79991234567", f"fake-ocr-region-{psm}")
 
     def read_viewport_png(self, png: bytes) -> PhoneResult:
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
@@ -222,4 +221,47 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "fake-ocr-region"
+    assert result.source == "fake-ocr-region-7"
+
+
+def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monkeypatch):
+    png = b"\x89PNG\r\n\x1a\nplaceholder"
+    monkeypatch.setattr(
+        chrome_extension_module,
+        "_capture_interactive_desktop_png",
+        lambda crop: png,
+    )
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "screen_capture",
+            {
+                "crop": {
+                    "left": 300,
+                    "top": 150,
+                    "width": 650,
+                    "height": 450,
+                    "screenWidth": 1280,
+                    "screenHeight": 720,
+                    "kind": "dialog",
+                }
+            },
+        )
+    )
+
+    with browser:
+        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert result.phone == "+79991234567"
+    assert result.source == "fake-ocr-region-6"
+
+
+def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):
+    from avito_crm.errors import PhoneNotFoundError
+
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(ExtensionEvent("result", "screen_capture", {"crop": None}))
+
+    with pytest.raises(PhoneNotFoundError, match="безопасно определить"), browser:
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)

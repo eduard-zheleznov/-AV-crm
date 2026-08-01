@@ -350,6 +350,11 @@ class ChromeExtensionBrowser:
                 raise PhoneNotFoundError("Расширение вернуло некорректный номер")
             return PhoneResult(phone, str(payload.get("source", "chrome-extension-dom")))
         if status in {"screenshot", "screen_capture"}:
+            if status == "screen_capture" and not isinstance(payload.get("crop"), dict):
+                raise PhoneNotFoundError(
+                    "Chrome открыл номер, но не смог безопасно определить его область; "
+                    "широкий снимок намеренно не распознаётся"
+                )
             png = (
                 _decode_screenshot(str(payload.get("screenshot", "")))
                 if status == "screenshot"
@@ -359,7 +364,12 @@ class ChromeExtensionBrowser:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
             if status == "screen_capture" and isinstance(payload.get("crop"), dict):
-                return self.ocr.read_png(png, artifact, psm=7)
+                crop_kind = str(payload["crop"].get("kind", "control"))
+                return self.ocr.read_png(
+                    png,
+                    artifact,
+                    psm=6 if crop_kind in {"dialog", "panel"} else 7,
+                )
             return self.ocr.read_viewport_png(png)
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
