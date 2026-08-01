@@ -220,6 +220,7 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
 
     panel.ensure_layout()
 
+    assert control.values[7][0] == "Повторить строки после капчи (обычно выкл.)"
     assert tuple(history.values[0]) == HISTORY_HEADERS
     analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
     assert analytics.values[0][0] == ANALYTICS_MARKER
@@ -459,6 +460,34 @@ def test_expected_listing_outcomes_do_not_mark_remote_run_as_error(settings):
 
     assert result["status"] == "ЗАВЕРШЕНО"
     assert "технических ошибок 0" in result["message"]
+
+
+def test_remote_run_reports_time_deferred_status(settings):
+    panel = FakePanel(PanelCommand(False, False, 1, "Лист1", False))
+    controller = InstantController(settings, panel)
+    state = CommandState(
+        command_id="cmd-time-deferred",
+        target=1,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-08-01T18:19:40+00:00",
+    )
+
+    result = controller._classify_summary(
+        state,
+        RunSummary(
+            run_id=state.command_id,
+            requested=1,
+            stopped_reason=(
+                "Отложено по времени: для всех доступных строк сейчас нет "
+                "безопасного местного окна 10:00–19:45"
+            ),
+        ),
+    )
+
+    assert result["status"] == "ОТЛОЖЕНО ПО ВРЕМЕНИ"
+    assert "10:00–19:45" in result["message"]
 
 
 def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):

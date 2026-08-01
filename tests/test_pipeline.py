@@ -43,6 +43,15 @@ class FakeQueue(QueueSource):
         item.values[self.columns.phone] = patch.phone
 
 
+class ClosedLocalWindowQueue(FakeQueue):
+    def __init__(self, settings):
+        super().__init__(settings)
+        self.item.values[settings.phone_column] = ""
+
+    def is_local_window_open(self, item, *, now=None):
+        return False
+
+
 def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings):
     source = FakeQueue(settings)
     progress = []
@@ -68,6 +77,25 @@ def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings
     assert source.patches[-1].status == ItemStatus.CAPTURED
     assert source.patches[-1].phone == "+79991234567"
     assert progress[-1] == ("remote-command-1", 1, "")
+
+
+def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings):
+    source = ClosedLocalWindowQueue(settings)
+    phases = []
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="capture",
+            live=True,
+        ).run(1, phase=phases.append)
+
+    assert summary.inspected == 0
+    assert summary.stopped_reason.startswith("Отложено по времени")
+    assert "10:00–19:45" in summary.stopped_reason
+    assert phases[-1] == summary.stopped_reason
 
 
 class RoundQueue(QueueSource):

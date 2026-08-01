@@ -171,10 +171,12 @@ class Pipeline:
                     ]
                     if not eligible_items:
                         if mode_eligible and self.live:
-                            LOGGER.info(
-                                "Все доступные строки отложены: сейчас нет безопасного "
-                                "местного окна 10:00–19:45"
+                            summary.stopped_reason = (
+                                "Отложено по времени: для всех доступных строк "
+                                "сейчас нет безопасного местного окна 10:00–19:45"
                             )
+                            LOGGER.info(summary.stopped_reason)
+                            self._report_phase(phase, summary.stopped_reason)
                         break
 
                     round_number += 1

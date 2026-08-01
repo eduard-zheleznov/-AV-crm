@@ -437,6 +437,8 @@ class GoogleControlPanel:
                 status = "ТРЕБУЕТ ВНИМАНИЯ"
             elif "останов" in summary.stopped_reason.casefold():
                 status = "ОСТАНОВЛЕНО"
+            elif summary.stopped_reason.casefold().startswith("отложено по времени"):
+                status = "ОТЛОЖЕНО ПО ВРЕМЕНИ"
             elif summary.crm_sync_errors:
                 status = "ЗАВЕРШЕНО С ПРЕДУПРЕЖДЕНИЯМИ"
             else:
@@ -570,7 +572,7 @@ class GoogleControlPanel:
         matrix[5] = ["Цель по новым лидам (0 = все)", 0, "", "Прогресс", "0 / все", ""]
         matrix[6] = ["Лист очереди", self.settings.google_worksheet, "", "Запущено", "", ""]
         matrix[7] = [
-            "Повторить строки после ручной проверки",
+            "Повторить строки после капчи (обычно выкл.)",
             False,
             "",
             "Последняя связь с компьютером",
@@ -607,7 +609,7 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A8",
-                    "values": [["Повторить строки после ручной проверки"]],
+                    "values": [["Повторить строки после капчи (обычно выкл.)"]],
                 },
                 {
                     "range": "D8",
@@ -1444,6 +1446,8 @@ class RemoteController:
         self._progress = progress
         if state.stop_requested or "останов" in summary.stopped_reason.casefold():
             status = "ОСТАНОВЛЕНО"
+        elif summary.stopped_reason.casefold().startswith("отложено по времени"):
+            status = "ОТЛОЖЕНО ПО ВРЕМЕНИ"
         elif progress.manual_required:
             status = "ТРЕБУЕТ ВНИМАНИЯ"
         elif progress.errors:
@@ -1749,6 +1753,7 @@ def _status_conditional_requests(
         ("TEXT_EQ", "ЗАВЕРШЕНО", (0.86, 0.96, 0.9), (0.08, 0.42, 0.2)),
         ("TEXT_EQ", "РАБОТАЕТ", (0.86, 0.92, 1.0), (0.08, 0.31, 0.72)),
         ("TEXT_EQ", "ПРИНЯТО", (0.86, 0.92, 1.0), (0.08, 0.31, 0.72)),
+        ("TEXT_CONTAINS", "ОТЛОЖЕНО", (1.0, 0.95, 0.8), (0.55, 0.32, 0.03)),
         ("TEXT_CONTAINS", "ОШИБ", (1.0, 0.9, 0.9), (0.7, 0.1, 0.1)),
         ("TEXT_CONTAINS", "ВНИМАНИЯ", (1.0, 0.95, 0.8), (0.55, 0.32, 0.03)),
         ("TEXT_CONTAINS", "НЕДОСТАТОЧНО", (1.0, 0.95, 0.8), (0.55, 0.32, 0.03)),
