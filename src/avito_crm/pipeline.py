@@ -60,12 +60,18 @@ class Pipeline:
         self,
         limit: int,
         *,
+        max_inspected: int = 0,
         run_id: str | None = None,
         progress: Callable[[RunSummary, str], None] | None = None,
         phase: Callable[[str], None] | None = None,
     ) -> RunSummary:
         if limit < 0:
             raise ValueError("Лимит не может быть отрицательным; 0 означает «все строки»")
+        if max_inspected < 0:
+            raise ValueError(
+                "Предел просмотренных строк не может быть отрицательным; "
+                "0 означает «без предела»"
+            )
         self.stop_file.unlink(missing_ok=True)
         summary = RunSummary(run_id=run_id or uuid.uuid4().hex[:12], requested=limit)
         self.state.begin_run(summary)
@@ -184,6 +190,12 @@ class Pipeline:
                     for item in eligible_items:
                         if self.stop_file.exists():
                             summary.stopped_reason = "Остановлено оператором"
+                            should_stop = True
+                            break
+                        if max_inspected and summary.inspected >= max_inspected:
+                            summary.stopped_reason = (
+                                "Достигнут предел просмотренных объявлений"
+                            )
                             should_stop = True
                             break
                         if self._goal_reached(summary, limit):

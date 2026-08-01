@@ -141,6 +141,15 @@ def _add_source_args(
             help="Цель успешных номеров/лидов; 0 (по умолчанию) — обработать все строки",
         )
         parser.add_argument(
+            "--max-inspected",
+            type=int,
+            default=0,
+            help=(
+                "Жёсткий предел попыток обработки строк; 0 (по умолчанию) — "
+                "без дополнительного предела"
+            ),
+        )
+        parser.add_argument(
             "--retry-manual",
             action="store_true",
             help="Повторить строки, ожидающие ручной проверки Avito",
@@ -243,7 +252,7 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
                 live=live,
                 include_manual=args.retry_manual,
                 interactive_phone_check=bool(getattr(args, "interactive_check", False)),
-            ).run(args.limit)
+            ).run(args.limit, max_inspected=args.max_inspected)
         if live:
             _publish_run_analytics(
                 settings,

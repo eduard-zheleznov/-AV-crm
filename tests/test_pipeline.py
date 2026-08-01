@@ -225,6 +225,33 @@ def test_unlimited_mode_processes_more_than_twenty_five_rows(tmp_path, settings,
     assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
 
 
+def test_max_inspected_is_a_hard_canary_boundary(tmp_path, settings, monkeypatch):
+    source = RoundQueue(settings, count=10)
+    browser = SequencedBrowser(
+        {item.row_id: [f"+7999{index:07d}"] for index, item in enumerate(source.items, start=1)}
+    )
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(10, max_inspected=5)
+
+    assert browser.calls == ["2", "3", "4", "5", "6"]
+    assert summary.inspected == 5
+    assert summary.captured == 5
+    assert summary.stopped_reason == "Достигнут предел просмотренных объявлений"
+
+
 def test_phone_failure_becomes_normal_terminal_outcome_after_all_attempts(
     tmp_path, settings, monkeypatch
 ):
