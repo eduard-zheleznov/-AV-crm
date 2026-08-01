@@ -2,6 +2,8 @@ import pytest
 
 from avito_crm import cli
 from avito_crm.cli import build_parser
+from avito_crm.models import QueueItem
+from avito_crm.queue import QueueColumns
 
 
 def test_run_requires_limit_and_accepts_live():
@@ -97,3 +99,59 @@ def test_remote_control_requires_an_explicit_live_flag_at_runtime():
     assert setup.setup_only is True
     assert setup.allow_live_crm is False
     assert live.allow_live_crm is True
+
+
+def test_cleanup_test_run_is_preview_only_by_default():
+    args = build_parser().parse_args(
+        [
+            "cleanup-test-run",
+            "--run-id",
+            "first-run",
+            "--run-id",
+            "volume-run",
+        ]
+    )
+
+    assert args.run_id == ["first-run", "volume-run"]
+    assert args.apply is False
+    assert args.expected_leads == 0
+
+
+def test_cleanup_candidates_include_only_created_active_test_leads(settings):
+    columns = QueueColumns.from_settings(settings)
+    created = QueueItem(
+        row_id="503",
+        url="https://www.avito.ru/moskva/test_123456789",
+        status="crm_monitoring",
+        attempts=1,
+        values={
+            columns.run_id: "test-run",
+            columns.crm_lead_id: "777001",
+            columns.crm_create_count: "1",
+            columns.repeat_crm_lead_id: "",
+        },
+    )
+    retry_without_lead = QueueItem(
+        row_id="504",
+        url="https://www.avito.ru/moskva/test_223456789",
+        status="retry_phone",
+        attempts=1,
+        values={columns.run_id: "test-run", columns.crm_create_count: "0"},
+    )
+    unrelated = QueueItem(
+        row_id="505",
+        url="https://www.avito.ru/moskva/test_323456789",
+        status="crm_monitoring",
+        attempts=1,
+        values={
+            columns.run_id: "other-run",
+            columns.crm_lead_id: "777002",
+            columns.crm_create_count: "1",
+        },
+    )
+
+    candidates = cli._test_cleanup_candidates(
+        [created, retry_without_lead, unrelated], columns, {"test-run"}
+    )
+
+    assert candidates == [(created, "777001")]
