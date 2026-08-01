@@ -176,7 +176,7 @@ async function focusTab(tabId) {
 }
 
 function waitForLoad(tabId, timeoutMs) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let settled = false;
     const cleanup = () => {
       chrome.tabs.onUpdated.removeListener(listener);
@@ -201,7 +201,7 @@ function waitForLoad(tabId, timeoutMs) {
       }
       settled = true;
       cleanup();
-      reject(new Error("Страница Avito не загрузилась за отведённое время"));
+      resolve();
     }, Math.max(1000, timeoutMs));
     chrome.tabs.onUpdated.addListener(listener);
     chrome.tabs.get(tabId).then((tab) => {
