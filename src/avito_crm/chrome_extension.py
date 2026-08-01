@@ -353,11 +353,13 @@ class ChromeExtensionBrowser:
             png = (
                 _decode_screenshot(str(payload.get("screenshot", "")))
                 if status == "screenshot"
-                else _capture_interactive_desktop_png()
+                else _capture_interactive_desktop_png(payload.get("crop"))
             )
             artifact = self._artifact_path(canonical_url, "extension-viewport")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
+            if status == "screen_capture" and isinstance(payload.get("crop"), dict):
+                return self.ocr.read_png(png, artifact, psm=7)
             return self.ocr.read_viewport_png(png)
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
@@ -449,13 +451,37 @@ def _decode_screenshot(data_url: str) -> bytes:
     return png
 
 
-def _capture_interactive_desktop_png() -> bytes:
+def _capture_interactive_desktop_png(crop: object = None) -> bytes:
     if os.name != "nt":
         raise BrowserOperationError("Резервный снимок экрана доступен только в Windows")
     try:
         from PIL import ImageGrab
 
-        image = ImageGrab.grab(all_screens=True)
+        image = ImageGrab.grab(all_screens=True).convert("RGB")
+        if isinstance(crop, dict):
+            try:
+                screen_width = float(crop["screenWidth"])
+                screen_height = float(crop["screenHeight"])
+                left = float(crop["left"])
+                top = float(crop["top"])
+                width = float(crop["width"])
+                height = float(crop["height"])
+            except (KeyError, TypeError, ValueError):
+                screen_width = screen_height = width = height = 0
+                left = top = 0
+            if screen_width > 0 and screen_height > 0 and width > 10 and height > 10:
+                scale_x = image.width / screen_width
+                scale_y = image.height / screen_height
+                pad_x = max(8.0, width * 0.06)
+                pad_y = max(6.0, height * 0.12)
+                box = (
+                    max(0, round((left - pad_x) * scale_x)),
+                    max(0, round((top - pad_y) * scale_y)),
+                    min(image.width, round((left + width + pad_x) * scale_x)),
+                    min(image.height, round((top + height + pad_y) * scale_y)),
+                )
+                if box[2] - box[0] > 20 and box[3] - box[1] > 20:
+                    image = image.crop(box)
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
         return buffer.getvalue()

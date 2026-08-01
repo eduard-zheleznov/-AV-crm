@@ -108,7 +108,8 @@ async function executeCommand(command) {
         await postEvent({
           id: command.id,
           type: "result",
-          status: "screen_capture"
+          status: "screen_capture",
+          crop: result.crop || null
         });
         return;
       }

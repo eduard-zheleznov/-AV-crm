@@ -69,6 +69,7 @@ async function revealOnce(command) {
 
   button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
   await delay(750);
+  const phoneRegion = screenRegion(button);
   button.focus({ preventScroll: true });
   notifyStatus("clicking", "кнопка показа телефона найдена");
   button.click();
@@ -96,11 +97,11 @@ async function revealOnce(command) {
       if (finalPhone) {
         return { status: "phone", phone: finalPhone, source: "chrome-extension-dom" };
       }
-      return { status: "screenshot" };
+      return { status: "screenshot", crop: phoneRegion };
     }
     await delay(500);
   }
-  return { status: "screenshot" };
+  return { status: "screenshot", crop: phoneRegion };
 }
 
 async function waitForManualAction(timeoutMs) {
@@ -261,6 +262,20 @@ function normalizePhone(value) {
     return "";
   }
   return `+7${digits.slice(1)}`;
+}
+
+function screenRegion(element) {
+  const rect = element.getBoundingClientRect();
+  const frameX = Math.max(0, (window.outerWidth - window.innerWidth) / 2);
+  const frameY = Math.max(0, window.outerHeight - window.innerHeight - frameX);
+  return {
+    left: window.screenX + frameX + rect.left,
+    top: window.screenY + frameY + rect.top,
+    width: rect.width,
+    height: rect.height,
+    screenWidth: window.screen.width,
+    screenHeight: window.screen.height
+  };
 }
 
 function isVisible(element) {

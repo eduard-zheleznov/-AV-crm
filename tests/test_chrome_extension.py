@@ -134,6 +134,11 @@ class _FakeNotifier:
 
 
 class _FakeOcr:
+    def read_png(self, png: bytes, _artifact_path=None, *, psm: int = 7) -> PhoneResult:
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        assert psm == 7
+        return PhoneResult("+79991234567", "fake-ocr-region")
+
     def read_viewport_png(self, png: bytes) -> PhoneResult:
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
         return PhoneResult("+79991234567", "fake-ocr")
@@ -193,13 +198,28 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
     monkeypatch.setattr(
         chrome_extension_module,
         "_capture_interactive_desktop_png",
-        lambda: png,
+        lambda crop: png,
     )
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
-    browser.bridge = _FakeBridge(ExtensionEvent("result", "screen_capture", {}))
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "screen_capture",
+            {
+                "crop": {
+                    "left": 100,
+                    "top": 200,
+                    "width": 300,
+                    "height": 80,
+                    "screenWidth": 1920,
+                    "screenHeight": 1080,
+                }
+            },
+        )
+    )
 
     with browser:
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "fake-ocr"
+    assert result.source == "fake-ocr-region"
