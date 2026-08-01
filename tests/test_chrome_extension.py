@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+import avito_crm.chrome_extension as chrome_extension_module
 from avito_crm.chrome_extension import ChromeExtensionBrowser, ExtensionBridge, ExtensionEvent
 from avito_crm.models import PhoneResult
 
@@ -179,6 +180,23 @@ def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):
             {"screenshot": "data:image/png;base64," + base64.b64encode(png).decode()},
         )
     )
+
+    with browser:
+        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert result.phone == "+79991234567"
+    assert result.source == "fake-ocr"
+
+
+def test_extension_browser_can_capture_the_interactive_windows_desktop(settings, monkeypatch):
+    png = b"\x89PNG\r\n\x1a\nplaceholder"
+    monkeypatch.setattr(
+        chrome_extension_module,
+        "_capture_interactive_desktop_png",
+        lambda: png,
+    )
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(ExtensionEvent("result", "screen_capture", {}))
 
     with browser:
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)

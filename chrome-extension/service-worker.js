@@ -105,25 +105,11 @@ async function executeCommand(command) {
       if (result.status === "screenshot") {
         await focusTab(tab.id);
         await delay(300);
-        try {
-          const current = await chrome.tabs.get(tab.id);
-          const screenshot = await chrome.tabs.captureVisibleTab(current.windowId, {
-            format: "png"
-          });
-          await postEvent({
-            id: command.id,
-            type: "result",
-            status: "screenshot",
-            screenshot
-          });
-        } catch (error) {
-          await postEvent({
-            id: command.id,
-            type: "result",
-            status: "error",
-            reason: `Chrome не смог сделать снимок вкладки: ${safeMessage(error)}`
-          });
-        }
+        await postEvent({
+          id: command.id,
+          type: "result",
+          status: "screen_capture"
+        });
         return;
       }
       await postEvent({ id: command.id, type: "result", ...result });

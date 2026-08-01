@@ -214,6 +214,10 @@ function findPhone() {
       return phone;
     }
   }
+  const fromVisiblePage = normalizePhone(document.body?.innerText || "");
+  if (fromVisiblePage) {
+    return fromVisiblePage;
+  }
   return "";
 }
 

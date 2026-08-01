@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import logging
 import os
@@ -348,8 +349,12 @@ class ChromeExtensionBrowser:
             if not phone:
                 raise PhoneNotFoundError("Расширение вернуло некорректный номер")
             return PhoneResult(phone, str(payload.get("source", "chrome-extension-dom")))
-        if status == "screenshot":
-            png = _decode_screenshot(str(payload.get("screenshot", "")))
+        if status in {"screenshot", "screen_capture"}:
+            png = (
+                _decode_screenshot(str(payload.get("screenshot", "")))
+                if status == "screenshot"
+                else _capture_interactive_desktop_png()
+            )
             artifact = self._artifact_path(canonical_url, "extension-viewport")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
@@ -442,3 +447,17 @@ def _decode_screenshot(data_url: str) -> bytes:
     if not png.startswith(b"\x89PNG\r\n\x1a\n"):
         raise BrowserOperationError("Расширение вернуло не PNG-изображение")
     return png
+
+
+def _capture_interactive_desktop_png() -> bytes:
+    if os.name != "nt":
+        raise BrowserOperationError("Резервный снимок экрана доступен только в Windows")
+    try:
+        from PIL import ImageGrab
+
+        image = ImageGrab.grab(all_screens=True)
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+    except Exception as exc:
+        raise BrowserOperationError(f"Не удалось сделать снимок экрана Windows: {exc}") from exc
