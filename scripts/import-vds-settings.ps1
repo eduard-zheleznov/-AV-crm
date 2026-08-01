@@ -18,7 +18,9 @@ function Get-EnvValue {
         [string]$Name
     )
 
-    $Pattern = "(?m)^" + [regex]::Escape($Name) + "=(.*)$"
+    # Explicitly exclude CR/LF: in .NET multiline mode `$` matches before LF,
+    # so a CRLF file would otherwise leave `r inside the captured value.
+    $Pattern = "(?m)^" + [regex]::Escape($Name) + "=([^`r`n]*)$"
     $Matches = [regex]::Matches($Text, $Pattern)
     if ($Matches.Count -gt 1) {
         throw "$Name встречается в .env несколько раз"
@@ -39,7 +41,7 @@ function Set-EnvValue {
     if ($Value.Contains("`r") -or $Value.Contains("`n")) {
         throw "$Name содержит недопустимый перевод строки"
     }
-    $Pattern = "(?m)^" + [regex]::Escape($Name) + "=.*$"
+    $Pattern = "(?m)^" + [regex]::Escape($Name) + "=[^`r`n]*$"
     $Count = [regex]::Matches($Text, $Pattern).Count
     if ($Count -gt 1) {
         throw "$Name встречается в .env несколько раз"
