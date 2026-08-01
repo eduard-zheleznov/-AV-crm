@@ -66,21 +66,18 @@ foreach ($RequiredPath in @($EnvPath, $SourceEnv, $SourceGoogle)) {
 $LocalText = [System.IO.File]::ReadAllText($EnvPath)
 $MergedText = [System.IO.File]::ReadAllText($SourceEnv)
 
-$LocalToken = Get-EnvValue $LocalText "AVITO_EXTENSION_TOKEN"
-if ([string]::IsNullOrWhiteSpace($LocalToken) -or $LocalToken.Length -lt 32) {
-    if (-not (Test-Path -LiteralPath $ExtensionConfigPath -PathType Leaf)) {
-        throw "Не найдена локальная конфигурация расширения обычного Chrome"
-    }
-    $ExtensionConfigText = [System.IO.File]::ReadAllText($ExtensionConfigPath)
-    $TokenMatch = [regex]::Match(
-        $ExtensionConfigText,
-        'token\s*:\s*"([A-Za-z0-9_-]{32,})"'
-    )
-    if (-not $TokenMatch.Success) {
-        throw "В config.local.js не найден токен моста обычного Chrome"
-    }
-    $LocalToken = $TokenMatch.Groups[1].Value
+if (-not (Test-Path -LiteralPath $ExtensionConfigPath -PathType Leaf)) {
+    throw "Не найдена локальная конфигурация расширения обычного Chrome"
 }
+$ExtensionConfigText = [System.IO.File]::ReadAllText($ExtensionConfigPath)
+$TokenMatch = [regex]::Match(
+    $ExtensionConfigText,
+    'token\s*:\s*"([A-Za-z0-9_-]{32,})"'
+)
+if (-not $TokenMatch.Success) {
+    throw "В config.local.js не найден токен моста обычного Chrome"
+}
+[string]$LocalToken = $TokenMatch.Groups[1].Value
 
 $SpreadsheetId = Get-EnvValue $MergedText "GOOGLE_SPREADSHEET_ID"
 $Login = Get-EnvValue $MergedText "LPTRACKER_LOGIN"
@@ -161,7 +158,8 @@ finally {
 }
 
 $WrittenText = [System.IO.File]::ReadAllText($EnvPath)
-if ((Get-EnvValue $WrittenText "AVITO_EXTENSION_TOKEN") -ne $LocalToken) {
+[string]$WrittenToken = Get-EnvValue $WrittenText "AVITO_EXTENSION_TOKEN"
+if (-not [string]::Equals($WrittenToken, $LocalToken, [System.StringComparison]::Ordinal)) {
     throw "Контроль импорта не пройден: токен Chrome изменился"
 }
 if ((Get-EnvValue $WrittenText "AVITO_BROWSER_DRIVER") -ne "chrome_extension") {
