@@ -7,7 +7,7 @@ import json
 import logging
 import mimetypes
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
@@ -294,7 +294,6 @@ class RobotLeadHandoff:
             lead = candidate
             record: dict[str, Any] | None = None
             try:
-                lead = candidate if lead_id is not None else self.crm.get_lead(candidate_id)
                 if not is_managed_avito_lead(lead):
                     summary.skipped += 1
                     continue
@@ -307,6 +306,20 @@ class RobotLeadHandoff:
                 if _normalized(stage_name) != _normalized(source_step["name"]):
                     summary.skipped += 1
                     continue
+                if lead_id is None:
+                    lead = self.crm.get_lead(candidate_id)
+                    if not is_managed_avito_lead(lead):
+                        summary.skipped += 1
+                        continue
+                    stage_name = self.crm.get_lead_stage_name(
+                        candidate_id,
+                        project_id=project_id,
+                        funnel_steps=steps,
+                        lead=lead,
+                    )
+                    if _normalized(stage_name) != _normalized(source_step["name"]):
+                        summary.skipped += 1
+                        continue
                 record = _latest_successful_outgoing_record(lead)
                 if record is None:
                     summary.skipped += 1
@@ -392,34 +405,34 @@ class RobotLeadHandoff:
 
     def _candidates(
         self, project_id: int, lead_id: str | int | None
-    ) -> list[dict[str, Any]]:
+    ) -> Iterator[dict[str, Any]]:
         if lead_id is not None:
-            return [self.crm.get_lead(str(lead_id).strip())]
+            yield self.crm.get_lead(str(lead_id).strip())
+            return
         updated_from = int(
             (datetime.now(UTC) - timedelta(hours=self.settings.robot_handoff_lookback_hours))
             .timestamp()
         )
-        candidates: list[dict[str, Any]] = []
         seen: set[str] = set()
-        page_size = 100
+        page_size = 200
         scan_limit = 500
         for offset in range(0, scan_limit, page_size):
+            request_limit = min(page_size, scan_limit - offset)
             page = self.crm.list_recent_leads(
                 project_id,
                 updated_from=updated_from,
-                limit=page_size,
+                limit=request_limit,
                 offset=offset,
             )
-            new_items = []
+            new_items = 0
             for candidate in page:
                 candidate_id = str(candidate.get("id", "")).strip()
                 if candidate_id and candidate_id not in seen:
                     seen.add(candidate_id)
-                    new_items.append(candidate)
-            candidates.extend(new_items)
-            if len(page) < page_size or not new_items:
+                    new_items += 1
+                    yield candidate
+            if len(page) < request_limit or not new_items:
                 break
-        return candidates
 
     def _handle_one(
         self,

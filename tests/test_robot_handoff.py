@@ -154,6 +154,57 @@ class FakeCrm:
         self.lead["funnel"] = {"id": funnel_id, "name": "Новый лид"}
 
 
+class StagePrefilterCrm(FakeCrm):
+    def __init__(self, lead: dict) -> None:
+        super().__init__(lead)
+        self.get_lead_calls: list[str] = []
+        self.list_calls = 0
+
+    def list_recent_leads(self, _project_id: int, **_kwargs: object) -> list[dict]:
+        self.list_calls += 1
+        return [
+            {
+                "id": 701,
+                "name": "2 Авито — 111111111",
+                "view": {"campaign": "Avito CRM Pipeline"},
+                "stage_id": None,
+                "custom": [{"type": "funnel", "value": "20"}],
+            },
+            {
+                "id": 702,
+                "name": "Обычный лид",
+                "view": {"campaign": "Другой источник"},
+                "stage_id": None,
+                "custom": [{"type": "funnel", "value": "10"}],
+            },
+            {
+                "id": 700,
+                "name": "2 Авито — 123456789",
+                "view": {"campaign": "Avito CRM Pipeline"},
+                "stage_id": None,
+                "custom": [{"type": "funnel", "value": "10"}],
+            },
+        ]
+
+    def get_lead(self, lead_id: str | int) -> dict:
+        self.get_lead_calls.append(str(lead_id))
+        return super().get_lead(lead_id)
+
+    def get_lead_stage_name(
+        self, _lead_id: str | int, *, lead: dict, **_kwargs: object
+    ) -> str:
+        direct = super().get_lead_stage_name(_lead_id, lead=lead)
+        if direct:
+            return direct
+        for field in lead.get("custom") or []:
+            if field.get("type") == "funnel":
+                return {
+                    "10": "⚙️ Лид с робота",
+                    "20": "Новый лид",
+                }.get(str(field.get("value", "")), "")
+        return ""
+
+
 class FailCustomOnceCrm(FakeCrm):
     def __init__(self, lead: dict) -> None:
         super().__init__(lead)
@@ -221,6 +272,30 @@ def test_handoff_replaces_phone_then_tag_then_funnel(settings):
     assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == (
         "03.08.2026 15:00"
     )
+    assert transcriber.calls == 1
+
+
+def test_handoff_prefilters_list_by_stage_before_loading_full_lead(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    crm = StagePrefilterCrm(_lead())
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        summary = handler.run_once(apply=False, limit=1)
+
+    assert summary.inspected == 3
+    assert summary.eligible == 1
+    assert summary.ready == 1
+    assert crm.list_calls == 1
+    assert crm.get_lead_calls == ["700"]
     assert transcriber.calls == 1
 
 

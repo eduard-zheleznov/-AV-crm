@@ -329,8 +329,19 @@ def test_crm_reads_funnel_stage_from_lead(settings):
             project_id=1,
             funnel_steps=[{"id": 12, "name": "Автоответчик"}],
         )
+        list_stage = crm.get_lead_stage_name(
+            778,
+            project_id=1,
+            funnel_steps=[{"id": 12, "name": "Автоответчик"}],
+            lead={
+                "id": 778,
+                "stage_id": None,
+                "custom": [{"type": "funnel", "value": "12"}],
+            },
+        )
 
     assert stage == "Автоответчик"
+    assert list_stage == "Автоответчик"
 
 
 def test_crm_calculates_first_call_delay_in_configured_timezone(settings):
