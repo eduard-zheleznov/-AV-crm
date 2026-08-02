@@ -144,6 +144,8 @@ class Settings:
     robot_handoff_target_funnel_name: str
     robot_handoff_field_name: str
     robot_handoff_field_value: str
+    robot_handoff_stage_date_field_name: str
+    robot_handoff_stage_delay_days: int
     robot_handoff_poll_seconds: float
     robot_handoff_lookback_hours: float
     robot_handoff_batch_size: int
@@ -320,6 +322,12 @@ class Settings:
             robot_handoff_field_value=os.getenv(
                 "ROBOT_HANDOFF_FIELD_VALUE", "Предлагаем бесплатный аудит авито"
             ).strip(),
+            robot_handoff_stage_date_field_name=os.getenv(
+                "ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME", "Дата шага"
+            ).strip(),
+            robot_handoff_stage_delay_days=int(
+                _int("ROBOT_HANDOFF_STAGE_DELAY_DAYS", 2) or 0
+            ),
             robot_handoff_poll_seconds=_float("ROBOT_HANDOFF_POLL_SECONDS", 120.0),
             robot_handoff_lookback_hours=_float("ROBOT_HANDOFF_LOOKBACK_HOURS", 72.0),
             robot_handoff_batch_size=int(_int("ROBOT_HANDOFF_BATCH_SIZE", 3) or 0),
@@ -448,6 +456,10 @@ class Settings:
             raise ConfigurationError("ROBOT_HANDOFF_BATCH_SIZE: допустимо от 1 до 10")
         if not 0.5 <= self.robot_handoff_min_confidence <= 1.0:
             raise ConfigurationError("ROBOT_HANDOFF_MIN_CONFIDENCE: допустимо от 0.5 до 1")
+        if not 1 <= self.robot_handoff_stage_delay_days <= 30:
+            raise ConfigurationError(
+                "ROBOT_HANDOFF_STAGE_DELAY_DAYS: допустимо от 1 до 30 дней"
+            )
         if not 1024 * 1024 <= self.gemini_max_audio_bytes <= 14 * 1024 * 1024:
             raise ConfigurationError(
                 "GEMINI_MAX_AUDIO_BYTES: допустимо от 1 до 14 МБ для inline-запроса"
@@ -469,6 +481,9 @@ class Settings:
                 "ROBOT_HANDOFF_TARGET_FUNNEL_NAME": self.robot_handoff_target_funnel_name,
                 "ROBOT_HANDOFF_FIELD_NAME": self.robot_handoff_field_name,
                 "ROBOT_HANDOFF_FIELD_VALUE": self.robot_handoff_field_value,
+                "ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME": (
+                    self.robot_handoff_stage_date_field_name
+                ),
                 "GEMINI_API_KEY": self.gemini_api_key,
                 "GEMINI_MODEL": self.gemini_model,
             }

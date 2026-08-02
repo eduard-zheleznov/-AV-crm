@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 
 import pytest
 
@@ -52,6 +53,43 @@ def test_state_store_persists_outcome_and_round_counters(tmp_path):
     assert run["processed"] == 4
     assert run["rounds"] == 3
     assert run["captchas_solved"] == 2
+
+
+def test_state_store_migrates_robot_handoff_due_date_without_losing_cache(tmp_path):
+    database = tmp_path / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE robot_handoffs (
+                lead_id TEXT PRIMARY KEY,
+                record_key TEXT NOT NULL,
+                phone TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO robot_handoffs(
+                lead_id, record_key, phone, status, error, updated_at
+            ) VALUES ('700', 'record-1', '+79991234567', 'recognized', '', 'now')
+            """
+        )
+
+    with StateStore(database) as state:
+        cached = state.get_robot_handoff(700)
+        columns = {
+            row[1]
+            for row in state.connection.execute(
+                "PRAGMA table_info(robot_handoffs)"
+            ).fetchall()
+        }
+
+    assert "stage_due_date" in columns
+    assert cached["phone"] == "+79991234567"
+    assert cached["stage_due_date"] == ""
 
 
 def test_state_store_accumulates_a_resumed_run(tmp_path):

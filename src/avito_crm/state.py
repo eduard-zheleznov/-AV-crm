@@ -81,6 +81,7 @@ class StateStore:
                 lead_id TEXT PRIMARY KEY,
                 record_key TEXT NOT NULL,
                 phone TEXT NOT NULL DEFAULT '',
+                stage_due_date TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 error TEXT NOT NULL DEFAULT '',
                 updated_at TEXT NOT NULL
@@ -121,6 +122,15 @@ class StateStore:
         for name, definition in item_migrations.items():
             if name not in item_columns:
                 self.connection.execute(f"ALTER TABLE items ADD COLUMN {name} {definition}")
+        handoff_columns = {
+            row[1]
+            for row in self.connection.execute("PRAGMA table_info(robot_handoffs)").fetchall()
+        }
+        if "stage_due_date" not in handoff_columns:
+            self.connection.execute(
+                "ALTER TABLE robot_handoffs "
+                "ADD COLUMN stage_due_date TEXT NOT NULL DEFAULT ''"
+            )
         self.connection.commit()
 
     def begin_run(self, summary: RunSummary) -> None:
@@ -292,25 +302,37 @@ class StateStore:
         *,
         record_key: str,
         phone: str = "",
+        stage_due_date: str | None = None,
         status: str,
         error: str = "",
     ) -> None:
+        normalized_record_key = str(record_key).strip()
+        previous = self.get_robot_handoff(lead_id)
+        if stage_due_date is None:
+            if previous and str(previous.get("record_key", "")) == normalized_record_key:
+                due_date = str(previous.get("stage_due_date", ""))
+            else:
+                due_date = ""
+        else:
+            due_date = str(stage_due_date).strip()
         self.connection.execute(
             """
             INSERT INTO robot_handoffs(
-                lead_id, record_key, phone, status, error, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                lead_id, record_key, phone, stage_due_date, status, error, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lead_id) DO UPDATE SET
                 record_key=excluded.record_key,
                 phone=excluded.phone,
+                stage_due_date=excluded.stage_due_date,
                 status=excluded.status,
                 error=excluded.error,
                 updated_at=excluded.updated_at
             """,
             (
                 str(lead_id).strip(),
-                str(record_key).strip(),
+                normalized_record_key,
                 str(phone).strip(),
+                due_date,
                 str(status).strip(),
                 str(error).strip()[:1000],
                 utc_now(),

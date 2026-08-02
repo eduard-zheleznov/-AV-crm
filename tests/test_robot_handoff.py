@@ -3,11 +3,18 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
 
-from avito_crm.errors import AppError, CrmError, ManualReviewRequired
+from avito_crm.errors import (
+    AppError,
+    ConfigurationError,
+    CrmError,
+    ManualReviewRequired,
+)
 from avito_crm.models import CrmDestination
 from avito_crm.robot_handoff import (
     GeminiPhoneTranscriber,
@@ -104,6 +111,10 @@ class FakeCrm:
     def resolve_custom_destination(
         self, project_id: int, field_name: str, field_value: str, *, project_name: str = ""
     ) -> CrmDestination:
+        if field_name == "Дата шага":
+            return CrmDestination(
+                project_id, project_name, 100, field_name, "date", field_value
+            )
         return CrmDestination(project_id, project_name, 99, field_name, "cats", [field_value])
 
     def list_funnel_steps(self, _project_id: int) -> list[dict]:
@@ -127,8 +138,14 @@ class FakeCrm:
         self.lead["contact"]["details"][0]["data"] = phone
 
     def update_lead_custom(self, _lead_id: str | int, destination: CrmDestination) -> None:
-        self.events.append("custom")
-        self.lead["custom"] = [{"id": destination.field_id, "value": destination.field_value}]
+        self.events.append("date" if destination.field_type == "date" else "custom")
+        custom = [
+            item
+            for item in self.lead["custom"]
+            if str(item.get("id", "")) != str(destination.field_id)
+        ]
+        custom.append({"id": destination.field_id, "value": destination.field_value})
+        self.lead["custom"] = custom
 
     def set_lead_funnel(self, _lead_id: str | int, funnel_id: int) -> None:
         self.events.append("funnel")
@@ -146,6 +163,19 @@ class FailCustomOnceCrm(FakeCrm):
             self.events.append("custom-failed")
             raise CrmError("temporary CRM failure")
         super().update_lead_custom(lead_id, destination)
+
+
+class FailFunnelOnceCrm(FakeCrm):
+    def __init__(self, lead: dict) -> None:
+        super().__init__(lead)
+        self.failed = False
+
+    def set_lead_funnel(self, lead_id: str | int, funnel_id: int) -> None:
+        if not self.failed:
+            self.failed = True
+            self.events.append("funnel-failed")
+            raise CrmError("temporary funnel failure")
+        super().set_lead_funnel(lead_id, funnel_id)
 
 
 class FailTranscriptionOnce:
@@ -175,15 +205,18 @@ def test_handoff_replaces_phone_then_tag_then_funnel(settings):
             state,
             crm=crm,
             transcriber=transcriber,
+            now_provider=lambda: datetime(2026, 8, 1, 12, 0, tzinfo=ZoneInfo("UTC")),
         )
         summary = handler.run_once(apply=True, lead_id=700)
 
         saved = state.get_robot_handoff(700)
 
-    assert crm.events == ["phone", "custom", "funnel"]
+    assert crm.events == ["phone", "custom", "date", "funnel"]
     assert summary.completed == 1
     assert summary.manual_required == 0
     assert saved["status"] == "completed"
+    assert saved["stage_due_date"] == "03.08.2026"
+    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == "03.08.2026"
     assert transcriber.calls == 1
 
 
@@ -234,9 +267,79 @@ def test_handoff_resumes_after_partial_crm_failure_without_retranscription(setti
 
     assert first.errors == 1
     assert second.completed == 1
-    assert crm.events == ["phone", "custom-failed", "custom", "funnel"]
+    assert crm.events == ["phone", "custom-failed", "custom", "date", "funnel"]
     assert transcriber.calls == 1
     assert saved["status"] == "completed"
+
+
+def test_handoff_keeps_original_due_date_when_retry_crosses_midnight(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    crm = FailFunnelOnceCrm(_lead())
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    moments = iter(
+        [
+            datetime(2026, 8, 1, 23, 59, tzinfo=ZoneInfo("Europe/Moscow")),
+            datetime(2026, 8, 2, 0, 1, tzinfo=ZoneInfo("Europe/Moscow")),
+        ]
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+            now_provider=lambda: next(moments),
+        )
+
+        first = handler.run_once(apply=True, lead_id=700)
+        second = handler.run_once(apply=True, lead_id=700)
+        saved = state.get_robot_handoff(700)
+
+    assert first.errors == 1
+    assert second.completed == 1
+    assert crm.events == ["phone", "custom", "date", "funnel-failed", "funnel"]
+    assert saved["stage_due_date"] == "03.08.2026"
+    assert transcriber.calls == 1
+
+
+def test_handoff_rejects_non_date_stage_field_before_any_mutation(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+
+    class WrongDateFieldCrm(FakeCrm):
+        def resolve_custom_destination(
+            self,
+            project_id: int,
+            field_name: str,
+            field_value: str,
+            *,
+            project_name: str = "",
+        ) -> CrmDestination:
+            destination = super().resolve_custom_destination(
+                project_id, field_name, field_value, project_name=project_name
+            )
+            if field_name == "Дата шага":
+                destination.field_type = "text"
+            return destination
+
+    crm = WrongDateFieldCrm(_lead())
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        with pytest.raises(ConfigurationError, match="должно иметь тип date"):
+            handler.run_once(apply=True, lead_id=700)
+
+    assert crm.events == []
+    assert transcriber.calls == 0
 
 
 def test_transient_transcription_error_is_retried_automatically(settings):
@@ -311,7 +414,7 @@ def test_completed_lead_is_idempotently_skipped_on_second_run(settings):
     assert first.completed == 1
     assert second.completed == 0
     assert second.skipped == 1
-    assert crm.events == ["phone", "custom", "funnel"]
+    assert crm.events == ["phone", "custom", "date", "funnel"]
     assert transcriber.calls == 1
 
 

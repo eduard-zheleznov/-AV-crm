@@ -80,6 +80,25 @@ def test_robot_handoff_requires_local_gemini_key_when_enabled(settings):
         configured.validate()
 
 
+def test_robot_handoff_requires_stage_date_field_when_enabled(settings):
+    configured = replace(
+        settings,
+        robot_handoff_enabled=True,
+        gemini_api_key="test-only-key",
+        robot_handoff_stage_date_field_name="",
+    )
+
+    with pytest.raises(ConfigurationError, match="ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME"):
+        configured.validate()
+
+
+def test_robot_handoff_rejects_unsafe_stage_delay(settings):
+    configured = replace(settings, robot_handoff_stage_delay_days=0)
+
+    with pytest.raises(ConfigurationError, match="ROBOT_HANDOFF_STAGE_DELAY_DAYS"):
+        configured.validate()
+
+
 def test_gemini_inline_audio_limit_accounts_for_base64_overhead(settings):
     configured = replace(settings, gemini_max_audio_bytes=15 * 1024 * 1024)
 

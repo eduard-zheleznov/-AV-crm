@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -214,12 +215,14 @@ class RobotLeadHandoff:
         crm: LpTrackerClient | None = None,
         transcriber: GeminiPhoneTranscriber | None = None,
         manual_notifier: Callable[[str, str], None] | None = None,
+        now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings
         self.state = state
         self.crm = crm or LpTrackerClient(settings)
         self.transcriber = transcriber or GeminiPhoneTranscriber(settings)
         self.manual_notifier = manual_notifier
+        self.now_provider = now_provider
         self._owns_crm = crm is None
         self._owns_transcriber = transcriber is None
 
@@ -252,6 +255,17 @@ class RobotLeadHandoff:
             self.settings.robot_handoff_field_value,
             project_name=base_destination.project_name,
         )
+        stage_date_template = self.crm.resolve_custom_destination(
+            project_id,
+            self.settings.robot_handoff_stage_date_field_name,
+            "",
+            project_name=base_destination.project_name,
+        )
+        if stage_date_template.field_type != "date":
+            raise ConfigurationError(
+                f"Поле {stage_date_template.field_name!r} должно иметь тип date, "
+                f"получен {stage_date_template.field_type or 'неизвестный тип'}"
+            )
         steps = self.crm.list_funnel_steps(project_id)
         source_step = _resolve_step(steps, self.settings.robot_handoff_source_funnel_name)
         target_step = _resolve_step(steps, self.settings.robot_handoff_target_funnel_name)
@@ -290,6 +304,7 @@ class RobotLeadHandoff:
                     lead,
                     record,
                     handoff_destination,
+                    stage_date_template,
                     target_step,
                     steps,
                     apply=apply,
@@ -399,6 +414,7 @@ class RobotLeadHandoff:
         lead: dict[str, Any],
         record: dict[str, Any],
         handoff_destination: CrmDestination,
+        stage_date_template: CrmDestination,
         target_step: dict[str, Any],
         steps: list[dict[str, Any]],
         *,
@@ -409,8 +425,10 @@ class RobotLeadHandoff:
         record_key = _record_key(record)
         cached = self.state.get_robot_handoff(lead_id)
         phone = ""
+        stage_due_date = ""
         if cached and cached.get("record_key") == record_key:
             phone = normalize_phone(str(cached.get("phone", ""))) or ""
+            stage_due_date = str(cached.get("stage_due_date", "") or "").strip()
             if (
                 not phone
                 and cached.get("status") == "manual_required"
@@ -422,10 +440,21 @@ class RobotLeadHandoff:
         if not phone:
             result = self.transcriber.transcribe(_recording_url(record))
             phone = result.phone
+        if not stage_due_date:
+            stage_due_date = self._new_stage_due_date()
+        if not phone or not stage_due_date:
+            raise AppError("Не удалось подготовить безопасное состояние передачи лида")
+        if (
+            not cached
+            or cached.get("record_key") != record_key
+            or normalize_phone(str(cached.get("phone", ""))) != phone
+            or str(cached.get("stage_due_date", "") or "").strip() != stage_due_date
+        ):
             self.state.record_robot_handoff(
                 lead_id,
                 record_key=record_key,
                 phone=phone,
+                stage_due_date=stage_due_date,
                 status="recognized",
             )
         if not apply:
@@ -437,6 +466,20 @@ class RobotLeadHandoff:
             current = self.crm.get_lead(lead_id)
             if not _custom_has_value(current, handoff_destination):
                 raise CrmError("LPTracker не подтвердил установку тега передачи")
+
+        stage_date_destination = CrmDestination(
+            project_id=stage_date_template.project_id,
+            project_name=stage_date_template.project_name,
+            field_id=stage_date_template.field_id,
+            field_name=stage_date_template.field_name,
+            field_type=stage_date_template.field_type,
+            field_value=stage_due_date,
+        )
+        if not _custom_date_has_value(current, stage_date_destination):
+            self.crm.update_lead_custom(lead_id, stage_date_destination)
+            current = self.crm.get_lead(lead_id)
+            if not _custom_date_has_value(current, stage_date_destination):
+                raise CrmError("LPTracker не подтвердил дату шага через два дня")
 
         current_stage = self.crm.get_lead_stage_name(
             lead_id,
@@ -459,8 +502,25 @@ class RobotLeadHandoff:
             lead_id,
             record_key=record_key,
             phone=phone,
+            stage_due_date=stage_due_date,
             status="completed",
         )
+
+    def _new_stage_due_date(self) -> str:
+        try:
+            timezone = ZoneInfo(self.settings.lptracker_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigurationError(
+                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE: "
+                f"{self.settings.lptracker_timezone!r}"
+            ) from exc
+        current = self.now_provider() if self.now_provider else datetime.now(timezone)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone)
+        else:
+            current = current.astimezone(timezone)
+        due = current + timedelta(days=self.settings.robot_handoff_stage_delay_days)
+        return due.strftime("%d.%m.%Y")
 
     def _ensure_phone(self, lead: dict[str, Any], phone: str) -> dict[str, Any]:
         lead_id = str(lead["id"]).strip()
@@ -603,6 +663,35 @@ def _custom_has_value(lead: dict[str, Any], destination: CrmDestination) -> bool
     expected = {_normalized(value) for value in _flatten_values(destination.field_value)}
     actual = {_normalized(value) for value in _flatten_values(values)}
     return bool(expected) and expected.issubset(actual)
+
+
+def _custom_date_has_value(lead: dict[str, Any], destination: CrmDestination) -> bool:
+    expected = _date_prefix(destination.field_value)
+    if not expected:
+        return False
+    custom = lead.get("custom") or []
+    values: list[object] = []
+    if isinstance(custom, dict):
+        for key, item in custom.items():
+            if str(key) == str(destination.field_id):
+                values.append(item.get("value") if isinstance(item, dict) else item)
+            elif isinstance(item, dict) and str(item.get("id", "")) == str(
+                destination.field_id
+            ):
+                values.append(item.get("value"))
+    elif isinstance(custom, list):
+        values.extend(
+            item.get("value")
+            for item in custom
+            if isinstance(item, dict)
+            and str(item.get("id", "")) == str(destination.field_id)
+        )
+    return any(_date_prefix(value) == expected for value in _flatten_values(values))
+
+
+def _date_prefix(value: object) -> str:
+    match = re.search(r"\b(\d{2}\.\d{2}\.\d{4})\b", str(value or ""))
+    return match.group(1) if match else ""
 
 
 def _flatten_values(value: object) -> list[str]:
