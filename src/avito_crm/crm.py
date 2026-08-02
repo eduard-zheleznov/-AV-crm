@@ -8,6 +8,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -19,6 +20,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 COMMENT_INVALID_LEAD_RETRY_DELAYS = (1.0, 2.0, 4.0)
+LPTRACKER_WEB_BASE_URL = "https://my.lptracker.ru"
 
 
 class RateLimiter:
@@ -48,6 +50,7 @@ class LpTrackerClient:
             headers={"Content-Type": "application/json"},
         )
         self.token = ""
+        self.web_token = ""
         self.rate_limiter = RateLimiter(2.0)
 
     def __enter__(self) -> LpTrackerClient:
@@ -214,6 +217,49 @@ class LpTrackerClient:
         if not isinstance(result, dict):
             raise CrmError("LPTracker вернул неожиданные данные лида")
         return result
+
+    def get_lead_call_records(
+        self,
+        lead_id: str | int,
+        *,
+        project_id: int | None = None,
+        max_pages: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Return call entries from the same feed used by the LPTracker lead card.
+
+        The documented Direct API lead payload does not include recordings for
+        every account. LPTracker's own card loads them from a separate feed,
+        authenticated with a web bearer token issued from the same credentials.
+        """
+        records: list[dict[str, Any]] = []
+        page_count = max(1, min(int(max_pages), 10))
+        for page in range(1, page_count + 1):
+            params: dict[str, Any] = {"page": page, "direction": "desc"}
+            if project_id:
+                params["project_id"] = int(project_id)
+            payload = self._web_request(
+                "GET",
+                f"/rest/leads/feed/{lead_id}",
+                params=params,
+            )
+            if not isinstance(payload, dict):
+                raise CrmError("LPTracker вернул неожиданный формат истории лида")
+            items = payload.get("data")
+            if not isinstance(items, list):
+                raise CrmError("LPTracker не вернул список событий истории лида")
+            records.extend(
+                _normalize_web_call_record(item)
+                for item in items
+                if isinstance(item, dict) and str(item.get("item_type", "")) == "call"
+            )
+            meta = payload.get("_meta")
+            total_pages = 1
+            if isinstance(meta, dict):
+                with suppress(TypeError, ValueError):
+                    total_pages = max(1, int(meta.get("countPages", 1)))
+            if page >= total_pages:
+                break
+        return records
 
     def list_recent_leads(
         self,
@@ -484,6 +530,92 @@ class LpTrackerClient:
                 return lead
         return None
 
+    def _authenticate_web(self) -> None:
+        self.settings.require_crm_credentials()
+        self.rate_limiter.wait()
+        try:
+            response = self.client.post(
+                f"{LPTRACKER_WEB_BASE_URL}/rest/system/login",
+                json={
+                    "email": self.settings.lptracker_login,
+                    "password": self.settings.lptracker_password,
+                },
+            )
+        except httpx.RequestError as exc:
+            raise CrmError(f"Не удалось авторизоваться в истории LPTracker: {exc}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise CrmError(
+                f"История LPTracker вернула не-JSON при авторизации "
+                f"(HTTP {response.status_code})"
+            ) from exc
+        result = payload.get("result") if isinstance(payload, dict) else None
+        data = result.get("data") if isinstance(result, dict) else None
+        token = str(data.get("token", "")) if isinstance(data, dict) else ""
+        if response.status_code >= 400 or not token:
+            raise CrmError("LPTracker не разрешил доступ к истории звонков")
+        self.web_token = token
+        # Audio tags in LPTracker's own card use this cookie, while feed XHRs
+        # use the Authorization header. Keeping both also supports record URLs
+        # that are protected instead of public.
+        self.client.cookies.set("bearer_token", token, domain=".lptracker.ru", path="/")
+
+    def _web_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        if not self.web_token:
+            self._authenticate_web()
+        url = urljoin(f"{LPTRACKER_WEB_BASE_URL}/", path.lstrip("/"))
+        for auth_attempt in range(2):
+            last_error: Exception | None = None
+            for attempt in range(4):
+                self.rate_limiter.wait()
+                try:
+                    response = self.client.request(
+                        method,
+                        url,
+                        headers={"Authorization": f"Bearer {self.web_token}"},
+                        params=params,
+                    )
+                except httpx.RequestError as exc:
+                    last_error = exc
+                    if attempt == 3:
+                        break
+                    time.sleep(min(8.0, 2**attempt))
+                    continue
+                if response.status_code == 401 and auth_attempt == 0:
+                    self.web_token = ""
+                    self._authenticate_web()
+                    break
+                if response.status_code in {429, 500, 502, 503, 504}:
+                    if attempt == 3:
+                        raise CrmError(
+                            "История LPTracker временно недоступна "
+                            f"(HTTP {response.status_code})"
+                        )
+                    time.sleep(min(8.0, 2**attempt))
+                    continue
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise CrmError(
+                        "История LPTracker вернула не-JSON "
+                        f"(HTTP {response.status_code})"
+                    ) from exc
+                if response.status_code >= 400:
+                    raise CrmError(_web_error_message(payload, response.status_code))
+                return _unwrap_web_payload(payload)
+            else:
+                continue
+            if last_error is not None:
+                raise CrmError(f"Не удалось получить историю LPTracker: {last_error}")
+        raise CrmError("LPTracker отклонил повторную авторизацию для истории звонков")
+
     def _request(
         self,
         method: str,
@@ -542,6 +674,49 @@ def _ensure_list(value: Any, label: str) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         raise CrmError(f"LPTracker вернул неожиданный {label}")
     return [item for item in value if isinstance(item, dict)]
+
+
+def _unwrap_web_payload(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        raise CrmError("История LPTracker вернула неожиданный формат ответа")
+    status = payload.get("status")
+    if status in (1, "1", True, "success"):
+        result = payload.get("result")
+        if isinstance(result, dict):
+            data = result.get("data")
+            # Login uses result.data, while feed deployments may return either
+            # result itself or result.data with adjacent pagination metadata.
+            if isinstance(data, dict) and ("data" in data or "_meta" in data):
+                return data
+            return result
+    if "data" in payload:
+        return payload
+    raise CrmError(_web_error_message(payload, 200))
+
+
+def _web_error_message(payload: Any, status_code: int) -> str:
+    if isinstance(payload, dict):
+        for key in ("message", "error", "description"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return f"LPTracker: {value.strip()}"
+    return f"История LPTracker вернула ошибку HTTP {status_code}"
+
+
+def _normalize_web_call_record(item: dict[str, Any]) -> dict[str, Any]:
+    record = dict(item)
+    path = str(record.get("record_path", "") or "").strip()
+    if path:
+        record["record"] = urljoin(f"{LPTRACKER_WEB_BASE_URL}/", path.lstrip("/"))
+    if not record.get("type") and not record.get("direction"):
+        call_type = record.get("call_type_text") or record.get("call_type")
+        if call_type not in (None, ""):
+            record["direction"] = call_type
+    if not record.get("duration"):
+        record["duration"] = record.get("record_time")
+    if not record.get("time_src") and record.get("sort_field"):
+        record["time_src"] = record.get("sort_field")
+    return record
 
 
 def _normalized_name(value: str) -> str:

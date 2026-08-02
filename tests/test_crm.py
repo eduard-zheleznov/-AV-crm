@@ -78,6 +78,59 @@ def test_lead_name_contains_approved_moscow_offset_prefix():
     assert normalize_moscow_offset("2.5") == 0
 
 
+def test_crm_reads_call_recording_from_lead_card_feed(settings):
+    requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/rest/system/login":
+            assert request.url.host == "my.lptracker.ru"
+            assert json.loads(request.content) == {
+                "email": settings.lptracker_login,
+                "password": settings.lptracker_password,
+            }
+            return httpx.Response(
+                200,
+                json={"status": 1, "result": {"data": {"token": "web-test-token"}}},
+            )
+        if request.url.path == "/rest/leads/feed/700":
+            assert request.headers["Authorization"] == "Bearer web-test-token"
+            assert request.url.params["project_id"] == "1"
+            assert request.url.params["page"] == "1"
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"item_type": "comments", "text": "ignored"},
+                        {
+                            "item_type": "call",
+                            "disposition": "ANSWER",
+                            "call_type_text": "Исходящий",
+                            "record_time": "02:08",
+                            "time_src": 123,
+                            "record_path": "/records/call.mp3",
+                        },
+                    ],
+                    "_meta": {"countPages": 1},
+                },
+            )
+        raise AssertionError(f"unexpected request: {request.method} {request.url}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        records = crm.get_lead_call_records(700, project_id=1)
+
+    assert len(records) == 1
+    assert records[0]["direction"] == "Исходящий"
+    assert records[0]["duration"] == "02:08"
+    assert records[0]["record"] == "https://my.lptracker.ru/records/call.mp3"
+    assert len(requests) == 2
+
+
 def test_crm_handoff_write_contracts_match_lptracker_api(settings):
     requests = []
 

@@ -93,6 +93,10 @@ class FakeTranscriber:
     def __init__(self, result: TranscriptionResult) -> None:
         self.result = result
         self.calls = 0
+        self.web_tokens: list[str] = []
+
+    def set_lptracker_web_token(self, token: str) -> None:
+        self.web_tokens.append(token)
 
     def transcribe(self, _url: str) -> TranscriptionResult:
         self.calls += 1
@@ -134,6 +138,9 @@ class FakeCrm:
     def get_lead(self, _lead_id: str | int) -> dict:
         return deepcopy(self.lead)
 
+    def get_lead_call_records(self, _lead_id: str | int, **_kwargs: object) -> list[dict]:
+        return []
+
     def get_lead_stage_name(self, _lead_id: str | int, *, lead: dict, **_kwargs: object) -> str:
         funnel = lead.get("funnel", {})
         return str(funnel.get("name", "")) if isinstance(funnel, dict) else ""
@@ -157,6 +164,23 @@ class FakeCrm:
     def set_lead_funnel(self, _lead_id: str | int, funnel_id: int) -> None:
         self.events.append("funnel")
         self.lead["funnel"] = {"id": funnel_id, "name": "Новый лид"}
+
+
+class FeedRecordingCrm(FakeCrm):
+    web_token = "web-feed-token"
+
+    def get_lead_call_records(self, _lead_id: str | int, **_kwargs: object) -> list[dict]:
+        return [
+            {
+                "item_type": "call",
+                "disposition": "ANSWER",
+                "call_type_text": "Исходящий",
+                "record_time": "02:08",
+                "time_src": 1_785_250_500,
+                "record_path": "/records/lead-700.mp3",
+                "record": "https://my.lptracker.ru/records/lead-700.mp3",
+            }
+        ]
 
 
 class StagePrefilterCrm(FakeCrm):
@@ -287,6 +311,32 @@ def test_handoff_replaces_phone_then_tag_then_funnel(settings):
         "03.08.2026 15:00"
     )
     assert transcriber.calls == 1
+
+
+def test_handoff_uses_lead_card_feed_when_direct_lead_omits_recording(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    lead = _lead()
+    lead["calls_records"] = []
+    crm = FeedRecordingCrm(lead)
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        summary = handler.run_once(apply=False, lead_id=700)
+
+    assert summary.inspected == 1
+    assert summary.eligible == 1
+    assert summary.ready == 1
+    assert summary.skipped == 0
+    assert transcriber.calls == 1
+    assert transcriber.web_tokens == ["web-feed-token"]
 
 
 def test_handoff_prefilters_list_by_stage_before_loading_full_lead(settings):
@@ -686,6 +736,58 @@ def test_gemini_uses_structured_json_and_never_puts_key_in_url(settings):
     gemini_request = requests[-1]
     assert gemini_request.headers["x-goog-api-key"] == "secret-test-key"
     assert "secret-test-key" not in str(gemini_request.url)
+
+
+def test_gemini_uses_private_lptracker_feed_token_only_for_recording_host(settings):
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "my.lptracker.ru":
+            assert request.headers["Authorization"] == "Bearer web-test-token"
+            assert "bearer_token=web-test-token" in request.headers.get("Cookie", "")
+            return httpx.Response(
+                200,
+                content=b"private-audio",
+                headers={"content-type": "audio/mpeg"},
+            )
+        assert request.url.host == "generativelanguage.googleapis.com"
+        assert "Authorization" not in request.headers
+        assert "bearer_token" not in request.headers.get("Cookie", "")
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "status": "ok",
+                                            "phone": "+79991234567",
+                                            "confidence": 0.99,
+                                            "phone_count": 1,
+                                            "transcript": "мой номер +7 999 123-45-67",
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    configured = replace(settings, gemini_api_key="secret-test-key")
+    client = httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False)
+    transcriber = GeminiPhoneTranscriber(configured, client=client)
+    transcriber.set_lptracker_web_token("web-test-token")
+
+    result = transcriber.transcribe("https://my.lptracker.ru/records/call.mp3")
+
+    assert result.phone == "+79991234567"
+    assert len(requests) == 2
 
 
 def test_gemini_rejects_result_without_numeric_control_fragment(settings):

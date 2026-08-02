@@ -72,6 +72,7 @@ class GeminiPhoneTranscriber:
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self.settings = settings
         self._owns_client = client is None
+        self._lptracker_web_token = ""
         self.client = client or httpx.Client(
             timeout=httpx.Timeout(60.0, connect=15.0),
             follow_redirects=False,
@@ -87,6 +88,19 @@ class GeminiPhoneTranscriber:
 
     def __exit__(self, *_args: object) -> None:
         self.close()
+
+    def set_lptracker_web_token(self, token: str) -> None:
+        """Authorize downloads opened from LPTracker's private lead-card feed."""
+        cleaned = str(token or "").strip()
+        if not cleaned:
+            return
+        self._lptracker_web_token = cleaned
+        self.client.cookies.set(
+            "bearer_token",
+            cleaned,
+            domain=".lptracker.ru",
+            path="/",
+        )
 
     def transcribe(self, recording_url: str) -> TranscriptionResult:
         if not self.settings.gemini_api_key:
@@ -180,7 +194,14 @@ class GeminiPhoneTranscriber:
     def _download(self, url: str) -> tuple[bytes, str]:
         current = _validated_https_url(url)
         for _redirect in range(6):
-            with self.client.stream("GET", current) as response:
+            parts = urlsplit(current)
+            host = (parts.hostname or "").casefold()
+            headers = {}
+            if self._lptracker_web_token and (
+                host == "lptracker.ru" or host.endswith(".lptracker.ru")
+            ):
+                headers["Authorization"] = f"Bearer {self._lptracker_web_token}"
+            with self.client.stream("GET", current, headers=headers) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = response.headers.get("location", "").strip()
                     if not location:
@@ -343,6 +364,22 @@ class RobotLeadHandoff:
                     )
                     continue
                 record = _latest_successful_outgoing_record(lead)
+                if record is None:
+                    feed_records = self.crm.get_lead_call_records(
+                        candidate_id,
+                        project_id=project_id,
+                    )
+                    configure_web_token = getattr(
+                        self.transcriber,
+                        "set_lptracker_web_token",
+                        None,
+                    )
+                    web_token = str(getattr(self.crm, "web_token", "") or "").strip()
+                    if web_token and callable(configure_web_token):
+                        configure_web_token(web_token)
+                    record = _latest_successful_outgoing_record(
+                        {"calls_records": feed_records}
+                    )
                 if record is None:
                     _record_skip(
                         summary,
@@ -637,18 +674,46 @@ def _latest_successful_outgoing_record(lead: dict[str, Any]) -> dict[str, Any] |
     for record in records:
         if not _recording_url(record):
             continue
-        call_type = _normalized(record.get("type") or record.get("direction"))
-        if call_type not in _OUTBOUND_TYPES:
+        disposition = _normalized(record.get("disposition"))
+        if disposition and disposition not in {"answer", "answered", "успешно"}:
+            continue
+        if not _is_outgoing_record(record):
             continue
         duration = record.get("duration", record.get("billsec", 1))
-        if duration not in (None, "") and _safe_float(duration) <= 0:
+        if duration not in (None, "") and _duration_seconds(duration) <= 0:
             continue
         eligible.append(record)
     return max(eligible, key=_record_sort_key) if eligible else None
 
 
+def _is_outgoing_record(record: dict[str, Any]) -> bool:
+    for key in ("type", "direction", "call_type_text", "call_type"):
+        value = _normalized(record.get(key))
+        if value in _OUTBOUND_TYPES or value.startswith("исходящ"):
+            return True
+    # LPTracker's lead-card feed can omit direction but identifies calls made
+    # by an automated funnel in the route label, as visible in the card itself.
+    route = _normalized(record.get("route_text") or record.get("user_text"))
+    return route.startswith("автоворонка")
+
+
+def _duration_seconds(value: object) -> float:
+    text = str(value or "").strip()
+    if ":" not in text:
+        return _safe_float(text)
+    try:
+        parts = [float(part) for part in text.split(":")]
+    except ValueError:
+        return 0.0
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return 0.0
+
+
 def _recording_url(record: dict[str, Any]) -> str:
-    for key in ("record", "record_url", "recording", "url"):
+    for key in ("record", "record_path", "record_url", "recording", "url"):
         value = str(record.get(key, "") or "").strip()
         if value:
             return value
@@ -656,7 +721,7 @@ def _recording_url(record: dict[str, Any]) -> str:
 
 
 def _record_sort_key(record: dict[str, Any]) -> tuple[float, str]:
-    for key in ("time", "created_at", "started_at", "date"):
+    for key in ("time_src", "sort_field", "time", "created_at", "started_at", "date"):
         raw = record.get(key)
         if raw in (None, ""):
             continue
@@ -684,6 +749,7 @@ def _record_key(record: dict[str, Any] | None) -> str:
             "date",
             "duration",
             "record",
+            "record_path",
             "record_url",
             "recording",
             "url",
