@@ -43,6 +43,17 @@ _AUDIO_MIME_BY_SUFFIX = {
     ".wav": "audio/wav",
     ".webm": "audio/webm",
 }
+_AUDIO_MIME_ALIASES = {
+    "application/ogg": "audio/ogg",
+    "audio/mp3": "audio/mpeg",
+    "audio/vnd.wave": "audio/wav",
+    "audio/wave": "audio/wav",
+    "audio/x-aac": "audio/aac",
+    "audio/x-flac": "audio/flac",
+    "audio/x-m4a": "audio/mp4",
+    "audio/x-wav": "audio/wav",
+}
+_SUPPORTED_AUDIO_MIME_TYPES = frozenset(_AUDIO_MIME_BY_SUFFIX.values())
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,9 +160,14 @@ class GeminiPhoneTranscriber:
             },
         )
         if response.status_code >= 400:
+            detail = _recognition_error_detail(
+                response,
+                secret=self.settings.gemini_api_key,
+            )
+            suffix = f": {detail}" if detail else ""
             raise AppError(
-                f"Сервис распознавания временно не обработал запись "
-                f"(HTTP {response.status_code})"
+                f"Сервис распознавания не обработал запись "
+                f"(HTTP {response.status_code}{suffix})"
             )
         try:
             payload = response.json()
@@ -228,11 +244,13 @@ class GeminiPhoneTranscriber:
                     chunks.append(chunk)
                 if total == 0:
                     raise AppError("LPTracker вернул пустую запись звонка")
+                audio = b"".join(chunks)
                 mime_type = _audio_mime_type(
                     response.headers.get("content-type", ""),
                     str(response.url),
+                    audio,
                 )
-                return b"".join(chunks), mime_type
+                return audio, mime_type
         raise AppError("Слишком много перенаправлений при скачивании записи звонка")
 
 
@@ -896,17 +914,55 @@ def _validated_https_url(value: str) -> str:
     return parsed.geturl()
 
 
-def _audio_mime_type(content_type: str, url: str) -> str:
+def _audio_mime_type(content_type: str, url: str, audio: bytes) -> str:
+    detected = _audio_mime_from_signature(audio)
+    if detected:
+        return detected
     declared = str(content_type or "").split(";", 1)[0].strip().lower()
-    if declared.startswith("audio/") or declared in {"video/mp4", "video/webm"}:
+    declared = _AUDIO_MIME_ALIASES.get(declared, declared)
+    if declared in _SUPPORTED_AUDIO_MIME_TYPES:
         return declared
     suffix = PurePosixPath(urlsplit(url).path).suffix.lower()
     inferred = _AUDIO_MIME_BY_SUFFIX.get(suffix) or mimetypes.types_map.get(suffix, "")
-    if inferred.startswith("audio/") or inferred in {"video/mp4", "video/webm"}:
+    inferred = _AUDIO_MIME_ALIASES.get(inferred, inferred)
+    if inferred in _SUPPORTED_AUDIO_MIME_TYPES:
         return inferred
     raise ManualReviewRequired(
         "Формат записи звонка не распознан как поддерживаемое аудио"
     )
+
+
+def _audio_mime_from_signature(audio: bytes) -> str:
+    """Prefer the real container over LPTracker's occasionally generic MIME header."""
+    if len(audio) >= 12 and audio[:4] == b"RIFF" and audio[8:12] == b"WAVE":
+        return "audio/wav"
+    if audio.startswith(b"ID3") or (
+        len(audio) >= 2 and audio[0] == 0xFF and audio[1] & 0xE0 == 0xE0
+    ):
+        return "audio/mpeg"
+    if audio.startswith(b"fLaC"):
+        return "audio/flac"
+    if audio.startswith(b"OggS"):
+        return "audio/ogg"
+    if len(audio) >= 12 and audio[4:8] == b"ftyp":
+        return "audio/mp4"
+    if audio.startswith(b"\x1aE\xdf\xa3"):
+        return "audio/webm"
+    return ""
+
+
+def _recognition_error_detail(response: httpx.Response, *, secret: str) -> str:
+    """Return only the provider's short error message, without URLs or credentials."""
+    try:
+        payload = response.json()
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        message = error.get("message", "") if isinstance(error, dict) else ""
+    except (TypeError, ValueError):
+        message = ""
+    detail = " ".join(str(message or "").split())
+    if secret:
+        detail = detail.replace(secret, "[секрет скрыт]")
+    return _safe_reason(detail)[:300] if detail else ""
 
 
 def _normalized(value: object) -> str:

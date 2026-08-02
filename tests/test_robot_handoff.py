@@ -738,6 +738,88 @@ def test_gemini_uses_structured_json_and_never_puts_key_in_url(settings):
     assert "secret-test-key" not in str(gemini_request.url)
 
 
+def test_gemini_normalizes_lptracker_wav_mime_from_file_signature(settings):
+    requests: list[httpx.Request] = []
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "my.lptracker.ru":
+            return httpx.Response(
+                200,
+                content=b"RIFF\x24\x00\x00\x00WAVEfmt ",
+                headers={"content-type": "audio/x-wav"},
+            )
+        body = json.loads(request.content)
+        assert body["contents"][0]["parts"][1]["inline_data"]["mime_type"] == "audio/wav"
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "status": "ok",
+                                            "phone": "+79991234567",
+                                            "confidence": 0.99,
+                                            "phone_count": 1,
+                                            "transcript": "+7 999 123-45-67",
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    configured = replace(settings, gemini_api_key="secret-test-key")
+    transcriber = GeminiPhoneTranscriber(
+        configured,
+        client=httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False),
+    )
+
+    result = transcriber.transcribe("https://my.lptracker.ru/sound/call.wav")
+
+    assert result.phone == "+79991234567"
+    assert len(requests) == 2
+
+
+def test_gemini_http_error_includes_safe_provider_detail(settings):
+    def transport(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "records.example.test":
+            return httpx.Response(200, content=b"ID3audio", headers={"content-type": "audio/mp3"})
+        return httpx.Response(
+            400,
+            json={
+                "error": {
+                    "message": (
+                        "Unsupported MIME type audio/x-wav; see "
+                        "https://example.test/help?key=secret-test-key"
+                    )
+                }
+            },
+        )
+
+    configured = replace(settings, gemini_api_key="secret-test-key")
+    transcriber = GeminiPhoneTranscriber(
+        configured,
+        client=httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False),
+    )
+
+    with pytest.raises(AppError) as exc_info:
+        transcriber.transcribe("https://records.example.test/call.mp3")
+
+    message = str(exc_info.value)
+    assert "HTTP 400" in message
+    assert "Unsupported MIME type" in message
+    assert "secret-test-key" not in message
+    assert "https://" not in message
+
+
 def test_gemini_uses_private_lptracker_feed_token_only_for_recording_host(settings):
     requests: list[httpx.Request] = []
 
