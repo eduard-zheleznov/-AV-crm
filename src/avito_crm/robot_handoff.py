@@ -272,9 +272,10 @@ class RobotLeadHandoff:
             "",
             project_name=base_destination.project_name,
         )
-        if stage_date_template.field_type != "date":
+        if stage_date_template.field_type not in {"date", "funnel_date"}:
             raise ConfigurationError(
-                f"Поле {stage_date_template.field_name!r} должно иметь тип date, "
+                f"Поле {stage_date_template.field_name!r} должно иметь тип "
+                f"date или funnel_date, "
                 f"получен {stage_date_template.field_type or 'неизвестный тип'}"
             )
         steps = self.crm.list_funnel_steps(project_id)
@@ -531,7 +532,7 @@ class RobotLeadHandoff:
         else:
             current = current.astimezone(timezone)
         due = current + timedelta(days=self.settings.robot_handoff_stage_delay_days)
-        return due.strftime("%d.%m.%Y")
+        return due.strftime("%d.%m.%Y %H:%M")
 
     def _ensure_phone(self, lead: dict[str, Any], phone: str) -> dict[str, Any]:
         lead_id = str(lead["id"]).strip()
@@ -677,7 +678,7 @@ def _custom_has_value(lead: dict[str, Any], destination: CrmDestination) -> bool
 
 
 def _custom_date_has_value(lead: dict[str, Any], destination: CrmDestination) -> bool:
-    expected = _date_prefix(destination.field_value)
+    expected = _date_time_prefix(destination.field_value)
     if not expected:
         return False
     custom = lead.get("custom") or []
@@ -697,12 +698,15 @@ def _custom_date_has_value(lead: dict[str, Any], destination: CrmDestination) ->
             if isinstance(item, dict)
             and str(item.get("id", "")) == str(destination.field_id)
         )
-    return any(_date_prefix(value) == expected for value in _flatten_values(values))
+    return any(_date_time_prefix(value) == expected for value in _flatten_values(values))
 
 
-def _date_prefix(value: object) -> str:
-    match = re.search(r"\b(\d{2}\.\d{2}\.\d{4})\b", str(value or ""))
-    return match.group(1) if match else ""
+def _date_time_prefix(value: object) -> str:
+    match = re.search(
+        r"\b(\d{2}\.\d{2}\.\d{4})\s+(\d{2}:\d{2})(?::\d{2})?\b",
+        str(value or ""),
+    )
+    return f"{match.group(1)} {match.group(2)}" if match else ""
 
 
 def _flatten_values(value: object) -> list[str]:

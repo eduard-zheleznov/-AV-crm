@@ -113,7 +113,7 @@ class FakeCrm:
     ) -> CrmDestination:
         if field_name == "Дата шага":
             return CrmDestination(
-                project_id, project_name, 100, field_name, "date", field_value
+                project_id, project_name, 100, field_name, "funnel_date", field_value
             )
         return CrmDestination(project_id, project_name, 99, field_name, "cats", [field_value])
 
@@ -138,7 +138,9 @@ class FakeCrm:
         self.lead["contact"]["details"][0]["data"] = phone
 
     def update_lead_custom(self, _lead_id: str | int, destination: CrmDestination) -> None:
-        self.events.append("date" if destination.field_type == "date" else "custom")
+        self.events.append(
+            "date" if destination.field_type in {"date", "funnel_date"} else "custom"
+        )
         custom = [
             item
             for item in self.lead["custom"]
@@ -215,8 +217,10 @@ def test_handoff_replaces_phone_then_tag_then_funnel(settings):
     assert summary.completed == 1
     assert summary.manual_required == 0
     assert saved["status"] == "completed"
-    assert saved["stage_due_date"] == "03.08.2026"
-    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == "03.08.2026"
+    assert saved["stage_due_date"] == "03.08.2026 15:00"
+    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == (
+        "03.08.2026 15:00"
+    )
     assert transcriber.calls == 1
 
 
@@ -300,7 +304,7 @@ def test_handoff_keeps_original_due_date_when_retry_crosses_midnight(settings):
     assert first.errors == 1
     assert second.completed == 1
     assert crm.events == ["phone", "custom", "date", "funnel-failed", "funnel"]
-    assert saved["stage_due_date"] == "03.08.2026"
+    assert saved["stage_due_date"] == "03.08.2026 23:59"
     assert transcriber.calls == 1
 
 
@@ -335,7 +339,7 @@ def test_handoff_rejects_non_date_stage_field_before_any_mutation(settings):
             transcriber=transcriber,
         )
 
-        with pytest.raises(ConfigurationError, match="должно иметь тип date"):
+        with pytest.raises(ConfigurationError, match="date или funnel_date"):
             handler.run_once(apply=True, lead_id=700)
 
     assert crm.events == []
