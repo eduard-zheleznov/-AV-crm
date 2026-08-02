@@ -141,6 +141,7 @@ class Settings:
 
     robot_handoff_enabled: bool
     robot_handoff_source_funnel_name: str
+    robot_handoff_source_field_values: tuple[str, ...]
     robot_handoff_target_funnel_name: str
     robot_handoff_field_name: str
     robot_handoff_field_value: str
@@ -313,6 +314,15 @@ class Settings:
             robot_handoff_source_funnel_name=os.getenv(
                 "ROBOT_HANDOFF_SOURCE_FUNNEL_NAME", "⚙️ Лид с робота"
             ).strip(),
+            robot_handoff_source_field_values=tuple(
+                value.strip()
+                for value in os.getenv(
+                    "ROBOT_HANDOFF_SOURCE_FIELD_VALUES",
+                    "Сбор № лпр (Ав, ремонт кв. под ключ)|"
+                    "Сбор № лпр (Ян, ремонт кв. под ключ)",
+                ).split("|")
+                if value.strip()
+            ),
             robot_handoff_target_funnel_name=os.getenv(
                 "ROBOT_HANDOFF_TARGET_FUNNEL_NAME", "Новый лид"
             ).strip(),
@@ -478,6 +488,9 @@ class Settings:
         if self.robot_handoff_enabled:
             required = {
                 "ROBOT_HANDOFF_SOURCE_FUNNEL_NAME": self.robot_handoff_source_funnel_name,
+                "ROBOT_HANDOFF_SOURCE_FIELD_VALUES": (
+                    "|".join(self.robot_handoff_source_field_values)
+                ),
                 "ROBOT_HANDOFF_TARGET_FUNNEL_NAME": self.robot_handoff_target_funnel_name,
                 "ROBOT_HANDOFF_FIELD_NAME": self.robot_handoff_field_name,
                 "ROBOT_HANDOFF_FIELD_VALUE": self.robot_handoff_field_value,
@@ -491,6 +504,13 @@ class Settings:
             if missing:
                 raise ConfigurationError(
                     "Для ROBOT_HANDOFF_ENABLED=true не заполнено: " + ", ".join(missing)
+                )
+            normalized_source_values = {
+                value.casefold().strip() for value in self.robot_handoff_source_field_values
+            }
+            if len(normalized_source_values) != len(self.robot_handoff_source_field_values):
+                raise ConfigurationError(
+                    "ROBOT_HANDOFF_SOURCE_FIELD_VALUES содержит повторяющиеся значения"
                 )
         if self.avito_manual_timeout < 0 or 0 < self.avito_manual_timeout < 60:
             raise ConfigurationError(

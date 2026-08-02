@@ -327,6 +327,21 @@ class RobotLeadHandoff:
                     if _normalized(stage_name) != _normalized(source_step["name"]):
                         summary.skipped += 1
                         continue
+                has_source_tag = _custom_has_any_value(
+                    lead,
+                    handoff_destination.field_id,
+                    self.settings.robot_handoff_source_field_values,
+                )
+                has_target_tag = _custom_has_value(lead, handoff_destination)
+                if not has_source_tag and not has_target_tag:
+                    _record_skip(
+                        summary,
+                        candidate_id,
+                        f"в категории «{handoff_destination.field_name}» не выбран "
+                        "разрешённый тег сбора",
+                        explain=explain_skips,
+                    )
+                    continue
                 record = _latest_successful_outgoing_record(lead)
                 if record is None:
                     _record_skip(
@@ -336,6 +351,17 @@ class RobotLeadHandoff:
                         explain=explain_skips,
                     )
                     continue
+                if not has_source_tag:
+                    cached = self.state.get_robot_handoff(candidate_id)
+                    if not _is_resumable_partial_handoff(cached, record):
+                        _record_skip(
+                            summary,
+                            candidate_id,
+                            f"в категории «{handoff_destination.field_name}» не выбран "
+                            "разрешённый тег сбора",
+                            explain=explain_skips,
+                        )
+                        continue
                 summary.eligible += 1
                 self._handle_one(
                     lead,
@@ -695,26 +721,53 @@ def _detail_value(detail: dict[str, Any]) -> str:
 
 
 def _custom_has_value(lead: dict[str, Any], destination: CrmDestination) -> bool:
+    values = _custom_field_values(lead, destination.field_id)
+    expected = {_normalized(value) for value in _flatten_values(destination.field_value)}
+    actual = {_normalized(value) for value in _flatten_values(values)}
+    return bool(expected) and expected.issubset(actual)
+
+
+def _custom_has_any_value(
+    lead: dict[str, Any], field_id: str | int, expected_values: tuple[str, ...]
+) -> bool:
+    expected = {_normalized(value) for value in expected_values if _normalized(value)}
+    actual = {
+        _normalized(value)
+        for value in _flatten_values(_custom_field_values(lead, field_id))
+        if _normalized(value)
+    }
+    return bool(expected & actual)
+
+
+def _custom_field_values(lead: dict[str, Any], field_id: str | int) -> list[object]:
     custom = lead.get("custom") or []
     values: list[object] = []
     if isinstance(custom, dict):
         for key, item in custom.items():
-            if str(key) == str(destination.field_id):
+            if str(key) == str(field_id):
                 values.append(item.get("value") if isinstance(item, dict) else item)
-            elif isinstance(item, dict) and str(item.get("id", "")) == str(
-                destination.field_id
-            ):
+            elif isinstance(item, dict) and str(item.get("id", "")) == str(field_id):
                 values.append(item.get("value"))
     elif isinstance(custom, list):
         values.extend(
             item.get("value")
             for item in custom
             if isinstance(item, dict)
-            and str(item.get("id", "")) == str(destination.field_id)
+            and str(item.get("id", "")) == str(field_id)
         )
-    expected = {_normalized(value) for value in _flatten_values(destination.field_value)}
-    actual = {_normalized(value) for value in _flatten_values(values)}
-    return bool(expected) and expected.issubset(actual)
+    return values
+
+
+def _is_resumable_partial_handoff(
+    cached: dict[str, Any] | None, record: dict[str, Any]
+) -> bool:
+    if not cached or cached.get("status") not in {"recognized", "error"}:
+        return False
+    return bool(
+        normalize_phone(str(cached.get("phone", "")))
+        and str(cached.get("stage_due_date", "") or "").strip()
+        and str(cached.get("record_key", "") or "").strip() == _record_key(record)
+    )
 
 
 def _custom_date_has_value(lead: dict[str, Any], destination: CrmDestination) -> bool:

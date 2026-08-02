@@ -36,7 +36,12 @@ def _lead() -> dict:
                 {"id": 501, "type": "phone", "data": "+79990000000"},
             ]
         },
-        "custom": [],
+        "custom": [
+            {
+                "id": 99,
+                "value": ["Сбор № лпр (Ав, ремонт кв. под ключ)"],
+            }
+        ],
         "calls_records": [
             {
                 "linkedid": "test-call",
@@ -319,6 +324,10 @@ def test_handoff_prefilters_list_by_stage_before_loading_full_lead(settings):
             lambda lead: lead.update(calls_records=[]),
             "нет успешной исходящей записи",
         ),
+        (
+            lambda lead: lead.update(custom=[]),
+            "не выбран разрешённый тег сбора",
+        ),
     ],
 )
 def test_exact_lead_preview_explains_why_lead_is_skipped(settings, change, reason):
@@ -347,11 +356,19 @@ def test_exact_lead_preview_explains_why_lead_is_skipped(settings, change, reaso
     assert transcriber.calls == 0
 
 
-def test_source_stage_is_authoritative_regardless_of_lead_name_or_campaign(settings):
+@pytest.mark.parametrize(
+    "source_tag",
+    [
+        "Сбор № лпр (Ав, ремонт кв. под ключ)",
+        "Сбор № лпр (Ян, ремонт кв. под ключ)",
+    ],
+)
+def test_source_step_and_approved_tag_ignore_lead_name_or_campaign(settings, source_tag):
     configured = replace(settings, gemini_api_key="test-only-key")
     lead = _lead()
     lead["name"] = "Лид из прежней системы"
     lead["view"] = {"campaign": "Другой источник"}
+    lead["custom"] = [{"id": 99, "value": source_tag}]
     crm = FakeCrm(lead)
     transcriber = FakeTranscriber(
         TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
@@ -371,6 +388,55 @@ def test_source_stage_is_authoritative_regardless_of_lead_name_or_campaign(setti
     assert summary.ready == 1
     assert summary.skipped == 0
     assert transcriber.calls == 1
+
+
+def test_source_step_without_approved_tag_is_not_transcribed(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    lead = _lead()
+    lead["custom"] = [{"id": 99, "value": "Предлагаем другой продукт"}]
+    crm = FakeCrm(lead)
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        summary = handler.run_once(apply=False, lead_id=700)
+
+    assert summary.inspected == 1
+    assert summary.eligible == 0
+    assert summary.skipped == 1
+    assert "не выбран разрешённый тег сбора" in summary.details[0]
+    assert transcriber.calls == 0
+
+
+def test_target_tag_without_local_partial_state_does_not_bypass_trigger(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    lead = _lead()
+    lead["custom"] = [{"id": 99, "value": "Предлагаем бесплатный аудит авито"}]
+    crm = FakeCrm(lead)
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        summary = handler.run_once(apply=False, lead_id=700)
+
+    assert summary.eligible == 0
+    assert summary.skipped == 1
+    assert "не выбран разрешённый тег сбора" in summary.details[0]
+    assert transcriber.calls == 0
 
 
 def test_handoff_does_not_mutate_ambiguous_multi_phone_lead(settings):

@@ -99,6 +99,18 @@ def test_robot_handoff_rejects_unsafe_stage_delay(settings):
         configured.validate()
 
 
+def test_robot_handoff_requires_source_tags_when_enabled(settings):
+    configured = replace(
+        settings,
+        robot_handoff_enabled=True,
+        robot_handoff_source_field_values=(),
+        gemini_api_key="test-only-key",
+    )
+
+    with pytest.raises(ConfigurationError, match="ROBOT_HANDOFF_SOURCE_FIELD_VALUES"):
+        configured.validate()
+
+
 def test_gemini_inline_audio_limit_accounts_for_base64_overhead(settings):
     configured = replace(settings, gemini_max_audio_bytes=15 * 1024 * 1024)
 
