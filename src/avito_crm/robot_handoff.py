@@ -165,9 +165,11 @@ class GeminiPhoneTranscriber:
                 secret=self.settings.gemini_api_key,
             )
             suffix = f": {detail}" if detail else ""
+            size_kib = max(1, (len(audio) + 1023) // 1024)
             raise AppError(
                 f"Сервис распознавания не обработал запись "
-                f"(HTTP {response.status_code}{suffix})"
+                f"(HTTP {response.status_code}{suffix}; "
+                f"формат {mime_type}, размер {size_kib} КиБ)"
             )
         try:
             payload = response.json()
@@ -470,12 +472,13 @@ class RobotLeadHandoff:
                 )
                 summary.errors += 1
                 summary.details.append(
-                    f"Лид {candidate_id}: временная техническая ошибка; будет повтор"
+                    f"Лид {candidate_id}: временная техническая ошибка — {message}; "
+                    "будет повтор"
                 )
                 LOGGER.warning(
                     "Техническая ошибка обработки лида %s: %s",
                     candidate_id,
-                    exc.__class__.__name__,
+                    message,
                 )
             except Exception as exc:
                 cached = self.state.get_robot_handoff(candidate_id)

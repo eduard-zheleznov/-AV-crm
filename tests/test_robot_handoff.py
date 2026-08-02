@@ -630,6 +630,9 @@ def test_transient_transcription_error_is_retried_automatically(settings):
 
     assert first.errors == 1
     assert first.manual_required == 0
+    assert first.details == [
+        "Лид 700: временная техническая ошибка — temporary Gemini failure; будет повтор"
+    ]
     assert second.completed == 1
     assert transcriber.calls == 2
 
@@ -816,6 +819,8 @@ def test_gemini_http_error_includes_safe_provider_detail(settings):
     message = str(exc_info.value)
     assert "HTTP 400" in message
     assert "Unsupported MIME type" in message
+    assert "формат audio/mpeg" in message
+    assert "размер 1 КиБ" in message
     assert "secret-test-key" not in message
     assert "https://" not in message
 
