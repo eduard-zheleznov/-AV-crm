@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 
 from avito_crm.config import Settings
-from avito_crm.crm import LpTrackerClient, is_managed_avito_lead
+from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import AppError, ConfigurationError, CrmError, ManualReviewRequired
 from avito_crm.models import CrmDestination
 from avito_crm.phone import extract_phones, normalize_phone
@@ -300,15 +300,6 @@ class RobotLeadHandoff:
             lead = candidate
             record: dict[str, Any] | None = None
             try:
-                if not is_managed_avito_lead(lead):
-                    _record_skip(
-                        summary,
-                        candidate_id,
-                        "имя или источник не совпадают с Avito-потоком "
-                        "загрузчика",
-                        explain=explain_skips,
-                    )
-                    continue
                 stage_name = self.crm.get_lead_stage_name(
                     candidate_id,
                     project_id=project_id,
@@ -327,9 +318,6 @@ class RobotLeadHandoff:
                     continue
                 if lead_id is None:
                     lead = self.crm.get_lead(candidate_id)
-                    if not is_managed_avito_lead(lead):
-                        summary.skipped += 1
-                        continue
                     stage_name = self.crm.get_lead_stage_name(
                         candidate_id,
                         project_id=project_id,

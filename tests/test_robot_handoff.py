@@ -195,7 +195,9 @@ class StagePrefilterCrm(FakeCrm):
 
     def get_lead(self, lead_id: str | int) -> dict:
         self.get_lead_calls.append(str(lead_id))
-        return super().get_lead(lead_id)
+        lead = super().get_lead(lead_id)
+        lead["id"] = int(lead_id)
+        return lead
 
     def get_lead_stage_name(
         self, _lead_id: str | int, *, lead: dict, **_kwargs: object
@@ -298,21 +300,17 @@ def test_handoff_prefilters_list_by_stage_before_loading_full_lead(settings):
 
         summary = handler.run_once(apply=False, limit=1)
 
-    assert summary.inspected == 102
+    assert summary.inspected == 101
     assert summary.eligible == 1
     assert summary.ready == 1
     assert crm.list_calls == 2
-    assert crm.get_lead_calls == ["700"]
+    assert crm.get_lead_calls == ["702"]
     assert transcriber.calls == 1
 
 
 @pytest.mark.parametrize(
     ("change", "reason"),
     [
-        (
-            lambda lead: lead.update(name="Обычный лид"),
-            "имя или источник не совпадают",
-        ),
         (
             lambda lead: lead.update(funnel={"id": 20, "name": "Новый лид"}),
             "текущий шаг «Новый лид»",
@@ -347,6 +345,32 @@ def test_exact_lead_preview_explains_why_lead_is_skipped(settings, change, reaso
     assert len(summary.details) == 1
     assert reason in summary.details[0]
     assert transcriber.calls == 0
+
+
+def test_source_stage_is_authoritative_regardless_of_lead_name_or_campaign(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    lead = _lead()
+    lead["name"] = "Лид из прежней системы"
+    lead["view"] = {"campaign": "Другой источник"}
+    crm = FakeCrm(lead)
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        summary = handler.run_once(apply=False, lead_id=700)
+
+    assert summary.inspected == 1
+    assert summary.eligible == 1
+    assert summary.ready == 1
+    assert summary.skipped == 0
+    assert transcriber.calls == 1
 
 
 def test_handoff_does_not_mutate_ambiguous_multi_phone_lead(settings):
