@@ -80,6 +80,39 @@ def test_dry_run_reuses_captured_phone_without_browser_or_crm(tmp_path, settings
     assert progress[-1] == ("remote-command-1", 1, "")
 
 
+def test_remote_worker_can_suppress_its_partial_completion_notification(
+    tmp_path, settings, monkeypatch
+):
+    delivered = []
+
+    class FakeNotifier:
+        enabled = True
+
+        def __init__(self, _settings):
+            pass
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("avito_crm.pipeline.NotificationRouter", FakeNotifier)
+    source = FakeQueue(settings)
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        Pipeline(
+            settings,
+            source,
+            state,
+            source_name="google:test",
+            mode="full",
+            live=False,
+            notify_completion=False,
+        ).run(1, run_id="remote-part")
+
+    assert delivered == []
+
+
 def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings):
     source = ClosedLocalWindowQueue(settings)
     phases = []
@@ -94,6 +127,7 @@ def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, set
         ).run(1, phase=phases.append)
 
     assert summary.inspected == 0
+    assert summary.time_deferred == 1
     assert summary.stopped_reason.startswith("Отложено по времени")
     assert "10:00–19:45" in summary.stopped_reason
     assert phases[-1] == summary.stopped_reason

@@ -14,6 +14,7 @@ class RunReportMetrics(Protocol):
     captchas_solved: int
     errors: int
     crm_sync_errors: int
+    time_deferred: int
 
 
 def _count(value: object) -> int:
@@ -48,6 +49,7 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     captchas_solved = _count(metrics.captchas_solved)
     errors = _count(metrics.errors)
     crm_sync_errors = _count(metrics.crm_sync_errors)
+    time_deferred = _count(getattr(metrics, "time_deferred", 0))
 
     unopened = max(0, processed - captured)
     classified_unopened = inactive + invalid + unavailable
@@ -74,6 +76,11 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
             f"({_percent(captchas_solved, processed)} от ссылок)"
         ),
     ]
+    if time_deferred:
+        lines.append(
+            f"Отложено по местному времени: {time_deferred} "
+            "(в CRM не передавались; будут обработаны в безопасное окно)"
+        )
     if manual_required:
         lines.append(f"Ожидают решения капчи: {manual_required}")
     if errors or crm_sync_errors:

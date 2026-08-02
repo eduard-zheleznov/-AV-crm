@@ -100,6 +100,7 @@ class RunSummary:
     repeat_created: int = 0
     repeat_exhausted: int = 0
     crm_sync_errors: int = 0
+    time_deferred: int = 0
     stopped_reason: str = ""
 
 

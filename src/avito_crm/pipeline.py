@@ -44,6 +44,7 @@ class Pipeline:
         live: bool,
         include_manual: bool = False,
         interactive_phone_check: bool = False,
+        notify_completion: bool = True,
     ) -> None:
         if mode not in {"capture", "crm", "full"}:
             raise ValueError(f"Unknown pipeline mode: {mode}")
@@ -55,6 +56,7 @@ class Pipeline:
         self.live = live
         self.include_manual = include_manual
         self.interactive_phone_check = interactive_phone_check
+        self.notify_completion = notify_completion
         self.stop_file = settings.data_dir / "STOP"
 
     def run(
@@ -80,6 +82,7 @@ class Pipeline:
         processed_rows: set[str] = set()
         captured_rows: set[str] = set()
         unresolved_technical_rows: set[str] = set()
+        time_deferred_rows: set[str] = set()
         notifier = NotificationRouter(self.settings)
 
         try:
@@ -169,6 +172,16 @@ class Pipeline:
                         for item in mode_eligible
                         if not self.live or self.source.is_local_window_open(item)
                     ]
+                    if self.live:
+                        eligible_row_ids = {item.row_id for item in eligible_items}
+                        time_deferred_rows.difference_update(eligible_row_ids)
+                        time_deferred_rows.update(
+                            item.row_id
+                            for item in mode_eligible
+                            if item.row_id not in eligible_row_ids
+                        )
+                        summary.time_deferred = len(time_deferred_rows)
+                        self._report_progress(progress, summary, "")
                     if not eligible_items:
                         if mode_eligible and self.live:
                             summary.stopped_reason = (
@@ -357,6 +370,8 @@ class Pipeline:
                             # If the reveal crossed 19:45 locally, discard the temporary
                             # number and reopen it in the next safe window.
                             if not self.source.is_local_window_open(item):
+                                time_deferred_rows.add(item.row_id)
+                                summary.time_deferred = len(time_deferred_rows)
                                 waiting_status = (
                                     ItemStatus.REPEAT_PENDING if repeat_flow else ItemStatus.PENDING
                                 )
@@ -714,7 +729,8 @@ class Pipeline:
                     )
                 self.state.finish_run(summary)
                 self._report_progress(progress, summary, "")
-                self._notify_completion(notifier, summary)
+                if self.notify_completion:
+                    self._notify_completion(notifier, summary)
             finally:
                 notifier.close()
         return summary

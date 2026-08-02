@@ -143,6 +143,8 @@ class CommandState:
     base_processed: int = 0
     base_inspected: int = 0
     base_no_answer_synced: int = 0
+    base_time_deferred: int = 0
+    completion_notified: bool = False
     result: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -168,6 +170,7 @@ class ProgressSnapshot:
     inspected: int = 0
     no_answer_synced: int = 0
     crm_sync_errors: int = 0
+    time_deferred: int = 0
     row_id: str = ""
 
 
@@ -572,11 +575,17 @@ class GoogleControlPanel:
             if attempts_index >= 0 and attempts_index < len(row):
                 with suppress(ValueError):
                     attempts += max(0, int(float(row[attempts_index] or 0)))
+        created_statuses = (
+            ItemStatus.DONE.value,
+            ItemStatus.CRM_MONITORING.value,
+            ItemStatus.CRM_COMMENT_PENDING.value,
+        )
+        created = sum(counts.get(status, 0) for status in created_statuses)
         return ProgressSnapshot(
-            created=counts.get(ItemStatus.DONE.value, 0),
+            created=created,
             captured=(
                 counts.get(ItemStatus.CAPTURED.value, 0)
-                + counts.get(ItemStatus.DONE.value, 0)
+                + created
                 + counts.get(ItemStatus.DUPLICATE.value, 0)
             ),
             duplicates=counts.get(ItemStatus.DUPLICATE.value, 0),
@@ -1418,6 +1427,7 @@ class RemoteController:
         state.base_processed = recovered.processed
         state.base_inspected = recovered.inspected
         state.base_no_answer_synced = recovered.no_answer_synced
+        state.base_time_deferred = recovered.time_deferred
         if state.max_inspected <= 0:
             state.max_inspected = _effective_max_inspected(state.target, 0)
         self._progress = recovered
@@ -1484,6 +1494,7 @@ class RemoteController:
                     mode="full",
                     live=True,
                     include_manual=False,
+                    notify_completion=False,
                 ).run(
                     remaining,
                     max_inspected=remaining_inspected,
@@ -1545,6 +1556,7 @@ class RemoteController:
                 inspected=state.base_inspected + summary.inspected,
                 no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
                 crm_sync_errors=summary.crm_sync_errors,
+                time_deferred=state.base_time_deferred + summary.time_deferred,
                 row_id=row_id,
             )
 
@@ -1668,6 +1680,7 @@ class RemoteController:
             "inspected": progress.inspected,
             "no_answer_synced": progress.no_answer_synced,
             "crm_sync_errors": progress.crm_sync_errors,
+            "time_deferred": progress.time_deferred,
             "max_inspected": state.max_inspected,
             "command_id": state.command_id,
         }
@@ -1676,6 +1689,7 @@ class RemoteController:
         if self._state is None:
             return
         self.panel.finish(self._state)
+        self._notify_remote_completion(self._state)
         LOGGER.info(
             "Команда %s завершена: %s",
             self._state.command_id,
@@ -1685,6 +1699,67 @@ class RemoteController:
         self._state = None
         self._progress = ProgressSnapshot()
         self._phase_message = ""
+
+    def _notify_remote_completion(self, state: CommandState) -> None:
+        """Send one aggregate notification for the whole remote command."""
+        if state.completion_notified:
+            return
+        from avito_crm.notifications import NotificationRouter
+
+        result = state.result
+        message = str(result.get("message", "") or "")
+        reason = next(
+            (
+                line.partition(":")[2].strip()
+                for line in reversed(message.splitlines())
+                if line.startswith("Итог:")
+            ),
+            str(result.get("status", "") or "Работа завершена"),
+        )
+        summary = RunSummary(
+            run_id=state.command_id,
+            requested=state.target,
+            captured=int(result.get("captured", 0) or 0),
+            created=int(result.get("created", 0) or 0),
+            duplicates=int(result.get("duplicates", 0) or 0),
+            errors=int(result.get("errors", 0) or 0),
+            invalid=int(result.get("invalid", 0) or 0),
+            inactive=int(result.get("inactive", 0) or 0),
+            unavailable=int(result.get("unavailable", 0) or 0),
+            phone_failed=int(result.get("phone_failed", 0) or 0),
+            retries=int(result.get("retries", 0) or 0),
+            manual_required=int(result.get("manual_required", 0) or 0),
+            captchas_solved=int(result.get("captchas_solved", 0) or 0),
+            inspected=int(result.get("inspected", 0) or 0),
+            processed=int(result.get("processed", 0) or 0),
+            no_answer_synced=int(result.get("no_answer_synced", 0) or 0),
+            crm_sync_errors=int(result.get("crm_sync_errors", 0) or 0),
+            time_deferred=int(result.get("time_deferred", 0) or 0),
+            stopped_reason=reason,
+        )
+        try:
+            settings = self._load_worker_settings()
+            notifier = NotificationRouter(settings)
+            try:
+                if notifier.enabled:
+                    notifier.send_run_completed(
+                        summary=summary,
+                        source_name=(
+                            f"google:{settings.google_spreadsheet_id}:{state.worksheet}"
+                        ),
+                        mode="full",
+                        live=True,
+                    )
+            finally:
+                notifier.close()
+        except Exception as exc:
+            LOGGER.warning(
+                "Итоговое уведомление команды %s не доставлено (%s)",
+                state.command_id,
+                exc.__class__.__name__,
+            )
+        state.completion_notified = True
+        self._save_state(state)
 
     def _load_state(self) -> CommandState | None:
         if not self.state_path.is_file():

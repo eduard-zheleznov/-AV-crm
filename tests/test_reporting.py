@@ -45,6 +45,26 @@ def test_compact_report_handles_an_empty_time_deferred_run_without_division_erro
     assert "Итог: Отложено по времени" in report
 
 
+def test_compact_report_separates_time_deferred_rows_from_unopened_other():
+    summary = RunSummary(
+        run_id="deferred-mixed",
+        requested=5,
+        processed=3,
+        captured=2,
+        created=2,
+        unavailable=1,
+        time_deferred=2,
+        stopped_reason="Остановлено оператором",
+    )
+
+    report = format_run_report(summary, reason=summary.stopped_reason)
+
+    assert "Сколько чего из неоткрытых номеров (1)" in report
+    assert "- Другое: 0 (0%)" in report
+    assert "Отложено по местному времени: 2" in report
+    assert "в CRM не передавались" in report
+
+
 def test_compact_report_only_expands_attention_lines_when_needed():
     normal = format_run_report(RunSummary("normal", 0))
     attention = format_run_report(

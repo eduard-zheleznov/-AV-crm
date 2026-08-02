@@ -198,6 +198,35 @@ def test_panel_reads_remote_command_from_fixed_cells(settings):
     assert command == PanelCommand(True, False, 3, "Новые", False, 8)
 
 
+def test_command_recovery_counts_created_leads_waiting_for_crm_monitoring(settings):
+    headers = [
+        settings.run_id_column,
+        settings.status_column,
+        settings.attempts_column,
+        settings.funnel_stage_column,
+    ]
+    queue = MatrixSheet(
+        [
+            headers,
+            ["cmd", "crm_monitoring", "1", "Новый лид"],
+            ["cmd", "crm_comment_pending", "1", "Повторный лид"],
+            ["cmd", "done", "1", "Повторный лид"],
+            ["other", "done", "1", "Новый лид"],
+        ]
+    )
+    panel = GoogleControlPanel(
+        settings,
+        FakeSpreadsheet({"Лист1": queue}),
+        MissingWorksheet,
+    )
+
+    recovered = panel.count_command("Лист1", "cmd")
+
+    assert recovered.processed == 3
+    assert recovered.created == 3
+    assert recovered.captured == 3
+
+
 def test_claim_consumes_start_and_clears_retired_captcha_cell(settings):
     values = [[""] * 6 for _ in range(12)]
     values[3][1] = True
@@ -354,6 +383,56 @@ def test_remote_command_is_claimed_once_and_finished(settings):
 
     controller.tick()
     assert len(panel.claims) == 1
+
+
+def test_remote_completion_notification_uses_whole_command_totals_once(settings, monkeypatch):
+    delivered = []
+
+    class FakeNotifier:
+        enabled = True
+
+        def __init__(self, _settings):
+            pass
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("avito_crm.notifications.NotificationRouter", FakeNotifier)
+    controller = RemoteController(
+        settings,
+        FakePanel(PanelCommand(False, False, 10, "Лист1", False)),
+    )
+    state = CommandState(
+        command_id="cmd-aggregate",
+        target=10,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="finalizing",
+        started_at="2026-08-02T10:00:00+00:00",
+        result={
+            "status": "ОСТАНОВЛЕНО",
+            "message": "Общая воронка запуска:\n\nИтог: Остановлено оператором",
+            "processed": 8,
+            "captured": 6,
+            "created": 5,
+            "time_deferred": 2,
+        },
+    )
+
+    controller._notify_remote_completion(state)
+    controller._notify_remote_completion(state)
+
+    assert len(delivered) == 1
+    summary = delivered[0]["summary"]
+    assert summary.processed == 8
+    assert summary.captured == 6
+    assert summary.created == 5
+    assert summary.time_deferred == 2
+    assert summary.stopped_reason == "Остановлено оператором"
+    assert state.completion_notified is True
 
 
 def test_remote_worker_reloads_env_before_each_command(settings, monkeypatch):
