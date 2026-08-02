@@ -414,7 +414,10 @@ class RobotLeadHandoff:
             .timestamp()
         )
         seen: set[str] = set()
-        page_size = 200
+        # LPTracker currently caps this endpoint at 100 rows even when a larger
+        # limit is requested. Keeping the observed page size prevents a full
+        # first page from being mistaken for the end of the result set.
+        page_size = 100
         scan_limit = 500
         for offset in range(0, scan_limit, page_size):
             request_limit = min(page_size, scan_limit - offset)

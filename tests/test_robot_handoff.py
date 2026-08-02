@@ -162,29 +162,36 @@ class StagePrefilterCrm(FakeCrm):
 
     def list_recent_leads(self, _project_id: int, **_kwargs: object) -> list[dict]:
         self.list_calls += 1
-        return [
-            {
-                "id": 701,
-                "name": "2 Авито — 111111111",
-                "view": {"campaign": "Avito CRM Pipeline"},
-                "stage_id": None,
-                "custom": [{"type": "funnel", "value": "20"}],
-            },
-            {
-                "id": 702,
-                "name": "Обычный лид",
-                "view": {"campaign": "Другой источник"},
-                "stage_id": None,
-                "custom": [{"type": "funnel", "value": "10"}],
-            },
-            {
-                "id": 700,
-                "name": "2 Авито — 123456789",
-                "view": {"campaign": "Avito CRM Pipeline"},
-                "stage_id": None,
-                "custom": [{"type": "funnel", "value": "10"}],
-            },
-        ]
+        offset = int(_kwargs.get("offset", 0))
+        if offset == 0:
+            return [
+                {
+                    "id": 800 + index,
+                    "name": f"2 Авито — {800000000 + index}",
+                    "view": {"campaign": "Avito CRM Pipeline"},
+                    "stage_id": None,
+                    "custom": [{"type": "funnel", "value": "20"}],
+                }
+                for index in range(100)
+            ]
+        if offset == 100:
+            return [
+                {
+                    "id": 702,
+                    "name": "Обычный лид",
+                    "view": {"campaign": "Другой источник"},
+                    "stage_id": None,
+                    "custom": [{"type": "funnel", "value": "10"}],
+                },
+                {
+                    "id": 700,
+                    "name": "2 Авито — 123456789",
+                    "view": {"campaign": "Avito CRM Pipeline"},
+                    "stage_id": None,
+                    "custom": [{"type": "funnel", "value": "10"}],
+                },
+            ]
+        return []
 
     def get_lead(self, lead_id: str | int) -> dict:
         self.get_lead_calls.append(str(lead_id))
@@ -291,10 +298,10 @@ def test_handoff_prefilters_list_by_stage_before_loading_full_lead(settings):
 
         summary = handler.run_once(apply=False, limit=1)
 
-    assert summary.inspected == 3
+    assert summary.inspected == 102
     assert summary.eligible == 1
     assert summary.ready == 1
-    assert crm.list_calls == 1
+    assert crm.list_calls == 2
     assert crm.get_lead_calls == ["700"]
     assert transcriber.calls == 1
 
