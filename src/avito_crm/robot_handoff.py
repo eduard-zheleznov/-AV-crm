@@ -283,19 +283,31 @@ class RobotLeadHandoff:
         target_step = _resolve_step(steps, self.settings.robot_handoff_target_funnel_name)
         candidates = self._candidates(project_id, lead_id)
         batch_limit = limit or self.settings.robot_handoff_batch_size
+        explain_skips = lead_id is not None
         for candidate in candidates:
             if summary.eligible >= batch_limit:
                 break
             summary.inspected += 1
             candidate_id = str(candidate.get("id", "")).strip()
             if not candidate_id:
-                summary.skipped += 1
+                _record_skip(
+                    summary,
+                    "без ID",
+                    "LPTracker не вернул ID лида",
+                    explain=explain_skips,
+                )
                 continue
             lead = candidate
             record: dict[str, Any] | None = None
             try:
                 if not is_managed_avito_lead(lead):
-                    summary.skipped += 1
+                    _record_skip(
+                        summary,
+                        candidate_id,
+                        "имя или источник не совпадают с Avito-потоком "
+                        "загрузчика",
+                        explain=explain_skips,
+                    )
                     continue
                 stage_name = self.crm.get_lead_stage_name(
                     candidate_id,
@@ -304,7 +316,14 @@ class RobotLeadHandoff:
                     lead=lead,
                 )
                 if _normalized(stage_name) != _normalized(source_step["name"]):
-                    summary.skipped += 1
+                    current_stage = stage_name or "не определён"
+                    _record_skip(
+                        summary,
+                        candidate_id,
+                        f"текущий шаг «{current_stage}»; нужен "
+                        f"«{source_step['name']}»",
+                        explain=explain_skips,
+                    )
                     continue
                 if lead_id is None:
                     lead = self.crm.get_lead(candidate_id)
@@ -322,7 +341,12 @@ class RobotLeadHandoff:
                         continue
                 record = _latest_successful_outgoing_record(lead)
                 if record is None:
-                    summary.skipped += 1
+                    _record_skip(
+                        summary,
+                        candidate_id,
+                        "нет успешной исходящей записи со ссылкой на аудио",
+                        explain=explain_skips,
+                    )
                     continue
                 summary.eligible += 1
                 self._handle_one(
@@ -575,6 +599,18 @@ def _resolve_step(steps: list[dict[str, Any]], name: str) -> dict[str, Any]:
     if len(matches) != 1 or not str(matches[0].get("id", "")).strip():
         raise ConfigurationError(f"Шаг воронки {name!r} отсутствует или неоднозначен")
     return matches[0]
+
+
+def _record_skip(
+    summary: HandoffSummary,
+    lead_id: str,
+    reason: str,
+    *,
+    explain: bool,
+) -> None:
+    summary.skipped += 1
+    if explain:
+        summary.details.append(f"Лид {lead_id}: пропущен — {reason}")
 
 
 def _latest_successful_outgoing_record(lead: dict[str, Any]) -> dict[str, Any] | None:

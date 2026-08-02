@@ -306,6 +306,49 @@ def test_handoff_prefilters_list_by_stage_before_loading_full_lead(settings):
     assert transcriber.calls == 1
 
 
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (
+            lambda lead: lead.update(name="Обычный лид"),
+            "имя или источник не совпадают",
+        ),
+        (
+            lambda lead: lead.update(funnel={"id": 20, "name": "Новый лид"}),
+            "текущий шаг «Новый лид»",
+        ),
+        (
+            lambda lead: lead.update(calls_records=[]),
+            "нет успешной исходящей записи",
+        ),
+    ],
+)
+def test_exact_lead_preview_explains_why_lead_is_skipped(settings, change, reason):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    lead = _lead()
+    change(lead)
+    crm = FakeCrm(lead)
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+        )
+
+        summary = handler.run_once(apply=False, lead_id=700)
+
+    assert summary.inspected == 1
+    assert summary.eligible == 0
+    assert summary.skipped == 1
+    assert len(summary.details) == 1
+    assert reason in summary.details[0]
+    assert transcriber.calls == 0
+
+
 def test_handoff_does_not_mutate_ambiguous_multi_phone_lead(settings):
     configured = replace(settings, gemini_api_key="test-only-key")
     lead = _lead()
