@@ -29,6 +29,11 @@ def configure_logging(log_dir: Path, verbose: bool = False) -> None:
     root.handlers.clear()
     root.setLevel(level)
 
+    # Third-party request logs expose provider hostnames and overwhelm the
+    # operator console. Application clients emit concise, redacted outcomes.
+    for logger_name in ("httpx", "httpcore"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
+
     # pythonw.exe has no stderr. Skipping this handler avoids repeated logging
     # errors in the Windows background controller while preserving the file log.
     if sys.stderr is not None:

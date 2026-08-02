@@ -1,6 +1,6 @@
 import logging
 
-from avito_crm.logging_utils import RedactingFormatter
+from avito_crm.logging_utils import RedactingFormatter, configure_logging
 
 
 def test_logging_formatter_redacts_telegram_token_url():
@@ -36,3 +36,10 @@ def test_logging_formatter_redacts_token_without_full_url():
     rendered = RedactingFormatter("%(message)s").format(record)
 
     assert token not in rendered
+
+
+def test_configure_logging_hides_third_party_request_urls(tmp_path):
+    configure_logging(tmp_path)
+
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
