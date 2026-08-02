@@ -318,7 +318,7 @@ class DesktopApp:
             variable=self.robot_handoff_enabled_var,
         )
         self.robot_handoff_checkbox.grid(row=0, column=0, sticky="w", padx=(0, 12))
-        ttk.Label(handoff_row, text="Gemini API key", style="Field.TLabel").grid(
+        ttk.Label(handoff_row, text="Ключ распознавания", style="Field.TLabel").grid(
             row=0, column=1, sticky="e", padx=(0, 8)
         )
         self.gemini_key_entry = ttk.Entry(
@@ -1178,7 +1178,7 @@ class DesktopApp:
         gemini_key = self.gemini_key_var.get().strip()
         if self.robot_handoff_enabled_var.get() and not gemini_key:
             raise ValueError(
-                "Для обработки шага «Лид с робота» укажите Gemini API key"
+                "Для обработки шага «Лид с робота» укажите ключ распознавания"
             )
         notification_updates = self._notification_env_values()
         update_env_values(

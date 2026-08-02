@@ -135,25 +135,32 @@ class GeminiPhoneTranscriber:
             },
         )
         if response.status_code >= 400:
-            raise AppError(f"Gemini временно не обработал запись (HTTP {response.status_code})")
+            raise AppError(
+                f"Сервис распознавания временно не обработал запись "
+                f"(HTTP {response.status_code})"
+            )
         try:
             payload = response.json()
             text = payload["candidates"][0]["content"]["parts"][0]["text"]
             parsed = json.loads(text)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise AppError("Gemini вернул неполный или некорректный результат") from exc
+            raise AppError(
+                "Сервис распознавания вернул неполный или некорректный результат"
+            ) from exc
         return self._validate_result(parsed)
 
     def _validate_result(self, parsed: object) -> TranscriptionResult:
         if not isinstance(parsed, dict):
-            raise AppError("Gemini вернул результат неожиданного формата")
+            raise AppError("Сервис распознавания вернул результат неожиданного формата")
         status = str(parsed.get("status", "")).strip().lower()
         transcript = str(parsed.get("transcript", "") or "").strip()
         try:
             confidence = float(parsed.get("confidence", 0))
             phone_count = int(parsed.get("phone_count", 0))
         except (TypeError, ValueError) as exc:
-            raise AppError("Gemini не указал уверенность или число телефонов") from exc
+            raise AppError(
+                "Сервис распознавания не указал уверенность или число телефонов"
+            ) from exc
         phone = normalize_phone(str(parsed.get("phone", "") or "")) or ""
         if status != "ok" or phone_count != 1 or not phone:
             raise ManualReviewRequired(
@@ -166,7 +173,7 @@ class GeminiPhoneTranscriber:
         transcript_phones = extract_phones(transcript)
         if transcript_phones != [phone]:
             raise ManualReviewRequired(
-                "Контрольный фрагмент и итоговый номер Gemini не совпали однозначно"
+                "Контрольный фрагмент и итоговый номер распознавания не совпали однозначно"
             )
         return TranscriptionResult(status, phone, confidence, phone_count, transcript)
 
@@ -186,13 +193,17 @@ class GeminiPhoneTranscriber:
                     )
                 declared_length = _safe_int(response.headers.get("content-length"))
                 if declared_length > self.settings.gemini_max_audio_bytes:
-                    raise AppError("Запись звонка превышает безопасный размер для Gemini")
+                    raise AppError(
+                        "Запись звонка превышает безопасный размер для распознавания"
+                    )
                 chunks: list[bytes] = []
                 total = 0
                 for chunk in response.iter_bytes():
                     total += len(chunk)
                     if total > self.settings.gemini_max_audio_bytes:
-                        raise AppError("Запись звонка превышает безопасный размер для Gemini")
+                        raise AppError(
+                            "Запись звонка превышает безопасный размер для распознавания"
+                        )
                     chunks.append(chunk)
                 if total == 0:
                     raise AppError("LPTracker вернул пустую запись звонка")
