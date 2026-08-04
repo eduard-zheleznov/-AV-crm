@@ -108,6 +108,24 @@ def update_env_values(path: Path, updates: Mapping[str, str]) -> None:
         raise
 
 
+def save_robot_handoff_preference(
+    path: Path,
+    *,
+    enabled: bool,
+    recognition_key: str,
+) -> None:
+    """Persist the background handoff switch immediately and atomically."""
+    key = recognition_key.strip()
+    if enabled and not key:
+        raise ValueError(
+            "Для обработки шага «Лид с робота» укажите ключ распознавания"
+        )
+    updates = {"ROBOT_HANDOFF_ENABLED": "true" if enabled else "false"}
+    if enabled:
+        updates["GEMINI_API_KEY"] = key
+    update_env_values(path, updates)
+
+
 def service_account_email(path: Path) -> str:
     if not path.is_file():
         raise ValueError("Файл JSON сервисного аккаунта не найден")
