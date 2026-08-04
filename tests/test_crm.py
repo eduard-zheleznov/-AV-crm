@@ -1,6 +1,6 @@
 import json
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -483,6 +483,97 @@ def test_crm_skips_existing_contact_by_default(settings):
 
     assert result.status == ItemStatus.DUPLICATE
     assert result.contact_id == "99"
+
+
+def test_crm_skips_recent_phone_match_for_different_listing(settings):
+    recent_created_at = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    old_created_at = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/contact/search":
+            return _success([{"id": 99, "project_id": 1}])
+        if request.url.path == "/contact/99/leads":
+            return _success(
+                [
+                    {
+                        "id": 699,
+                        "name": "Авито — 876543210",
+                        "created_at": old_created_at,
+                    },
+                    {
+                        "id": 700,
+                        "name": "Авито — 987654321",
+                        "created_at": recent_created_at,
+                    }
+                ]
+            )
+        raise AssertionError(f"unexpected write: {request.method} {request.url.path}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        result = crm.create_for_phone(
+            "+79991234567",
+            "https://www.avito.ru/moskva/item_123456789",
+            destination=_destination(),
+        )
+
+    assert result.status == ItemStatus.DUPLICATE
+    assert result.created is False
+    assert "< 7 дн." in result.detail
+
+
+def test_crm_creates_new_lead_when_phone_match_is_older_than_window(settings):
+    requests = []
+    old_created_at = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/contact/search":
+            return _success([{"id": 99, "project_id": 1}])
+        if request.url.path == "/contact/99/leads":
+            return _success(
+                [
+                    {
+                        "id": 700,
+                        "name": "Авито — 987654321",
+                        "created_at": old_created_at,
+                    }
+                ]
+            )
+        if request.url.path == "/lead":
+            body = json.loads(request.content)
+            assert body["name"] == "0 Авито — 123456789"
+            assert body["contact_id"] == "99"
+            return _success({"id": 779, "contact_id": 99})
+        if request.url.path == "/lead/779/comment":
+            return _success(None)
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        result = crm.create_for_phone(
+            "+79991234567",
+            "https://www.avito.ru/moskva/item_123456789",
+            destination=_destination(),
+        )
+
+    assert result.status == ItemStatus.DONE
+    assert result.created is True
+    assert result.lead_id == "779"
+    assert "совпадение по номеру старше 7 дней" in result.detail
+    assert [request.url.path for request in requests].count("/contact/99/leads") == 1
 
 
 def test_crm_recovers_exact_listing_lead_after_interrupted_write(settings):

@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import suppress
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -422,13 +423,16 @@ class LpTrackerClient:
             for contact in contacts
             if str(contact.get("id", "")).strip()
         ]
+        leads_by_contact: dict[str, list[dict[str, Any]]] = {}
 
         # Crash-safe recovery: the API may have created the lead while the process
         # stopped before its ID reached Google Sheets.  The deterministic listing
         # name lets the next run recover that exact lead instead of creating another.
         for existing_contact_id in contact_ids:
+            contact_leads = self.contact_leads(existing_contact_id)
+            leads_by_contact[existing_contact_id] = contact_leads
             existing = self._find_existing_lead(
-                existing_contact_id,
+                contact_leads,
                 listing_id,
                 repeat,
                 destination.field_id,
@@ -456,13 +460,39 @@ class LpTrackerClient:
                 created=False,
             )
 
+        expired_phone_match = False
         if contacts and self.settings.duplicate_policy == "skip" and not force_create:
-            return CrmWriteResult(
-                status=ItemStatus.DUPLICATE,
-                contact_id=contact_ids[0] if contact_ids else None,
-                detail="Контакт с таким номером уже существует; новый лид не создан",
-                created=False,
+            window_days = self.settings.crm_duplicate_window_days
+            newest_lead_at = _newest_lead_created_at(
+                (lead for leads in leads_by_contact.values() for lead in leads),
+                self.settings.lptracker_timezone,
             )
+            age_days = (
+                max(0.0, (datetime.now(UTC) - newest_lead_at).total_seconds() / 86_400)
+                if newest_lead_at is not None
+                else None
+            )
+            duplicate_is_recent = window_days > 0 and (
+                age_days is None or age_days < window_days
+            )
+            if duplicate_is_recent:
+                if age_days is None:
+                    detail = (
+                        "Номер уже есть в CRM; дату последнего лида "
+                        "определить не удалось, новый лид не создан"
+                    )
+                else:
+                    detail = (
+                        f"Номер уже есть в CRM; последнему лиду {age_days:.1f} дн. "
+                        f"(< {window_days:g} дн.), новый лид не создан"
+                    )
+                return CrmWriteResult(
+                    status=ItemStatus.DUPLICATE,
+                    contact_id=contact_ids[0] if contact_ids else None,
+                    detail=detail,
+                    created=False,
+                )
+            expired_phone_match = True
         payload: dict[str, Any] = {
             "name": lead_name,
             "callback": False,
@@ -489,6 +519,11 @@ class LpTrackerClient:
         if not isinstance(result, dict) or not result.get("id"):
             raise CrmError("LPTracker создал лид, но не вернул его ID")
         detail = "Лид создан"
+        if expired_phone_match:
+            detail += (
+                f"; совпадение по номеру старше "
+                f"{self.settings.crm_duplicate_window_days:g} дней и не блокирует новое объявление"
+            )
         try:
             self.add_listing_comment(result["id"], canonical_url)
         except CrmError as exc:
@@ -505,9 +540,13 @@ class LpTrackerClient:
         )
 
     def _find_existing_lead(
-        self, contact_id: str, listing_id: str, repeat: bool, field_id: int
+        self,
+        leads: list[dict[str, Any]],
+        listing_id: str,
+        repeat: bool,
+        field_id: int,
     ) -> dict[str, Any] | None:
-        for lead in self.contact_leads(contact_id):
+        for lead in leads:
             if not _lead_name_matches_listing(
                 str(lead.get("name", "")), listing_id, repeat=repeat
             ):
@@ -816,6 +855,24 @@ def _extract_funnel_stage(lead: dict[str, Any]) -> tuple[str, str]:
         if value not in (None, ""):
             return str(value).strip(), ""
     return "", ""
+
+
+def _newest_lead_created_at(
+    leads: Iterable[dict[str, Any]],
+    timezone_name: str,
+) -> datetime | None:
+    try:
+        local_timezone = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError as exc:
+        raise ConfigurationError(
+            f"Неизвестный часовой пояс LPTRACKER_TIMEZONE={timezone_name!r}"
+        ) from exc
+    dates = [
+        created_at
+        for lead in leads
+        if (created_at := _extract_lead_created_at(lead, local_timezone)) is not None
+    ]
+    return max(dates) if dates else None
 
 
 def _extract_lead_created_at(lead: dict[str, Any], local_timezone: ZoneInfo) -> datetime | None:

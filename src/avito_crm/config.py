@@ -138,6 +138,7 @@ class Settings:
     crm_monitor_max_hours: float
     crm_monitor_batch_size: int
     duplicate_policy: str
+    crm_duplicate_window_days: float
 
     robot_handoff_enabled: bool
     robot_handoff_source_funnel_name: str
@@ -310,6 +311,7 @@ class Settings:
             crm_monitor_max_hours=_float("CRM_MONITOR_MAX_HOURS", 24.0),
             crm_monitor_batch_size=_int("CRM_MONITOR_BATCH_SIZE", 20) or 20,
             duplicate_policy=os.getenv("CRM_DUPLICATE_POLICY", "skip").strip().lower(),
+            crm_duplicate_window_days=_float("CRM_DUPLICATE_WINDOW_DAYS", 7.0),
             robot_handoff_enabled=_bool("ROBOT_HANDOFF_ENABLED", False),
             robot_handoff_source_funnel_name=os.getenv(
                 "ROBOT_HANDOFF_SOURCE_FUNNEL_NAME", "⚙️ Лид с робота"
@@ -638,6 +640,8 @@ class Settings:
                 raise ConfigurationError("Последнее напоминание должно быть раньше таймаута капчи")
         if self.duplicate_policy not in {"skip", "create_lead"}:
             raise ConfigurationError("CRM_DUPLICATE_POLICY: допустимо skip или create_lead")
+        if self.crm_duplicate_window_days < 0:
+            raise ConfigurationError("CRM_DUPLICATE_WINDOW_DAYS не может быть меньше 0")
         funnel_names = {
             "LPTRACKER_AUTORESPONDER_FUNNEL_NAME": self.lptracker_autoresponder_funnel_name,
             "LPTRACKER_NO_ANSWER_FUNNEL_NAME": self.lptracker_no_answer_funnel_name,

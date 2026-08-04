@@ -20,6 +20,7 @@ def settings(tmp_path, monkeypatch) -> Settings:
         "LPTRACKER_FIELD_NAME": "Тег+ для новых с Ав и Ян",
         "LPTRACKER_FIELD_VALUE": "Сбор № лпр (Ав, ремонт кв. под ключ)",
         "CRM_DUPLICATE_POLICY": "skip",
+        "CRM_DUPLICATE_WINDOW_DAYS": "7",
         "PIPELINE_MAX_ATTEMPTS": "2",
         "AVITO_MIN_DELAY_SECONDS": "0",
         "AVITO_MAX_DELAY_SECONDS": "0",
