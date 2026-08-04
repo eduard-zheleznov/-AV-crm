@@ -51,6 +51,13 @@ def test_browser_channel_rejects_unknown_playwright_channel(settings):
         configured.validate()
 
 
+def test_duplicate_window_cannot_be_negative(settings):
+    configured = replace(settings, crm_duplicate_window_days=-1)
+
+    with pytest.raises(ConfigurationError, match="CRM_DUPLICATE_WINDOW_DAYS"):
+        configured.validate()
+
+
 def test_extension_driver_requires_a_long_local_token(settings):
     configured = replace(
         settings,
