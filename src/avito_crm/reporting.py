@@ -7,6 +7,7 @@ class RunReportMetrics(Protocol):
     processed: int
     captured: int
     created: int
+    duplicates: int
     inactive: int
     invalid: int
     unavailable: int
@@ -42,6 +43,7 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     processed = _count(metrics.processed)
     captured = _count(metrics.captured)
     created = _count(metrics.created)
+    duplicates = _count(getattr(metrics, "duplicates", 0))
     inactive = _count(metrics.inactive)
     invalid = _count(metrics.invalid)
     unavailable = _count(metrics.unavailable)
@@ -54,28 +56,53 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     unopened = max(0, processed - captured)
     classified_unopened = inactive + invalid + unavailable
     other = max(0, unopened - classified_unopened)
+    not_created = max(0, captured - created)
+    crm_duplicates = min(duplicates, not_created)
+    unexplained_not_created = max(0, not_created - crm_duplicates)
     result = (reason or "Очередь обработана: все доступные попытки завершены").strip()
+
+    if captured > 0 and created == captured:
+        created_result = f"да — {_percent(created, captured)} от открытых"
+    else:
+        created_result = f"{_percent(created, captured)} от открытых"
 
     lines = [
         "Общая воронка запуска:",
         f"1) Обработано ссылок: {processed}",
         f"2) Номеров открыто: {captured} ({_percent(captured, processed)} от ссылок)",
-        (
-            f"3) Лидов создано: {created} "
-            f"({'да' if created else 'нет'} — {_percent(created, captured)} от открытых)"
-        ),
+        f"3) Лидов создано: {created} ({created_result})",
         "",
         f"Сколько чего из неоткрытых номеров ({unopened}):",
         f"- Неактивных объявлений: {inactive} ({_percent(inactive, unopened)})",
         f"- Некорректных ссылок: {invalid} ({_percent(invalid, unopened)})",
         f"- Без кнопки телефона: {unavailable} ({_percent(unavailable, unopened)})",
         f"- Другое: {other} ({_percent(other, unopened)})",
-        "",
-        (
-            f"За запуск решено капч: {captchas_solved} "
-            f"({_percent(captchas_solved, processed)} от ссылок)"
-        ),
     ]
+    if not_created:
+        lines.extend(
+            (
+                "",
+                f"Почему из открытых номеров не создан новый лид ({not_created}):",
+                (
+                    "- Дубликаты / номер уже есть в CRM: "
+                    f"{crm_duplicates} ({_percent(crm_duplicates, not_created)})"
+                ),
+                (
+                    "- Другое — требуется проверить журнал: "
+                    f"{unexplained_not_created} "
+                    f"({_percent(unexplained_not_created, not_created)})"
+                ),
+            )
+        )
+    lines.extend(
+        (
+            "",
+            (
+                f"За запуск решено капч: {captchas_solved} "
+                f"({_percent(captchas_solved, processed)} от ссылок)"
+            ),
+        )
+    )
     if time_deferred:
         lines.append(
             f"Отложено по местному времени: {time_deferred} "

@@ -525,7 +525,8 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
     assert "Обработано ссылок: 8" in body
     assert "Неактивных объявлений: 2" in body
     assert "Номеров открыто: 4 (50% от ссылок)" in body
-    assert "Лидов создано: 3 (да — 75% от открытых)" in body
+    assert "Лидов создано: 3 (75% от открытых)" in body
+    assert "Почему из открытых номеров не создан новый лид (1)" in body
     assert "Другое: 1 (25%)" in body
     assert "secret-id" not in body
     assert "очередь продолжает работу" not in body
