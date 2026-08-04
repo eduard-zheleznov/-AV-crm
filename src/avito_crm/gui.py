@@ -23,6 +23,7 @@ from avito_crm.gui_config import (
     parse_telegram_chat_ids,
     parse_telegram_reminders,
     read_env_values,
+    save_robot_handoff_preference,
     service_account_email,
     update_env_values,
 )
@@ -72,6 +73,7 @@ class DesktopApp:
         self.robot_handoff_enabled_var = tk.BooleanVar(
             value=_env_flag(values, "ROBOT_HANDOFF_ENABLED", False)
         )
+        self.robot_handoff_status_var = tk.StringVar()
         self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
         self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
         self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
@@ -314,8 +316,9 @@ class DesktopApp:
         handoff_row.columnconfigure(1, weight=1)
         self.robot_handoff_checkbox = ttk.Checkbutton(
             handoff_row,
-            text="Обрабатывать «Лид с робота»",
+            text="Фоновая обработка «Лид с робота»",
             variable=self.robot_handoff_enabled_var,
+            command=self._save_robot_handoff_toggle,
         )
         self.robot_handoff_checkbox.grid(row=0, column=0, sticky="w", padx=(0, 12))
         ttk.Label(handoff_row, text="Ключ распознавания", style="Field.TLabel").grid(
@@ -328,6 +331,12 @@ class DesktopApp:
             width=34,
         )
         self.gemini_key_entry.grid(row=0, column=2, columnspan=2, sticky="ew")
+        ttk.Label(
+            handoff_row,
+            textvariable=self.robot_handoff_status_var,
+            style="Hint.TLabel",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 0))
+        self._refresh_robot_handoff_status()
 
         notification_row = ttk.Frame(settings_card, style="Card.TFrame")
         notification_row.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
@@ -1167,6 +1176,30 @@ class DesktopApp:
             return
         webbrowser.open(google_sheet_url(spreadsheet_id))
 
+    def _refresh_robot_handoff_status(self) -> None:
+        if self.robot_handoff_enabled_var.get():
+            text = "Включено постоянно: работает и при закрытом окне программы."
+        else:
+            text = "Выключено: лиды не потеряются и будут обработаны после включения."
+        self.robot_handoff_status_var.set(text)
+
+    def _save_robot_handoff_toggle(self) -> None:
+        enabled = self.robot_handoff_enabled_var.get()
+        try:
+            save_robot_handoff_preference(
+                self.env_path,
+                enabled=enabled,
+                recognition_key=self.gemini_key_var.get(),
+            )
+        except (OSError, ValueError) as exc:
+            self.robot_handoff_enabled_var.set(not enabled)
+            self._refresh_robot_handoff_status()
+            messagebox.showerror("Обработка лидов", str(exc), parent=self.root)
+            return
+        self._refresh_robot_handoff_status()
+        state = "включена" if enabled else "выключена"
+        self.status_var.set(f"Фоновая обработка лидов {state} и сохранена")
+
     def _validate_and_save(self) -> tuple[str, str, Path, int]:
         spreadsheet_id = extract_spreadsheet_id(self.sheet_var.get())
         worksheet = self.worksheet_var.get().strip()
@@ -1195,6 +1228,7 @@ class DesktopApp:
                 **notification_updates,
             },
         )
+        self._refresh_robot_handoff_status()
         self.sheet_var.set(google_sheet_url(spreadsheet_id))
         return spreadsheet_id, worksheet, credentials, limit
 

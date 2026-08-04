@@ -14,6 +14,7 @@ from avito_crm.gui_config import (
     parse_telegram_chat_ids,
     parse_telegram_reminders,
     read_env_values,
+    save_robot_handoff_preference,
     service_account_email,
     update_env_values,
 )
@@ -60,6 +61,43 @@ def test_update_env_values_preserves_secrets_and_uses_bom(tmp_path):
     assert values["GUI_DEFAULT_LIMIT"] == "25"
     assert values["GOOGLE_WORKSHEET"] == "Лиды #1"
     assert values["GOOGLE_CREDENTIALS_FILE"] == r"C:\Program Data\service #1.json"
+
+
+def test_robot_handoff_preference_is_saved_immediately_and_preserves_key(tmp_path):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'GEMINI_API_KEY="local-secret"\nROBOT_HANDOFF_ENABLED="false"\n',
+        encoding="utf-8-sig",
+    )
+
+    save_robot_handoff_preference(
+        env_file,
+        enabled=True,
+        recognition_key="local-secret",
+    )
+    assert read_env_values(env_file)["ROBOT_HANDOFF_ENABLED"] == "true"
+
+    save_robot_handoff_preference(
+        env_file,
+        enabled=False,
+        recognition_key="",
+    )
+    values = read_env_values(env_file)
+    assert values["ROBOT_HANDOFF_ENABLED"] == "false"
+    assert values["GEMINI_API_KEY"] == "local-secret"
+
+
+def test_robot_handoff_preference_rejects_enabling_without_key(tmp_path):
+    env_file = tmp_path / ".env"
+
+    with pytest.raises(ValueError, match="ключ распознавания"):
+        save_robot_handoff_preference(
+            env_file,
+            enabled=True,
+            recognition_key="",
+        )
+
+    assert not env_file.exists()
 
 
 def test_service_account_email_validates_json_without_returning_key(tmp_path):
