@@ -94,6 +94,67 @@ def test_new_rows_are_processed_before_legacy_phone_errors(tmp_path, settings):
     assert [item.row_id for item in source.list_actionable()] == ["3", "2"]
 
 
+def test_legacy_false_captcha_timeout_returns_to_retry_lane(tmp_path, settings):
+    path = tmp_path / "queue.xlsx"
+    columns = QueueColumns.from_settings(settings)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Лист1"
+    sheet.append([columns.url, *columns.managed])
+    sheet.append(
+        [
+            "https://www.avito.ru/moskva/item_123456789",
+            ItemStatus.MANUAL_REQUIRED,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "ручная проверка Avito не завершена за отведённое время",
+            2,
+        ]
+    )
+    sheet.append(["https://www.avito.ru/moskva/item_123456790"])
+    workbook.save(path)
+    workbook.close()
+
+    source = XlsxQueueSource(path, "Лист1", columns, 2, tmp_path / "backups")
+
+    # The genuine new row stays first; the known false-captcha timeout gets
+    # exactly the same low-priority recovery treatment as a phone retry.
+    assert [item.row_id for item in source.list_actionable()] == ["3", "2"]
+
+
+def test_genuine_manual_required_row_still_needs_explicit_requeue(tmp_path, settings):
+    path = tmp_path / "queue.xlsx"
+    columns = QueueColumns.from_settings(settings)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Лист1"
+    sheet.append([columns.url, *columns.managed])
+    sheet.append(
+        [
+            "https://www.avito.ru/moskva/item_123456789",
+            ItemStatus.MANUAL_REQUIRED,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "На странице обнаружена капча Avito",
+        ]
+    )
+    workbook.save(path)
+    workbook.close()
+
+    source = XlsxQueueSource(path, "Лист1", columns, 2, tmp_path / "backups")
+
+    assert source.list_actionable() == []
+    assert [item.row_id for item in source.list_actionable(include_manual=True)] == ["2"]
+
+
 def test_google_source_receives_plan_and_local_window_settings(tmp_path, settings, monkeypatch):
     captured = {}
     sentinel = object()

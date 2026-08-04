@@ -39,6 +39,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
+EXPECTED_EXTENSION_VERSION = "1.0.6"
 
 
 @dataclass(slots=True)
@@ -56,6 +57,7 @@ class _BridgeState:
         self.events: deque[ExtensionEvent] = deque()
         self.result: ExtensionEvent | None = None
         self.last_seen = 0.0
+        self.extension_version = ""
         self.stopped = False
 
 
@@ -149,6 +151,13 @@ class ExtensionBridge:
                         "Откройте обычный Chrome и проверьте, что расширение включено."
                     )
                 self.state.condition.wait(timeout=min(remaining, 0.5))
+            if self.state.extension_version != EXPECTED_EXTENSION_VERSION:
+                installed = self.state.extension_version or "не определена"
+                raise BrowserOperationError(
+                    "Расширение Avito CRM в Chrome устарело "
+                    f"(установлено: {installed}; требуется: {EXPECTED_EXTENSION_VERSION}). "
+                    "Откройте chrome://extensions и нажмите «Обновить» в режиме разработчика."
+                )
             if self.state.command is not None:
                 raise BrowserOperationError("Локальный мост Chrome уже выполняет другую команду")
             self.state.command = command
@@ -234,10 +243,16 @@ class ExtensionBridge:
                     self.state.result = None
                     self.state.condition.notify_all()
 
-    def _poll(self, timeout: float = 20.0) -> dict[str, Any] | None:
+    def _poll(
+        self,
+        timeout: float = 20.0,
+        *,
+        extension_version: str = "",
+    ) -> dict[str, Any] | None:
         deadline = time.monotonic() + timeout
         with self.state.condition:
             self.state.last_seen = time.monotonic()
+            self.state.extension_version = extension_version.strip()
             self.state.condition.notify_all()
             while not self.state.stopped:
                 if self.state.command is not None and not self.state.dispatched:
@@ -288,7 +303,10 @@ class ExtensionBridge:
             def do_OPTIONS(self) -> None:  # noqa: N802
                 self.send_response(HTTPStatus.NO_CONTENT)
                 self._cors_headers()
-                self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+                self.send_header(
+                    "Access-Control-Allow-Headers",
+                    "Authorization, Content-Type, X-Avito-CRM-Extension-Version",
+                )
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.end_headers()
 
@@ -311,7 +329,12 @@ class ExtensionBridge:
                 if path != "/v1/poll":
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                     return
-                command = bridge._poll()
+                command = bridge._poll(
+                    extension_version=self.headers.get(
+                        "X-Avito-CRM-Extension-Version",
+                        "",
+                    )
+                )
                 if command is None:
                     self.send_response(HTTPStatus.NO_CONTENT)
                     self._cors_headers()
@@ -442,9 +465,17 @@ class ChromeExtensionBrowser:
             raise PhoneButtonUnavailableError(
                 str(payload.get("reason", "Кнопка показа телефона не найдена"))
             )
-        if status in {"manual_timeout", "challenge"}:
+        if status == "challenge":
             raise ManualActionRequired(
                 str(payload.get("reason", "Ручная проверка Avito не завершена"))
+            )
+        if status == "manual_timeout":
+            # Current extension waits until the operator solves the challenge or
+            # presses STOP. A timeout can only come from a stale content script;
+            # never turn it into a false CAPTCHA state that blocks the whole run.
+            raise PhoneNotFoundError(
+                "Устаревший сценарий Chrome завершил ожидание; строка возвращена "
+                "в очередь без статуса капчи"
             )
         if status == "cancelled":
             self._notify_captcha_stopped(canonical_url)

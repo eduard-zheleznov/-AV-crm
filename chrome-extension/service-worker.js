@@ -1,9 +1,14 @@
 importScripts("config.local.js");
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
-  ? { Authorization: `Bearer ${CONFIG.token}`, "Content-Type": "application/json" }
+  ? {
+      Authorization: `Bearer ${CONFIG.token}`,
+      "Content-Type": "application/json",
+      "X-Avito-CRM-Extension-Version": EXTENSION_VERSION
+    }
   : {};
 
 let polling = false;

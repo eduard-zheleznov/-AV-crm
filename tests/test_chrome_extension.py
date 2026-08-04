@@ -7,12 +7,18 @@ import threading
 import urllib.error
 import urllib.request
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
 import avito_crm.chrome_extension as chrome_extension_module
-from avito_crm.chrome_extension import ChromeExtensionBrowser, ExtensionBridge, ExtensionEvent
-from avito_crm.errors import OperatorStopRequested
+from avito_crm.chrome_extension import (
+    EXPECTED_EXTENSION_VERSION,
+    ChromeExtensionBrowser,
+    ExtensionBridge,
+    ExtensionEvent,
+)
+from avito_crm.errors import BrowserOperationError, OperatorStopRequested, PhoneNotFoundError
 from avito_crm.models import PhoneResult
 
 
@@ -28,16 +34,20 @@ def _request(
     path: str,
     *,
     payload: dict[str, object] | None = None,
+    extension_version: str = "",
 ) -> tuple[int, dict[str, object] | None]:
     body = None if payload is None else json.dumps(payload).encode()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    if extension_version:
+        headers["X-Avito-CRM-Extension-Version"] = extension_version
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=body,
         method="POST" if payload is not None else "GET",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         raw = response.read()
@@ -78,7 +88,12 @@ def test_bridge_delivers_one_command_and_correlates_the_result(settings):
 
     def extension() -> None:
         try:
-            status, command = _request(port, token, "/v1/poll")
+            status, command = _request(
+                port,
+                token,
+                "/v1/poll",
+                extension_version=EXPECTED_EXTENSION_VERSION,
+            )
             assert status == 200
             assert command is not None
             assert command["type"] == "reveal_phone"
@@ -137,6 +152,31 @@ def test_bridge_exposes_stop_to_the_waiting_extension(settings):
     (settings.data_dir / "STOP").write_text("stop", encoding="utf-8")
 
     assert bridge._command_status("waiting-command") == "cancelled"
+
+
+def test_bridge_rejects_a_stale_extension_before_dispatch(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.start()
+    try:
+        with bridge.state.condition:
+            bridge.state.last_seen = chrome_extension_module.time.monotonic()
+            bridge.state.extension_version = "1.0.5"
+        with pytest.raises(BrowserOperationError, match="устарело"):
+            bridge.execute(
+                url="https://www.avito.ru/moskva/test_123",
+                row_id="2",
+                max_clicks=1,
+            )
+        assert bridge.state.command is None
+    finally:
+        bridge.close()
+
+
+def test_manifest_matches_the_required_extension_version():
+    manifest_path = Path(__file__).parents[1] / "chrome-extension" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    assert manifest["version"] == EXPECTED_EXTENSION_VERSION
 
 
 class _FakeNotifier:
@@ -221,6 +261,20 @@ def test_extension_browser_maps_stop_to_a_non_failure_signal(settings):
     )
 
     with browser, pytest.raises(OperatorStopRequested):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_extension_browser_never_maps_a_legacy_timeout_to_captcha(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "manual_timeout",
+            {"reason": "ручная проверка Avito не завершена за отведённое время"},
+        )
+    )
+
+    with browser, pytest.raises(PhoneNotFoundError, match="без статуса капчи"):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
 

@@ -1,12 +1,15 @@
-const CHALLENGE_PATTERNS = [
+const STRONG_CHALLENGE_PATTERNS = [
   "доступ временно ограничен",
-  "доступ ограничен",
   "проблема с ip",
   "подтвердите, что вы не робот",
+  "необычная активность"
+];
+const SURFACE_CHALLENGE_PATTERNS = [
+  ...STRONG_CHALLENGE_PATTERNS,
+  "доступ ограничен",
   "пройдите проверку",
   "captcha",
-  "слишком много запросов",
-  "необычная активность"
+  "слишком много запросов"
 ];
 
 const AUTH_PATTERNS = ["телефон или почта", "нет аккаунта на авито?"];
@@ -104,15 +107,20 @@ async function revealOnce(command) {
   return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
 }
 
-async function waitForManualAction(timeoutMs) {
-  const initialReason = manualReason();
+async function waitForManualAction(_timeoutMs) {
+  let initialReason = manualReason();
+  if (!initialReason) {
+    return null;
+  }
+  // Do not stop the queue because of a short-lived page fragment. A real
+  // challenge remains visible after the page has settled.
+  await delay(700);
+  initialReason = manualReason();
   if (!initialReason) {
     return null;
   }
   notifyStatus("manual_required", initialReason);
-  const hasDeadline = Number.isFinite(timeoutMs) && timeoutMs > 0;
-  const deadline = hasDeadline ? Date.now() + timeoutMs : 0;
-  while (!hasDeadline || Date.now() < deadline) {
+  while (true) {
     await delay(1000);
     if (!manualReason()) {
       notifyStatus("manual_cleared", initialReason);
@@ -120,10 +128,6 @@ async function waitForManualAction(timeoutMs) {
       return null;
     }
   }
-  return {
-    status: "manual_timeout",
-    reason: `${initialReason} не завершена за отведённое время`
-  };
 }
 
 function notifyStatus(status, reason) {
@@ -140,7 +144,8 @@ function manualReason() {
   if (
     currentUrl.includes("captcha") ||
     currentUrl.includes("/challenge") ||
-    CHALLENGE_PATTERNS.some((pattern) => content.includes(pattern))
+    STRONG_CHALLENGE_PATTERNS.some((pattern) => content.includes(pattern)) ||
+    hasVisibleChallengeSurface()
   ) {
     return "ручная проверка Avito";
   }
@@ -148,6 +153,31 @@ function manualReason() {
     return "авторизация Avito";
   }
   return "";
+}
+
+function hasVisibleChallengeSurface() {
+  const selectors = [
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    '[data-marker*="captcha" i]',
+    '[class*="captcha" i]',
+    'iframe[src*="captcha" i]',
+    'iframe[title*="captcha" i]',
+    'form[action*="captcha" i]'
+  ];
+  for (const element of document.querySelectorAll(selectors.join(","))) {
+    if (!isVisibleInViewport(element)) {
+      continue;
+    }
+    if (element.matches('iframe[src*="captcha" i], iframe[title*="captcha" i]')) {
+      return true;
+    }
+    const text = (element.innerText || element.textContent || "").toLowerCase();
+    if (SURFACE_CHALLENGE_PATTERNS.some((pattern) => text.includes(pattern))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isAuthPage(currentUrl) {
@@ -336,5 +366,18 @@ function isVisible(element) {
     Number(style.opacity || "1") > 0 &&
     rect.width > 1 &&
     rect.height > 1
+  );
+}
+
+function isVisibleInViewport(element) {
+  if (!isVisible(element)) {
+    return false;
+  }
+  const rect = element.getBoundingClientRect();
+  return (
+    rect.bottom > 0 &&
+    rect.right > 0 &&
+    rect.top < window.innerHeight &&
+    rect.left < window.innerWidth
   );
 }

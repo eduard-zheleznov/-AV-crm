@@ -24,6 +24,9 @@ from avito_crm.phone import canonical_avito_url
 LOGGER = logging.getLogger(__name__)
 _PLAN_PRIORITY = "__plan_priority"
 _MOSCOW_OFFSET = "__moscow_offset"
+_LEGACY_FALSE_CAPTCHA_ERROR = (
+    "ручная проверка avito не завершена за отведённое время"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,8 +112,18 @@ class QueueSource(ABC):
         crm_create_count: int = 0,
         repeat_phone_attempts: int = 0,
         next_retry_at: str = "",
+        error: str = "",
     ) -> bool:
         normalized = (status or "").strip().lower()
+        # Extension versions before 1.0.6 could mistake an ordinary unopened
+        # phone for a captcha and eventually store this exact timeout. Recover
+        # only that known legacy marker; genuine manual_required rows must
+        # continue waiting for the operator.
+        if (
+            normalized == ItemStatus.MANUAL_REQUIRED
+            and _LEGACY_FALSE_CAPTCHA_ERROR in str(error or "").casefold()
+        ):
+            normalized = ItemStatus.RETRY_PHONE.value
         if crm_create_count >= 2 or crm_create_count not in {0, 1}:
             return False
         if crm_create_count == 1:
@@ -176,11 +189,18 @@ class QueueSource(ABC):
                 _safe_int(item.values.get(self.columns.crm_create_count)),
                 _safe_int(item.values.get(self.columns.repeat_phone_attempts)),
                 str(item.values.get(self.columns.next_retry_at, "") or ""),
+                str(item.values.get(self.columns.error, "") or ""),
             )
         ]
 
         def key(item: QueueItem) -> tuple[int, int, int]:
             status = (item.status or "").strip().lower()
+            if (
+                status == ItemStatus.MANUAL_REQUIRED
+                and _LEGACY_FALSE_CAPTCHA_ERROR
+                in str(item.values.get(self.columns.error, "") or "").casefold()
+            ):
+                status = ItemStatus.RETRY_PHONE.value
             if status in {
                 ItemStatus.RETRY_PHONE.value,
                 ItemStatus.RETRY_TECHNICAL.value,
