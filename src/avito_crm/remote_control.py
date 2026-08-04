@@ -315,7 +315,8 @@ class GoogleControlPanel:
                 "E7": state.started_at,
                 "E8": utc_now(),
                 "E9": (
-                    f"Команда зафиксирована; запускаем. Предел просмотра: {state.max_inspected}."
+                    "Команда зафиксирована; запускаем. "
+                    f"Предел ссылок: {_inspection_limit_label(state.max_inspected)}."
                 ),
                 "E11": _computer_name(self.settings),
                 "E12": __version__,
@@ -628,7 +629,7 @@ class GoogleControlPanel:
             "",
         ]
         matrix[8] = [
-            "Предел просмотра (0 = авто)",
+            "Предел ссылок (0 = без ограничения)",
             0,
             "",
             "Сообщение",
@@ -673,7 +674,11 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A9",
-                    "values": [["Предел просмотра (0 = авто)"]],
+                    "values": [
+                        [
+                            "Предел ссылок (0 = без ограничения)"
+                        ]
+                    ],
                 },
                 {
                     "range": "A11",
@@ -1445,20 +1450,22 @@ class RemoteController:
             state.phase = "finalizing"
             self._save_state(state)
             return
-        remaining_inspected = max(0, state.max_inspected - recovered.inspected)
-        if remaining_inspected == 0:
-            state.result = self._result_dict(
-                state,
-                status="ЗАВЕРШЕНО",
-                message=format_run_report(
-                    recovered,
-                    reason=f"Достигнут предел просмотра {state.max_inspected}",
-                ),
-                progress=recovered,
-            )
-            state.phase = "finalizing"
-            self._save_state(state)
-            return
+        remaining_inspected = 0
+        if state.max_inspected > 0:
+            remaining_inspected = max(0, state.max_inspected - recovered.inspected)
+            if remaining_inspected == 0:
+                state.result = self._result_dict(
+                    state,
+                    status="ЗАВЕРШЕНО",
+                    message=format_run_report(
+                        recovered,
+                        reason=f"Достигнут предел просмотра {state.max_inspected}",
+                    ),
+                    progress=recovered,
+                )
+                state.phase = "finalizing"
+                self._save_state(state)
+                return
         state.phase = "running"
         self._save_state(state)
         self._worker_result = None
@@ -1892,12 +1899,13 @@ def _target_label(target: int) -> str:
 
 
 def _effective_max_inspected(target: int, requested: int) -> int:
-    """Resolve the panel's safe automatic inspection canary."""
-    if requested > 0:
-        return requested
-    if target > 0:
-        return max(1, target * 2)
-    return 50
+    """Keep an inspection canary only when the operator explicitly sets it."""
+    del target  # Target limits successful leads, not inspected queue rows.
+    return requested if requested > 0 else 0
+
+
+def _inspection_limit_label(limit: int) -> str:
+    return str(limit) if limit > 0 else "не задан"
 
 
 def _new_command_id() -> str:

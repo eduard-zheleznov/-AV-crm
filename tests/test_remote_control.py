@@ -275,6 +275,7 @@ def test_setup_creates_migrated_history_and_period_analytics(settings):
 
     assert control.values[7][0] == "Капча: ждём и продолжаем автоматически"
     assert control.values[7][1] == ""
+    assert control.values[8][0] == "Предел ссылок (0 = без ограничения)"
     assert "та же строка продолжится автоматически" in control.values[10][0]
     assert tuple(history.values[0]) == HISTORY_HEADERS
     analytics = spreadsheet.worksheets[ANALYTICS_WORKSHEET]
@@ -376,7 +377,7 @@ def test_remote_command_is_claimed_once_and_finished(settings):
     assert len(panel.claims) == 1
     assert panel.history_appends == 1
     assert controller.remaining_values == [2]
-    assert controller.remaining_inspected_values == [4]
+    assert controller.remaining_inspected_values == [0]
     assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
     assert panel.finishes[0]["created"] == 2
     assert not controller.state_path.exists()
@@ -473,7 +474,7 @@ def test_interrupted_command_resumes_only_remaining_target(settings):
     controller.tick()
 
     assert controller.remaining_values == [2]
-    assert controller.remaining_inspected_values == [5]
+    assert controller.remaining_inspected_values == [0]
     assert panel.history_appends == 0
     assert panel.finishes[0]["created"] == 3
 
@@ -525,7 +526,7 @@ def test_remote_control_accepts_unlimited_target(settings):
     controller.tick()
 
     assert controller.remaining_values == [0]
-    assert controller.remaining_inspected_values == [50]
+    assert controller.remaining_inspected_values == [0]
     assert panel.finishes[0]["status"] == "ЗАВЕРШЕНО"
 
 
