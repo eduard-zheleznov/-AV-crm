@@ -322,6 +322,9 @@ class RobotLeadHandoff:
         steps = self.crm.list_funnel_steps(project_id)
         source_step = _resolve_step(steps, self.settings.robot_handoff_source_funnel_name)
         target_step = _resolve_step(steps, self.settings.robot_handoff_target_funnel_name)
+        target_owner_id = self.crm.resolve_staff_id(
+            self.settings.robot_handoff_target_owner_name
+        )
         candidates = self._candidates(project_id, lead_id)
         batch_limit = limit or self.settings.robot_handoff_batch_size
         explain_skips = lead_id is not None
@@ -426,6 +429,7 @@ class RobotLeadHandoff:
                     handoff_destination,
                     stage_date_template,
                     target_step,
+                    target_owner_id,
                     steps,
                     apply=apply,
                     retry_analysis=retry_analysis,
@@ -540,6 +544,7 @@ class RobotLeadHandoff:
         handoff_destination: CrmDestination,
         stage_date_template: CrmDestination,
         target_step: dict[str, Any],
+        target_owner_id: int,
         steps: list[dict[str, Any]],
         *,
         apply: bool,
@@ -604,6 +609,14 @@ class RobotLeadHandoff:
             current = self.crm.get_lead(lead_id)
             if not _custom_date_has_value(current, stage_date_destination):
                 raise CrmError("LPTracker не подтвердил дату шага через два дня")
+
+        if _lead_owner_id(current) != target_owner_id:
+            self.crm.set_lead_owner(lead_id, target_owner_id)
+            current = self.crm.get_lead(lead_id)
+            if _lead_owner_id(current) != target_owner_id:
+                raise CrmError(
+                    "LPTracker не подтвердил владельца «Технический аккаунт»"
+                )
 
         current_stage = self.crm.get_lead_stage_name(
             lead_id,
@@ -801,6 +814,28 @@ def _phone_details(lead: dict[str, Any]) -> list[dict[str, Any]]:
                 seen.add(identity)
                 result.append(detail)
     return result
+
+
+def _lead_owner_id(lead: dict[str, Any]) -> int | None:
+    candidates: list[object] = [lead.get("owner_id")]
+    owner = lead.get("owner")
+    if isinstance(owner, dict):
+        candidates.append(owner.get("id"))
+    custom = lead.get("custom") or []
+    if isinstance(custom, list):
+        for item in custom:
+            if not isinstance(item, dict) or _normalized(item.get("type")) != "owner":
+                continue
+            value = item.get("value")
+            candidates.append(value.get("id") if isinstance(value, dict) else value)
+    for candidate in candidates:
+        try:
+            owner_id = int(str(candidate or "").strip())
+        except (TypeError, ValueError):
+            continue
+        if owner_id > 0:
+            return owner_id
+    return None
 
 
 def _detail_value(detail: dict[str, Any]) -> str:

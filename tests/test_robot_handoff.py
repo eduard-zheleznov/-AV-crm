@@ -28,6 +28,7 @@ from avito_crm.state import StateStore
 def _lead() -> dict:
     return {
         "id": 700,
+        "owner_id": 21849,
         "name": "2 Авито — 123456789",
         "view": {"campaign": "Avito CRM Pipeline"},
         "funnel": {"id": 10, "name": "⚙️ Лид с робота"},
@@ -132,6 +133,10 @@ class FakeCrm:
             {"id": 20, "name": "Новый лид"},
         ]
 
+    def resolve_staff_id(self, name: str) -> int:
+        assert name == "Технический аккаунт"
+        return 26239
+
     def list_recent_leads(self, _project_id: int, **_kwargs: object) -> list[dict]:
         return [{"id": self.lead["id"]}]
 
@@ -164,6 +169,10 @@ class FakeCrm:
     def set_lead_funnel(self, _lead_id: str | int, funnel_id: int) -> None:
         self.events.append("funnel")
         self.lead["funnel"] = {"id": funnel_id, "name": "Новый лид"}
+
+    def set_lead_owner(self, _lead_id: str | int, owner_id: int) -> None:
+        self.events.append("owner")
+        self.lead["owner_id"] = owner_id
 
 
 class FeedRecordingCrm(FakeCrm):
@@ -284,7 +293,7 @@ class FailTranscriptionOnce:
         return None
 
 
-def test_handoff_replaces_phone_then_tag_then_funnel(settings):
+def test_handoff_replaces_phone_then_tag_then_owner_then_funnel(settings):
     configured = replace(settings, gemini_api_key="test-only-key")
     crm = FakeCrm(_lead())
     transcriber = FakeTranscriber(
@@ -302,7 +311,8 @@ def test_handoff_replaces_phone_then_tag_then_funnel(settings):
 
         saved = state.get_robot_handoff(700)
 
-    assert crm.events == ["phone", "custom", "date", "funnel"]
+    assert crm.events == ["phone", "custom", "date", "owner", "funnel"]
+    assert crm.lead["owner_id"] == 26239
     assert summary.completed == 1
     assert summary.manual_required == 0
     assert saved["status"] == "completed"
@@ -536,7 +546,14 @@ def test_handoff_resumes_after_partial_crm_failure_without_retranscription(setti
 
     assert first.errors == 1
     assert second.completed == 1
-    assert crm.events == ["phone", "custom-failed", "custom", "date", "funnel"]
+    assert crm.events == [
+        "phone",
+        "custom-failed",
+        "custom",
+        "date",
+        "owner",
+        "funnel",
+    ]
     assert transcriber.calls == 1
     assert saved["status"] == "completed"
 
@@ -568,7 +585,14 @@ def test_handoff_keeps_original_due_date_when_retry_crosses_midnight(settings):
 
     assert first.errors == 1
     assert second.completed == 1
-    assert crm.events == ["phone", "custom", "date", "funnel-failed", "funnel"]
+    assert crm.events == [
+        "phone",
+        "custom",
+        "date",
+        "owner",
+        "funnel-failed",
+        "funnel",
+    ]
     assert saved["stage_due_date"] == "03.08.2026 23:59"
     assert transcriber.calls == 1
 
@@ -686,7 +710,7 @@ def test_completed_lead_is_idempotently_skipped_on_second_run(settings):
     assert first.completed == 1
     assert second.completed == 0
     assert second.skipped == 1
-    assert crm.events == ["phone", "custom", "date", "funnel"]
+    assert crm.events == ["phone", "custom", "date", "owner", "funnel"]
     assert transcriber.calls == 1
 
 

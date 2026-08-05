@@ -144,6 +144,7 @@ class Settings:
     robot_handoff_source_funnel_name: str
     robot_handoff_source_field_values: tuple[str, ...]
     robot_handoff_target_funnel_name: str
+    robot_handoff_target_owner_name: str
     robot_handoff_field_name: str
     robot_handoff_field_value: str
     robot_handoff_stage_date_field_name: str
@@ -328,6 +329,9 @@ class Settings:
             robot_handoff_target_funnel_name=os.getenv(
                 "ROBOT_HANDOFF_TARGET_FUNNEL_NAME", "Новый лид"
             ).strip(),
+            robot_handoff_target_owner_name=os.getenv(
+                "ROBOT_HANDOFF_TARGET_OWNER_NAME", "Технический аккаунт"
+            ).strip(),
             robot_handoff_field_name=os.getenv(
                 "ROBOT_HANDOFF_FIELD_NAME", "Тег+ для новых с Ав и Ян"
             ).strip(),
@@ -494,6 +498,7 @@ class Settings:
                     "|".join(self.robot_handoff_source_field_values)
                 ),
                 "ROBOT_HANDOFF_TARGET_FUNNEL_NAME": self.robot_handoff_target_funnel_name,
+                "ROBOT_HANDOFF_TARGET_OWNER_NAME": self.robot_handoff_target_owner_name,
                 "ROBOT_HANDOFF_FIELD_NAME": self.robot_handoff_field_name,
                 "ROBOT_HANDOFF_FIELD_VALUE": self.robot_handoff_field_value,
                 "ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME": (

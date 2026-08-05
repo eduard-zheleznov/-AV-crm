@@ -82,6 +82,40 @@ class LpTrackerClient:
     def list_projects(self) -> list[dict[str, Any]]:
         return _ensure_list(self._request("GET", "/projects"), "список проектов")
 
+    def list_staff(self) -> list[dict[str, Any]]:
+        return _ensure_list(self._request("GET", "/staff"), "список сотрудников")
+
+    def resolve_staff_id(self, name: str) -> int:
+        wanted = _normalized_name(name)
+        if not wanted:
+            raise ConfigurationError("Имя владельца лида не заполнено")
+        staff = self.list_staff()
+        matches = [
+            member
+            for member in staff
+            if _normalized_name(str(member.get("name", ""))) == wanted
+        ]
+        if len(matches) != 1:
+            available = ", ".join(
+                str(member.get("name", "")).strip()
+                for member in staff[:25]
+                if str(member.get("name", "")).strip()
+            )
+            if not matches:
+                raise ConfigurationError(
+                    f"Сотрудник {name!r} не найден. Сотрудники: {available or 'список пуст'}"
+                )
+            raise ConfigurationError(
+                f"Найдено несколько сотрудников {name!r}; требуется уникальное имя"
+            )
+        try:
+            staff_id = int(matches[0]["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise CrmError(f"LPTracker не вернул ID сотрудника {name!r}") from exc
+        if staff_id <= 0:
+            raise CrmError(f"LPTracker вернул некорректный ID сотрудника {name!r}")
+        return staff_id
+
     def list_custom_fields(self, project_id: int) -> list[dict[str, Any]]:
         result = self._request("GET", f"/project/{project_id}/customs")
         return _ensure_list(result, "список полей проекта")
@@ -309,6 +343,13 @@ class LpTrackerClient:
             "PUT",
             f"/lead/{str(lead_id).strip()}/funnel",
             json={"funnel": int(funnel_id)},
+        )
+
+    def set_lead_owner(self, lead_id: str | int, owner_id: int) -> None:
+        self._request(
+            "PUT",
+            f"/lead/{str(lead_id).strip()}/owner",
+            json={"owner": int(owner_id)},
         )
 
     def get_lead_stage_name(

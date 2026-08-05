@@ -99,6 +99,18 @@ def test_robot_handoff_requires_stage_date_field_when_enabled(settings):
         configured.validate()
 
 
+def test_robot_handoff_requires_target_owner_when_enabled(settings):
+    configured = replace(
+        settings,
+        robot_handoff_enabled=True,
+        gemini_api_key="test-only-key",
+        robot_handoff_target_owner_name="",
+    )
+
+    with pytest.raises(ConfigurationError, match="ROBOT_HANDOFF_TARGET_OWNER_NAME"):
+        configured.validate()
+
+
 def test_robot_handoff_rejects_unsafe_stage_delay(settings):
     configured = replace(settings, robot_handoff_stage_delay_days=0)
 

@@ -138,6 +138,14 @@ def test_crm_handoff_write_contracts_match_lptracker_api(settings):
         requests.append(request)
         if request.url.path == "/login":
             return _success({"token": "temporary-test-token"})
+        if request.url.path == "/staff":
+            assert request.method == "GET"
+            return _success(
+                [
+                    {"id": 21849, "name": "Эдуард", "type": "staff"},
+                    {"id": 26239, "name": "Технический аккаунт", "type": "staff"},
+                ]
+            )
         if request.url.path == "/contact/details/501":
             assert request.method == "PUT"
             assert json.loads(request.content) == {"value": "+79991234567"}
@@ -152,6 +160,10 @@ def test_crm_handoff_write_contracts_match_lptracker_api(settings):
             assert request.method == "PUT"
             assert json.loads(request.content) == {"funnel": 20}
             return _success({"id": 700, "funnel": 20})
+        if request.url.path == "/lead/700/owner":
+            assert request.method == "PUT"
+            assert json.loads(request.content) == {"owner": 26239}
+            return _success({"id": 700, "owner_id": 26239})
         raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
 
     http = httpx.Client(
@@ -160,6 +172,8 @@ def test_crm_handoff_write_contracts_match_lptracker_api(settings):
     )
     with LpTrackerClient(settings, http) as crm:
         crm.rate_limiter = RateLimiter(100_000)
+        owner_id = crm.resolve_staff_id("Технический аккаунт")
+        assert owner_id == 26239
         crm.update_contact_detail(501, "+79991234567")
         crm.update_lead_custom(
             700,
@@ -172,14 +186,45 @@ def test_crm_handoff_write_contracts_match_lptracker_api(settings):
                 field_value=["Предлагаем бесплатный аудит авито"],
             ),
         )
+        crm.set_lead_owner(700, owner_id)
         crm.set_lead_funnel(700, 20)
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("POST", "/login"),
+        ("GET", "/staff"),
         ("PUT", "/contact/details/501"),
         ("PUT", "/lead/700"),
+        ("PUT", "/lead/700/owner"),
         ("PUT", "/lead/700/funnel"),
     ]
+
+
+@pytest.mark.parametrize(
+    "staff",
+    [
+        [{"id": 1, "name": "Другой сотрудник"}],
+        [
+            {"id": 1, "name": "Технический аккаунт"},
+            {"id": 2, "name": " технический   аккаунт "},
+        ],
+    ],
+)
+def test_crm_requires_unique_exact_owner_name(settings, staff):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/login":
+            return _success({"token": "temporary-test-token"})
+        if request.url.path == "/staff":
+            return _success(staff)
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    http = httpx.Client(
+        transport=httpx.MockTransport(handler),
+        base_url=settings.lptracker_base_url,
+    )
+    with LpTrackerClient(settings, http) as crm:
+        crm.rate_limiter = RateLimiter(100_000)
+        with pytest.raises(ConfigurationError):
+            crm.resolve_staff_id("Технический аккаунт")
 
 
 def test_crm_recent_lead_scan_uses_documented_pagination_and_filter(settings):
