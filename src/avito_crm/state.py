@@ -30,6 +30,12 @@ class StateStore:
         self._migrate()
 
     def _migrate(self) -> None:
+        notification_table_existed = bool(
+            self.connection.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'robot_handoff_notifications'"
+            ).fetchone()
+        )
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS runs (
@@ -88,6 +94,13 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_robot_handoffs_status
                 ON robot_handoffs(status);
+            CREATE TABLE IF NOT EXISTS robot_handoff_notifications (
+                lead_id TEXT NOT NULL,
+                record_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (lead_id, record_key, kind)
+            );
             """
         )
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
@@ -130,6 +143,20 @@ class StateStore:
             self.connection.execute(
                 "ALTER TABLE robot_handoffs "
                 "ADD COLUMN stage_due_date TEXT NOT NULL DEFAULT ''"
+            )
+        if not notification_table_existed:
+            # Rows that were already awaiting manual review before this migration
+            # have already produced a notification in earlier versions. A wildcard
+            # is consumed by the first stable record key seen after the upgrade.
+            self.connection.execute(
+                """
+                INSERT OR IGNORE INTO robot_handoff_notifications(
+                    lead_id, record_key, kind, created_at
+                )
+                SELECT lead_id, '*', 'manual_required', updated_at
+                FROM robot_handoffs
+                WHERE status = 'manual_required' AND record_key <> ''
+                """
             )
         self.connection.commit()
 
@@ -336,6 +363,95 @@ class StateStore:
                 str(status).strip(),
                 str(error).strip()[:1000],
                 utc_now(),
+            ),
+        )
+        self.connection.commit()
+
+    def claim_robot_handoff_notification(
+        self,
+        lead_id: str | int,
+        record_key: str,
+        kind: str,
+    ) -> bool:
+        normalized_lead_id = str(lead_id).strip()
+        normalized_record_key = str(record_key).strip() or "unknown"
+        normalized_kind = str(kind).strip()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            exact = self.connection.execute(
+                """
+                SELECT 1 FROM robot_handoff_notifications
+                WHERE lead_id = ? AND record_key = ? AND kind = ?
+                """,
+                (normalized_lead_id, normalized_record_key, normalized_kind),
+            ).fetchone()
+            if exact:
+                self.connection.commit()
+                return False
+            legacy = self.connection.execute(
+                """
+                SELECT created_at FROM robot_handoff_notifications
+                WHERE lead_id = ? AND record_key = '*' AND kind = ?
+                """,
+                (normalized_lead_id, normalized_kind),
+            ).fetchone()
+            if legacy:
+                self.connection.execute(
+                    """
+                    DELETE FROM robot_handoff_notifications
+                    WHERE lead_id = ? AND record_key = '*' AND kind = ?
+                    """,
+                    (normalized_lead_id, normalized_kind),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO robot_handoff_notifications(
+                        lead_id, record_key, kind, created_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        normalized_lead_id,
+                        normalized_record_key,
+                        normalized_kind,
+                        str(legacy["created_at"]),
+                    ),
+                )
+                self.connection.commit()
+                return False
+            self.connection.execute(
+                """
+                INSERT INTO robot_handoff_notifications(
+                    lead_id, record_key, kind, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    normalized_lead_id,
+                    normalized_record_key,
+                    normalized_kind,
+                    utc_now(),
+                ),
+            )
+            self.connection.commit()
+            return True
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def release_robot_handoff_notification(
+        self,
+        lead_id: str | int,
+        record_key: str,
+        kind: str,
+    ) -> None:
+        self.connection.execute(
+            """
+            DELETE FROM robot_handoff_notifications
+            WHERE lead_id = ? AND record_key = ? AND kind = ?
+            """,
+            (
+                str(lead_id).strip(),
+                str(record_key).strip() or "unknown",
+                str(kind).strip(),
             ),
         )
         self.connection.commit()

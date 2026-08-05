@@ -468,8 +468,9 @@ class RobotLeadHandoff:
             except ManualReviewRequired as exc:
                 message = _safe_reason(exc)
                 cached = self.state.get_robot_handoff(candidate_id)
-                record_key = _record_key(record)
-                first_manual = not cached or cached.get("status") != "manual_required"
+                record_key = _record_key(record) or str(
+                    (cached or {}).get("record_key", "") or ""
+                )
                 self.state.record_robot_handoff(
                     candidate_id,
                     record_key=record_key,
@@ -479,10 +480,20 @@ class RobotLeadHandoff:
                 )
                 summary.manual_required += 1
                 summary.details.append(f"Лид {candidate_id}: ручная проверка — {message}")
-                if first_manual and self.manual_notifier:
+                notification_kind = "manual_required"
+                if self.manual_notifier and self.state.claim_robot_handoff_notification(
+                    candidate_id,
+                    record_key,
+                    notification_kind,
+                ):
                     try:
                         self.manual_notifier(candidate_id, message)
                     except Exception as notify_exc:
+                        self.state.release_robot_handoff_notification(
+                            candidate_id,
+                            record_key,
+                            notification_kind,
+                        )
                         LOGGER.warning(
                             "Не удалось отправить уведомление по лиду %s: %s",
                             candidate_id,
@@ -810,23 +821,30 @@ def _record_sort_key(record: dict[str, Any]) -> tuple[float, str]:
 def _record_key(record: dict[str, Any] | None) -> str:
     if not record:
         return ""
+    stable_fields = (
+        "linkedid",
+        "time",
+        "created_at",
+        "started_at",
+        "date",
+        "duration",
+    )
+    url_fields = ("record", "record_path", "record_url", "recording", "url")
     material = "|".join(
-        str(record.get(key, "") or "")
-        for key in (
-            "linkedid",
-            "time",
-            "created_at",
-            "started_at",
-            "date",
-            "duration",
-            "record",
-            "record_path",
-            "record_url",
-            "recording",
-            "url",
-        )
+        [str(record.get(key, "") or "") for key in stable_fields]
+        + [_stable_recording_identity(record.get(key)) for key in url_fields]
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _stable_recording_identity(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlsplit(text)
+    if parsed.scheme or parsed.netloc:
+        return f"{parsed.netloc.casefold()}{parsed.path}"
+    return parsed.path or text.split("?", 1)[0].split("#", 1)[0]
 
 
 def _phone_details(lead: dict[str, Any]) -> list[dict[str, Any]]:

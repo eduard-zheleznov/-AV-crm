@@ -21,6 +21,7 @@ from avito_crm.robot_handoff import (
     RobotLeadHandoff,
     TranscriptionResult,
     _latest_successful_outgoing_record,
+    _record_key,
 )
 from avito_crm.state import StateStore
 
@@ -88,6 +89,26 @@ def test_record_selection_requires_explicit_successful_outgoing_call():
 
     assert selected is not None
     assert selected["record"].endswith("safe.mp3")
+
+
+def test_record_key_ignores_temporary_recording_url_tokens():
+    first = {
+        "linkedid": "call-1",
+        "time": 100,
+        "duration": 32,
+        "record": "https://records.example.test/call.wav?token=first#fragment",
+    }
+    second = {
+        **first,
+        "record": "https://records.example.test/call.wav?token=second",
+    }
+    different = {
+        **first,
+        "record": "https://records.example.test/another-call.wav?token=first",
+    }
+
+    assert _record_key(first) == _record_key(second)
+    assert _record_key(first) != _record_key(different)
 
 
 class FakeTranscriber:
@@ -769,6 +790,46 @@ def test_manual_transcription_result_is_not_retried_without_explicit_override(se
     assert first.manual_required == 1
     assert second.manual_required == 1
     assert transcriber.calls == 1
+
+
+def test_manual_notification_does_not_repeat_after_transient_error(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    crm = FakeCrm(_lead())
+
+    class CyclingTranscriber:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def transcribe(self, _url: str) -> TranscriptionResult:
+            self.calls += 1
+            if self.calls == 2:
+                raise AppError("temporary recognition failure")
+            raise ManualReviewRequired("ambiguous phone")
+
+    transcriber = CyclingTranscriber()
+    notices: list[tuple[str, str]] = []
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+            manual_notifier=lambda lead_id, reason: notices.append((lead_id, reason)),
+        )
+
+        first = handler.run_once(apply=True, lead_id=700)
+        crm.lead["calls_records"][0]["record"] += "?token=second"
+        second = handler.run_once(apply=True, lead_id=700, retry_analysis=True)
+        crm.lead["calls_records"][0]["record"] = (
+            "https://records.example.test/call.mp3?token=third"
+        )
+        third = handler.run_once(apply=True, lead_id=700, retry_analysis=True)
+
+    assert first.manual_required == 1
+    assert second.errors == 1
+    assert third.manual_required == 1
+    assert transcriber.calls == 3
+    assert notices == [("700", "ambiguous phone")]
 
 
 def test_completed_lead_is_idempotently_skipped_on_second_run(settings):
