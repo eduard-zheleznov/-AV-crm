@@ -92,6 +92,53 @@ def test_state_store_migrates_robot_handoff_due_date_without_losing_cache(tmp_pa
     assert cached["stage_due_date"] == ""
 
 
+def test_state_store_migrates_existing_manual_notification_without_resending(tmp_path):
+    database = tmp_path / "state.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE robot_handoffs (
+                lead_id TEXT PRIMARY KEY,
+                record_key TEXT NOT NULL,
+                phone TEXT NOT NULL DEFAULT '',
+                stage_due_date TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO robot_handoffs(
+                lead_id, record_key, status, error, updated_at
+            ) VALUES ('700', 'legacy-record', 'manual_required', 'ambiguous', 'now')
+            """
+        )
+
+    with StateStore(database) as state:
+        first_claim = state.claim_robot_handoff_notification(
+            700, "stable-record", "manual_required"
+        )
+        repeated_claim = state.claim_robot_handoff_notification(
+            700, "stable-record", "manual_required"
+        )
+        new_record_claim = state.claim_robot_handoff_notification(
+            700, "new-record", "manual_required"
+        )
+        state.release_robot_handoff_notification(
+            700, "new-record", "manual_required"
+        )
+        retry_after_failed_delivery = state.claim_robot_handoff_notification(
+            700, "new-record", "manual_required"
+        )
+
+    assert first_claim is False
+    assert repeated_claim is False
+    assert new_record_claim is True
+    assert retry_after_failed_delivery is True
+
+
 def test_state_store_accumulates_a_resumed_run(tmp_path):
     with StateStore(tmp_path / "state.sqlite3") as state:
         first = RunSummary(run_id="remote-1", requested=3, created=1, captured=1)
