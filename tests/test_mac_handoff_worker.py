@@ -79,6 +79,8 @@ def test_mac_install_scripts_keep_secrets_out_of_launch_agent():
     )
 
     assert "--no-deps" in installer
+    assert 'else sys.exit(0)' in installer
+    assert 'else None' not in installer
     assert "--check-config" in installer
     assert "avito_crm.mac_handoff_worker" in installer
     assert '"KeepAlive": True' in installer

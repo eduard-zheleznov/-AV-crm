@@ -47,7 +47,7 @@ fi
 mkdir -p "$app_dir" "$logs_dir" "$data_dir" "$output_dir" "$agent_dir"
 chmod 700 "$app_dir" "$logs_dir" "$data_dir" "$output_dir"
 
-python3 -c 'import sys; raise SystemExit("Нужен Python 3.11 или новее") if sys.version_info < (3, 11) else None'
+python3 -c 'import sys; sys.exit("Нужен Python 3.11 или новее") if sys.version_info < (3, 11) else sys.exit(0)'
 python3 -m venv "$venv_dir"
 "${venv_dir}/bin/python" -m pip install --disable-pip-version-check --quiet \
   'httpx>=0.27,<1' 'python-dotenv>=1.0,<2' 'tzdata>=2024.1'
