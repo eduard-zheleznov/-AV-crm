@@ -278,6 +278,27 @@ class FailFunnelOnceCrm(FakeCrm):
         super().set_lead_funnel(lead_id, funnel_id)
 
 
+class OwnerClearsStageDateCrm(FakeCrm):
+    def set_lead_owner(self, lead_id: str | int, owner_id: int) -> None:
+        super().set_lead_owner(lead_id, owner_id)
+        self.lead["custom"] = [
+            item for item in self.lead["custom"] if str(item.get("id", "")) != "100"
+        ]
+
+
+class FailDateOnceCrm(FakeCrm):
+    def __init__(self, lead: dict) -> None:
+        super().__init__(lead)
+        self.failed = False
+
+    def update_lead_custom(self, lead_id: str | int, destination: CrmDestination) -> None:
+        if destination.field_type in {"date", "funnel_date"} and not self.failed:
+            self.failed = True
+            self.events.append("date-failed")
+            raise CrmError("temporary date failure")
+        super().update_lead_custom(lead_id, destination)
+
+
 class FailTranscriptionOnce:
     def __init__(self, result: TranscriptionResult) -> None:
         self.result = result
@@ -311,7 +332,7 @@ def test_handoff_replaces_phone_then_tag_then_owner_then_funnel(settings):
 
         saved = state.get_robot_handoff(700)
 
-    assert crm.events == ["phone", "custom", "date", "owner", "funnel"]
+    assert crm.events == ["phone", "custom", "owner", "funnel", "date"]
     assert crm.lead["owner_id"] == 26239
     assert summary.completed == 1
     assert summary.manual_required == 0
@@ -321,6 +342,32 @@ def test_handoff_replaces_phone_then_tag_then_owner_then_funnel(settings):
         "03.08.2026 15:00"
     )
     assert transcriber.calls == 1
+
+
+def test_handoff_restores_stage_date_after_owner_change_clears_it(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    lead = _lead()
+    lead["custom"].append({"id": 100, "value": "03.08.2026 15:00"})
+    crm = OwnerClearsStageDateCrm(lead)
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+            now_provider=lambda: datetime(2026, 8, 1, 12, 0, tzinfo=ZoneInfo("UTC")),
+        )
+        summary = handler.run_once(apply=True, lead_id=700)
+
+    assert summary.completed == 1
+    assert crm.events == ["phone", "custom", "owner", "funnel", "date"]
+    assert crm.lead["owner_id"] == 26239
+    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == (
+        "03.08.2026 15:00"
+    )
 
 
 def test_handoff_uses_lead_card_feed_when_direct_lead_omits_recording(settings):
@@ -550,9 +597,9 @@ def test_handoff_resumes_after_partial_crm_failure_without_retranscription(setti
         "phone",
         "custom-failed",
         "custom",
-        "date",
         "owner",
         "funnel",
+        "date",
     ]
     assert transcriber.calls == 1
     assert saved["status"] == "completed"
@@ -588,12 +635,46 @@ def test_handoff_keeps_original_due_date_when_retry_crosses_midnight(settings):
     assert crm.events == [
         "phone",
         "custom",
-        "date",
         "owner",
         "funnel-failed",
         "funnel",
+        "date",
     ]
     assert saved["stage_due_date"] == "03.08.2026 23:59"
+    assert transcriber.calls == 1
+
+
+def test_handoff_resumes_target_stage_after_date_update_failure(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    crm = FailDateOnceCrm(_lead())
+    transcriber = FakeTranscriber(
+        TranscriptionResult("ok", "+79991234567", 0.99, 1, "номер +79991234567")
+    )
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=transcriber,
+            now_provider=lambda: datetime(2026, 8, 1, 12, 0, tzinfo=ZoneInfo("UTC")),
+        )
+
+        first = handler.run_once(apply=True, lead_id=700)
+        second = handler.run_once(apply=True, lead_id=700)
+        saved = state.get_robot_handoff(700)
+
+    assert first.errors == 1
+    assert second.completed == 1
+    assert crm.events == [
+        "phone",
+        "custom",
+        "owner",
+        "funnel",
+        "date-failed",
+        "date",
+    ]
+    assert saved["status"] == "completed"
+    assert saved["stage_due_date"] == "03.08.2026 15:00"
     assert transcriber.calls == 1
 
 
@@ -710,7 +791,7 @@ def test_completed_lead_is_idempotently_skipped_on_second_run(settings):
     assert first.completed == 1
     assert second.completed == 0
     assert second.skipped == 1
-    assert crm.events == ["phone", "custom", "date", "owner", "funnel"]
+    assert crm.events == ["phone", "custom", "owner", "funnel", "date"]
     assert transcriber.calls == 1
 
 

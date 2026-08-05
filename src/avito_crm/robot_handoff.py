@@ -344,13 +344,21 @@ class RobotLeadHandoff:
             lead = candidate
             record: dict[str, Any] | None = None
             try:
+                cached = self.state.get_robot_handoff(candidate_id)
                 stage_name = self.crm.get_lead_stage_name(
                     candidate_id,
                     project_id=project_id,
                     funnel_steps=steps,
                     lead=lead,
                 )
-                if _normalized(stage_name) != _normalized(source_step["name"]):
+                source_stage_matches = _normalized(stage_name) == _normalized(
+                    source_step["name"]
+                )
+                target_stage_partial = (
+                    _normalized(stage_name) == _normalized(target_step["name"])
+                    and _has_resumable_partial_state(cached)
+                )
+                if not source_stage_matches and not target_stage_partial:
                     current_stage = stage_name or "не определён"
                     _record_skip(
                         summary,
@@ -368,7 +376,14 @@ class RobotLeadHandoff:
                         funnel_steps=steps,
                         lead=lead,
                     )
-                    if _normalized(stage_name) != _normalized(source_step["name"]):
+                    source_stage_matches = _normalized(stage_name) == _normalized(
+                        source_step["name"]
+                    )
+                    target_stage_partial = (
+                        _normalized(stage_name) == _normalized(target_step["name"])
+                        and _has_resumable_partial_state(cached)
+                    )
+                    if not source_stage_matches and not target_stage_partial:
                         summary.skipped += 1
                         continue
                 has_source_tag = _custom_has_any_value(
@@ -411,17 +426,27 @@ class RobotLeadHandoff:
                         explain=explain_skips,
                     )
                     continue
-                if not has_source_tag:
-                    cached = self.state.get_robot_handoff(candidate_id)
-                    if not _is_resumable_partial_handoff(cached, record):
-                        _record_skip(
-                            summary,
-                            candidate_id,
-                            f"в категории «{handoff_destination.field_name}» не выбран "
-                            "разрешённый тег сбора",
-                            explain=explain_skips,
-                        )
-                        continue
+                if target_stage_partial and not _is_resumable_partial_handoff(
+                    cached, record
+                ):
+                    _record_skip(
+                        summary,
+                        candidate_id,
+                        "целевой шаг не связан с незавершённой передачей",
+                        explain=explain_skips,
+                    )
+                    continue
+                if not has_source_tag and not _is_resumable_partial_handoff(
+                    cached, record
+                ):
+                    _record_skip(
+                        summary,
+                        candidate_id,
+                        f"в категории «{handoff_destination.field_name}» не выбран "
+                        "разрешённый тег сбора",
+                        explain=explain_skips,
+                    )
+                    continue
                 summary.eligible += 1
                 self._handle_one(
                     lead,
@@ -604,37 +629,49 @@ class RobotLeadHandoff:
             field_type=stage_date_template.field_type,
             field_value=stage_due_date,
         )
-        if not _custom_date_has_value(current, stage_date_destination):
-            self.crm.update_lead_custom(lead_id, stage_date_destination)
-            current = self.crm.get_lead(lead_id)
-            if not _custom_date_has_value(current, stage_date_destination):
-                raise CrmError("LPTracker не подтвердил дату шага через два дня")
-
-        if _lead_owner_id(current) != target_owner_id:
-            self.crm.set_lead_owner(lead_id, target_owner_id)
-            current = self.crm.get_lead(lead_id)
+        expected_stage_name = str(target_step["name"])
+        finalized = False
+        for _attempt in range(2):
+            # LPTracker clears "Дата шага" when the owner changes.
+            # Owner and funnel therefore go first; the exact cached date is always
+            # restored last and all three invariants are checked together.
             if _lead_owner_id(current) != target_owner_id:
-                raise CrmError(
-                    "LPTracker не подтвердил владельца «Технический аккаунт»"
-                )
+                self.crm.set_lead_owner(lead_id, target_owner_id)
+                current = self.crm.get_lead(lead_id)
 
-        current_stage = self.crm.get_lead_stage_name(
-            lead_id,
-            project_id=handoff_destination.project_id,
-            funnel_steps=steps,
-            lead=current,
-        )
-        if _normalized(current_stage) != _normalized(str(target_step["name"])):
-            self.crm.set_lead_funnel(lead_id, int(target_step["id"]))
-            current = self.crm.get_lead(lead_id)
+            current_stage = self.crm.get_lead_stage_name(
+                lead_id,
+                project_id=handoff_destination.project_id,
+                funnel_steps=steps,
+                lead=current,
+            )
+            if _normalized(current_stage) != _normalized(expected_stage_name):
+                self.crm.set_lead_funnel(lead_id, int(target_step["id"]))
+                current = self.crm.get_lead(lead_id)
+
+            if not _custom_date_has_value(current, stage_date_destination):
+                self.crm.update_lead_custom(lead_id, stage_date_destination)
+                current = self.crm.get_lead(lead_id)
+
             verified_stage = self.crm.get_lead_stage_name(
                 lead_id,
                 project_id=handoff_destination.project_id,
                 funnel_steps=steps,
                 lead=current,
             )
-            if _normalized(verified_stage) != _normalized(str(target_step["name"])):
-                raise CrmError("LPTracker не подтвердил перевод на шаг «Новый лид»")
+            if (
+                _lead_owner_id(current) == target_owner_id
+                and _normalized(verified_stage) == _normalized(expected_stage_name)
+                and _custom_date_has_value(current, stage_date_destination)
+            ):
+                finalized = True
+                break
+
+        if not finalized:
+            raise CrmError(
+                "LPTracker не подтвердил согласованные владельца, шаг "
+                "и дату шага"
+            )
         self.state.record_robot_handoff(
             lead_id,
             record_key=record_key,
@@ -889,6 +926,16 @@ def _is_resumable_partial_handoff(
         normalize_phone(str(cached.get("phone", "")))
         and str(cached.get("stage_due_date", "") or "").strip()
         and str(cached.get("record_key", "") or "").strip() == _record_key(record)
+    )
+
+
+def _has_resumable_partial_state(cached: dict[str, Any] | None) -> bool:
+    if not cached or cached.get("status") not in {"recognized", "error"}:
+        return False
+    return bool(
+        normalize_phone(str(cached.get("phone", "")))
+        and str(cached.get("stage_due_date", "") or "").strip()
+        and str(cached.get("record_key", "") or "").strip()
     )
 
 
