@@ -18,6 +18,7 @@ from avito_crm.errors import (
     ManualActionRequired,
     NotificationError,
     OperatorStopRequested,
+    PageNotReadyError,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
     SourceError,
@@ -542,6 +543,46 @@ class Pipeline:
                             summary.errors = len(unresolved_technical_rows)
                             LOGGER.info("Строка %s: %s", item.row_id, exc)
                             self._report_progress(progress, summary, item.row_id)
+                        except PageNotReadyError as exc:
+                            status = (
+                                ItemStatus.RECREATE_PENDING
+                                if recreate_flow
+                                else ItemStatus.REPEAT_RETRY_TECHNICAL
+                                if repeat_flow
+                                else ItemStatus.RETRY_TECHNICAL
+                            )
+                            self._finalize_expected(
+                                canonical_url,
+                                item,
+                                previous_attempts,
+                                status,
+                                str(exc),
+                                summary.run_id,
+                                phone=stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
+                                next_retry_at=self._next_phone_retry_at(),
+                            )
+                            summary.retries += 1
+                            unresolved_technical_rows.add(item.row_id)
+                            summary.errors = len(unresolved_technical_rows)
+                            consecutive_failures += 1
+                            LOGGER.warning(
+                                "Строка %s: страница не загрузилась; "
+                                "попытка Avito не израсходована: %s",
+                                item.row_id,
+                                exc,
+                            )
+                            self._report_progress(progress, summary, item.row_id)
+                            if consecutive_failures >= self.settings.max_consecutive_failures:
+                                summary.stopped_reason = (
+                                    "Аварийная остановка после "
+                                    f"{consecutive_failures} последовательных "
+                                    "технических ошибок загрузки страниц"
+                                )
+                                should_stop = True
+                                break
                         except PhoneNotFoundError as exc:
                             failed_clicks = max_clicks or (2 if attempts == 1 else 1)
                             if repeat_flow:

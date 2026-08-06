@@ -52,6 +52,19 @@ async function revealOnce(command) {
     return manualResult;
   }
 
+  const pageReady = await waitForTargetReady(command.expectedUrl, command.pageTimeoutMs);
+  if (!pageReady) {
+    return {
+      status: "page_not_ready",
+      reason: "Страница объявления не успела полностью отобразиться"
+    };
+  }
+
+  const lateManualResult = await waitForManualAction(command.manualTimeoutMs);
+  if (lateManualResult) {
+    return lateManualResult;
+  }
+
   const inactive = inactiveReason();
   if (inactive) {
     return { status: "inactive", reason: inactive };
@@ -281,6 +294,50 @@ async function waitForPhoneButton(timeoutMs) {
     await delay(250);
   }
   return null;
+}
+
+async function waitForTargetReady(expectedUrl, timeoutMs) {
+  const waitMs = Math.max(3000, Math.min(15000, Number(timeoutMs) || 10000));
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (manualReason()) {
+      return true;
+    }
+    if (
+      sameListingPath(location.href, expectedUrl) &&
+      document.readyState === "complete" &&
+      hasRenderedListingSurface()
+    ) {
+      return true;
+    }
+    await delay(250);
+  }
+  return false;
+}
+
+function hasRenderedListingSurface() {
+  if (inactiveReason() || findPhone() || findPhoneButton()) {
+    return true;
+  }
+  const bodyText = (document.body?.innerText || "").trim();
+  return (
+    bodyText.length > 200 &&
+    Array.from(document.querySelectorAll("h1")).some((heading) => isVisible(heading))
+  );
+}
+
+function sameListingPath(actualUrl, expectedUrl) {
+  try {
+    const actual = new URL(actualUrl);
+    const expected = new URL(expectedUrl);
+    const normalizePath = (value) => value.replace(/\/+$/, "");
+    return (
+      /(^|\.)avito\.ru$/i.test(actual.hostname) &&
+      normalizePath(actual.pathname) === normalizePath(expected.pathname)
+    );
+  } catch (_error) {
+    return false;
+  }
 }
 
 function normalizePhone(value) {

@@ -29,6 +29,7 @@ from avito_crm.errors import (
     ManualActionRequired,
     NotificationError,
     OperatorStopRequested,
+    PageNotReadyError,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
@@ -39,7 +40,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.6"
+EXPECTED_EXTENSION_VERSION = "1.0.7"
 
 
 @dataclass(slots=True)
@@ -459,6 +460,15 @@ class ChromeExtensionBrowser:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
             return self.ocr.read_viewport_png(png)
+        if status == "page_not_ready":
+            raise PageNotReadyError(
+                str(
+                    payload.get(
+                        "reason",
+                        "Страница объявления не успела полностью отобразиться",
+                    )
+                )
+            )
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
         if status == "button_missing":
@@ -544,30 +554,77 @@ class ChromeExtensionBrowser:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         return self.settings.screenshot_dir / f"{stamp}-{digest}-{suffix}.png"
 
-    def _read_screen_capture(self, _crop: dict[str, Any], url: str) -> PhoneResult:
+    def _read_screen_capture(self, crop: dict[str, Any], url: str) -> PhoneResult:
         recognized: dict[str, tuple[int, PhoneResult]] = {}
         errors: list[str] = []
+        blank_full_frames = 0
+
+        def confirm(result: PhoneResult, source: str) -> PhoneResult | None:
+            count, _previous = recognized.get(result.phone, (0, result))
+            recognized[result.phone] = (count + 1, result)
+            if count + 1 < 2:
+                return None
+            result.source = source
+            return result
+
         for attempt in range(1, 4):
             if attempt > 1:
                 time.sleep(0.8)
+
+            # The extension knows the exact on-screen rectangle where Avito
+            # replaced the button with the image-rendered phone. OCR that small
+            # area first: it is both faster and substantially more reliable than
+            # searching the whole desktop.
+            region_png = _capture_interactive_desktop_png(crop)
+            region_artifact = self._artifact_path(url, f"extension-phone-{attempt}")
+            region_artifact.parent.mkdir(parents=True, exist_ok=True)
+            region_artifact.write_bytes(region_png)
+            if not _is_nearly_blank_capture(region_png):
+                try:
+                    region_result = self.ocr.read_png(
+                        region_png,
+                        artifact_path=region_artifact,
+                        psm=7,
+                    )
+                except PhoneNotFoundError as exc:
+                    errors.append(str(exc))
+                else:
+                    confirmed = confirm(
+                        region_result,
+                        "ocr-confirmed-avito-region",
+                    )
+                    if confirmed is not None:
+                        return confirmed
+                    # Confirm the same phone from a fresh frame before accepting
+                    # it. Do not dilute a successful exact-region result with a
+                    # broad desktop scan.
+                    continue
+
             png = _capture_interactive_desktop_png()
             artifact = self._artifact_path(url, f"extension-screen-{attempt}")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
+            if _is_nearly_blank_capture(png, viewport=True):
+                blank_full_frames += 1
+                errors.append("страница объявления ещё не отобразилась")
+                continue
             try:
                 result = self.ocr.read_avito_screen_png(png)
             except PhoneNotFoundError as exc:
                 errors.append(str(exc))
                 continue
-            count, _previous = recognized.get(result.phone, (0, result))
-            recognized[result.phone] = (count + 1, result)
-            if count + 1 >= 2:
-                result.source = "ocr-confirmed-avito-screen"
-                return result
+            confirmed = confirm(result, "ocr-confirmed-avito-screen")
+            if confirmed is not None:
+                return confirmed
         if recognized:
             raise PhoneNotFoundError(
                 "OCR увидел номер только на одном из трёх снимков; "
                 "результат отклонён как неподтверждённый"
+            )
+        if blank_full_frames >= 2:
+            raise PageNotReadyError(
+                "Страница объявления не успела отобразиться в обычном Chrome; "
+                "строка будет повторена без расходования попытки открытия номера"
             )
         detail = errors[-1] if errors else "номер не попал в проверенные области"
         raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках экрана: {detail}")
@@ -650,3 +707,28 @@ def _capture_interactive_desktop_png(crop: object = None) -> bytes:
         return buffer.getvalue()
     except Exception as exc:
         raise BrowserOperationError(f"Не удалось сделать снимок экрана Windows: {exc}") from exc
+
+
+def _is_nearly_blank_capture(png: bytes, *, viewport: bool = False) -> bool:
+    """Return True only for a virtually empty, light browser surface."""
+    try:
+        from PIL import Image, ImageStat
+
+        image = Image.open(io.BytesIO(png)).convert("L")
+        if viewport and image.width > 100 and image.height > 100:
+            # Ignore Chrome chrome and the Windows taskbar. The failed captures
+            # contain those controls but an entirely blank page viewport.
+            image = image.crop(
+                (
+                    round(image.width * 0.03),
+                    round(image.height * 0.12),
+                    round(image.width * 0.97),
+                    round(image.height * 0.92),
+                )
+            )
+        image.thumbnail((320, 180))
+        stats = ImageStat.Stat(image)
+        return stats.mean[0] >= 246 and stats.stddev[0] <= 5
+    except Exception:
+        # Screenshot validation must never mask the normal OCR error path.
+        return False

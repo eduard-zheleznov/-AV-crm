@@ -15,6 +15,8 @@ let polling = false;
 let managedTabId = null;
 let currentCommandId = null;
 
+class PageNotReadyError extends Error {}
+
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 chrome.runtime.onInstalled.addListener(() => startPolling());
@@ -99,8 +101,7 @@ async function executeCommand(command) {
     for (let attempt = 1; attempt <= command.maxClicks; attempt += 1) {
       if (attempt > 1) {
         await delay(Math.max(1000, command.retryDelayMs));
-        await chrome.tabs.update(tab.id, { url: command.url, active: true });
-        await waitForLoad(tab.id, command.pageTimeoutMs);
+        await navigateTab(tab.id, command.url, command.pageTimeoutMs, true);
       }
       await focusTab(tab.id);
       const result = await sendRevealMessage(tab.id, command);
@@ -131,7 +132,7 @@ async function executeCommand(command) {
     await postEvent({
       id: command.id,
       type: "result",
-      status: "error",
+      status: error instanceof PageNotReadyError ? "page_not_ready" : "error",
       reason: safeMessage(error)
     }).catch(() => undefined);
   } finally {
@@ -143,17 +144,21 @@ async function getManagedTab(url, pageTimeoutMs) {
   if (managedTabId !== null) {
     try {
       const existing = await chrome.tabs.get(managedTabId);
-      await chrome.tabs.update(existing.id, { url, active: true });
-      await waitForLoad(existing.id, pageTimeoutMs);
-      return await chrome.tabs.get(existing.id);
+      return await navigateTab(existing.id, url, pageTimeoutMs, false);
     } catch (_error) {
+      const staleTabId = managedTabId;
       managedTabId = null;
+      if (staleTabId !== null) {
+        await chrome.tabs.remove(staleTabId).catch(() => undefined);
+      }
     }
   }
-  const created = await chrome.tabs.create({ url, active: true });
+  // Create an empty managed tab first. The navigation observer must be attached
+  // before the real Avito navigation starts; otherwise Chrome can report the
+  // previous page as complete and the extension captures a white/stale frame.
+  const created = await chrome.tabs.create({ url: "about:blank", active: true });
   managedTabId = created.id;
-  await waitForLoad(created.id, pageTimeoutMs);
-  return await chrome.tabs.get(created.id);
+  return await navigateTab(created.id, url, pageTimeoutMs, false);
 }
 
 async function sendRevealMessage(tabId, command) {
@@ -167,6 +172,8 @@ async function sendRevealMessage(tabId, command) {
         return await Promise.race([
           chrome.tabs.sendMessage(tabId, {
             type: "avito_crm_reveal_once",
+            expectedUrl: command.url,
+            pageTimeoutMs: command.pageTimeoutMs,
             manualTimeoutMs: command.manualTimeoutMs,
             phoneWaitMs: command.phoneWaitMs
           }),
@@ -220,41 +227,85 @@ async function focusTab(tabId) {
   await chrome.tabs.update(tabId, { active: true });
 }
 
-function waitForLoad(tabId, timeoutMs) {
-  return new Promise((resolve) => {
+function navigateTab(tabId, expectedUrl, timeoutMs, forceReload) {
+  return new Promise((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
       chrome.tabs.onUpdated.removeListener(listener);
       clearTimeout(timer);
     };
-    const complete = () => {
+    const complete = (tab) => {
       if (settled) {
         return;
       }
       settled = true;
       cleanup();
-      resolve();
+      resolve(tab);
     };
-    const listener = (updatedTabId, changeInfo) => {
-      if (updatedTabId === tabId && changeInfo.status === "complete") {
-        complete();
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const listener = (updatedTabId, changeInfo, tab) => {
+      if (
+        updatedTabId === tabId &&
+        changeInfo.status === "complete" &&
+        isExpectedSurface(tab?.url || changeInfo.url || "", expectedUrl)
+      ) {
+        complete(tab);
       }
     };
     const timer = setTimeout(() => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      cleanup();
-      resolve();
+      fail(
+        new PageNotReadyError(
+          "Страница объявления не успела полностью загрузиться; строка будет повторена без расходования попытки"
+        )
+      );
     }, Math.max(1000, timeoutMs));
+    // The listener is intentionally installed before update/reload.
     chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs.get(tabId).then((tab) => {
-      if (tab.status === "complete") {
-        complete();
-      }
-    });
+    chrome.tabs
+      .get(tabId)
+      .then((current) => {
+        if (forceReload && isExpectedSurface(current.url || "", expectedUrl)) {
+          return chrome.tabs.reload(tabId);
+        }
+        return chrome.tabs.update(tabId, { url: expectedUrl, active: true });
+      })
+      .then(() => chrome.tabs.get(tabId))
+      .then((tab) => {
+        if (tab.status === "complete" && isExpectedSurface(tab.url || "", expectedUrl)) {
+          complete(tab);
+        }
+      })
+      .catch(fail);
   });
+}
+
+function isExpectedSurface(actualUrl, expectedUrl) {
+  try {
+    const actual = new URL(actualUrl);
+    const expected = new URL(expectedUrl);
+    if (!/(^|\.)avito\.ru$/i.test(actual.hostname)) {
+      return false;
+    }
+    const actualValue = `${actual.pathname}${actual.search}${actual.hash}`.toLowerCase();
+    if (
+      actualValue.includes("captcha") ||
+      actualValue.includes("/challenge") ||
+      /\/(?:auth|login)(?:[/?#]|$)/i.test(actual.pathname)
+    ) {
+      return true;
+    }
+    const normalizePath = (value) => value.replace(/\/+$/, "");
+    return normalizePath(actual.pathname) === normalizePath(expected.pathname);
+  } catch (_error) {
+    return false;
+  }
 }
 
 async function postEvent(payload) {

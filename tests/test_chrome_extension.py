@@ -18,7 +18,12 @@ from avito_crm.chrome_extension import (
     ExtensionBridge,
     ExtensionEvent,
 )
-from avito_crm.errors import BrowserOperationError, OperatorStopRequested, PhoneNotFoundError
+from avito_crm.errors import (
+    BrowserOperationError,
+    OperatorStopRequested,
+    PageNotReadyError,
+    PhoneNotFoundError,
+)
 from avito_crm.models import PhoneResult
 
 
@@ -210,7 +215,7 @@ class _FakeOcr:
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
         return PhoneResult("+79991234567", "fake-avito-screen")
 
-    def read_png(self, png: bytes, _artifact_path=None, *, psm: int = 7) -> PhoneResult:
+    def read_png(self, png: bytes, artifact_path=None, *, psm: int = 7) -> PhoneResult:
         assert png.startswith(b"\x89PNG\r\n\x1a\n")
         return PhoneResult("+79991234567", f"fake-ocr-region-{psm}")
 
@@ -333,11 +338,20 @@ def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):
 
 def test_extension_browser_can_capture_the_interactive_windows_desktop(settings, monkeypatch):
     png = b"\x89PNG\r\n\x1a\nplaceholder"
+    crop = {
+        "left": 100,
+        "top": 200,
+        "width": 300,
+        "height": 80,
+        "screenWidth": 1920,
+        "screenHeight": 1080,
+    }
+    captures = []
     monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         chrome_extension_module,
         "_capture_interactive_desktop_png",
-        lambda _crop=None: png,
+        lambda requested_crop=None: captures.append(requested_crop) or png,
     )
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
@@ -345,14 +359,7 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
             "result",
             "screen_capture",
             {
-                "crop": {
-                    "left": 100,
-                    "top": 200,
-                    "width": 300,
-                    "height": 80,
-                    "screenWidth": 1920,
-                    "screenHeight": 1080,
-                }
+                "crop": crop,
             },
         )
     )
@@ -361,7 +368,8 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "ocr-confirmed-avito-screen"
+    assert result.source == "ocr-confirmed-avito-region"
+    assert captures == [crop, crop]
 
 
 def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monkeypatch):
@@ -395,7 +403,21 @@ def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monke
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "ocr-confirmed-avito-screen"
+    assert result.source == "ocr-confirmed-avito-region"
+
+
+def test_extension_browser_maps_an_unloaded_page_to_a_safe_retry(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "page_not_ready",
+            {"reason": "Страница объявления не успела полностью отобразиться"},
+        )
+    )
+
+    with browser, pytest.raises(PageNotReadyError, match="не успела"):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
 
 def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):

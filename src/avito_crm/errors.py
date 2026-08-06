@@ -34,6 +34,10 @@ class BrowserOperationError(AppError):
     """A browser or page-loading operation failed for a technical reason."""
 
 
+class PageNotReadyError(BrowserOperationError):
+    """The requested Avito listing did not finish navigation or rendering."""
+
+
 class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 
