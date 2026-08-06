@@ -84,6 +84,9 @@ class Pipeline:
         captured_rows: set[str] = set()
         unresolved_technical_rows: set[str] = set()
         time_deferred_rows: set[str] = set()
+        captured_time_deferred_rows: set[str] = set()
+        recovered_rows: set[str] = set()
+        crm_write_failed_rows: set[str] = set()
         notifier = NotificationRouter(self.settings)
 
         try:
@@ -203,7 +206,7 @@ class Pipeline:
                     attempted_this_round = False
                     should_stop = False
 
-                    for item in eligible_items:
+                    for item_index, item in enumerate(eligible_items):
                         if self.stop_file.exists():
                             summary.stopped_reason = "Остановлено оператором"
                             should_stop = True
@@ -216,6 +219,27 @@ class Pipeline:
                             summary.stopped_reason = "Достигнут заданный лимит"
                             should_stop = True
                             break
+                        # The local window may close while a long run is in progress.
+                        # Do not open another temporary Avito number once that happens.
+                        # Continue only when a later row (usually another time zone) is
+                        # still inside its own safe window.
+                        if self.live and not self.source.is_local_window_open(item):
+                            time_deferred_rows.add(item.row_id)
+                            summary.time_deferred = len(time_deferred_rows)
+                            self._report_progress(progress, summary, item.row_id)
+                            if not any(
+                                self.source.is_local_window_open(remaining)
+                                for remaining in eligible_items[item_index + 1 :]
+                            ):
+                                summary.stopped_reason = (
+                                    "Отложено по времени: для всех оставшихся строк "
+                                    "сейчас нет безопасного местного окна 10:00–19:45"
+                                )
+                                LOGGER.info(summary.stopped_reason)
+                                self._report_phase(phase, summary.stopped_reason)
+                                should_stop = True
+                                break
+                            continue
                         repeat_flow = self._is_repeat_flow(item)
                         recreate_flow = self._is_recreate_flow(item)
                         attempted_this_round = True
@@ -373,6 +397,10 @@ class Pipeline:
                             if not self.source.is_local_window_open(item):
                                 time_deferred_rows.add(item.row_id)
                                 summary.time_deferred = len(time_deferred_rows)
+                                captured_time_deferred_rows.add(item.row_id)
+                                summary.captured_time_deferred = len(
+                                    captured_time_deferred_rows
+                                )
                                 waiting_status = (
                                     ItemStatus.REPEAT_PENDING if repeat_flow else ItemStatus.PENDING
                                 )
@@ -416,15 +444,23 @@ class Pipeline:
                                     destination.project_id,
                                     self.settings.lptracker_new_lead_funnel_name,
                                 )
-                            write = crm.create_for_phone(
-                                phone,
-                                canonical_url,
-                                destination,
-                                force_create=repeat_flow or recreate_flow,
-                                funnel_id=recreate_funnel_id or repeat_funnel_id,
-                                repeat=repeat_flow,
-                                moscow_offset=self.source.moscow_offset(item),
-                            )
+                            try:
+                                write = crm.create_for_phone(
+                                    phone,
+                                    canonical_url,
+                                    destination,
+                                    force_create=repeat_flow or recreate_flow,
+                                    funnel_id=recreate_funnel_id or repeat_funnel_id,
+                                    repeat=repeat_flow,
+                                    moscow_offset=self.source.moscow_offset(item),
+                                )
+                            except Exception:
+                                crm_write_failed_rows.add(item.row_id)
+                                summary.crm_write_failed = len(crm_write_failed_rows)
+                                raise
+                            else:
+                                crm_write_failed_rows.discard(item.row_id)
+                                summary.crm_write_failed = len(crm_write_failed_rows)
                             comment_pending = (
                                 "комментар" in write.detail.casefold()
                                 and "не удалось" in write.detail.casefold()
@@ -493,6 +529,8 @@ class Pipeline:
                                         "Строка %s: лид %s создан", item.row_id, write.lead_id
                                     )
                                 else:
+                                    recovered_rows.add(item.row_id)
+                                    summary.recovered = len(recovered_rows)
                                     LOGGER.info(
                                         "Строка %s: восстановлен ранее созданный лид %s",
                                         item.row_id,

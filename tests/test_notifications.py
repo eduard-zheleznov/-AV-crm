@@ -523,11 +523,13 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
 
     assert subject == "[Avito CRM] Запуск завершён"
     assert "Обработано ссылок: 8" in body
-    assert "Неактивных объявлений: 2" in body
+    assert "Неактивные / снятые объявления: 2" in body
     assert "Номеров открыто: 4 (50% от ссылок)" in body
     assert "Лидов создано: 3 (75% от открытых)" in body
     assert "Почему из открытых номеров не создан новый лид (1)" in body
-    assert "Другое: 1 (25%)" in body
+    assert "Номер показан, но OCR не распознал: 1" in body
+    assert "Не завершена запись CRM до остановки: 1" in body
+    assert "Другое" not in body
     assert "secret-id" not in body
     assert "очередь продолжает работу" not in body
 

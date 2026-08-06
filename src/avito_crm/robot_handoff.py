@@ -54,6 +54,15 @@ _AUDIO_MIME_ALIASES = {
     "audio/x-wav": "audio/wav",
 }
 _SUPPORTED_AUDIO_MIME_TYPES = frozenset(_AUDIO_MIME_BY_SUFFIX.values())
+_SILENT_MANUAL_REVIEW_REASONS = frozenset(
+    {
+        "В разговоре не найден один однозначно продиктованный номер",
+    }
+)
+
+
+def _should_notify_manual_review(reason: str) -> bool:
+    return " ".join(reason.split()) not in _SILENT_MANUAL_REVIEW_REASONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -481,10 +490,14 @@ class RobotLeadHandoff:
                 summary.manual_required += 1
                 summary.details.append(f"Лид {candidate_id}: ручная проверка — {message}")
                 notification_kind = "manual_required"
-                if self.manual_notifier and self.state.claim_robot_handoff_notification(
-                    candidate_id,
-                    record_key,
-                    notification_kind,
+                if (
+                    _should_notify_manual_review(message)
+                    and self.manual_notifier
+                    and self.state.claim_robot_handoff_notification(
+                        candidate_id,
+                        record_key,
+                        notification_kind,
+                    )
                 ):
                     try:
                         self.manual_notifier(candidate_id, message)

@@ -181,7 +181,27 @@ class WindowClosingQueue(RoundQueue):
 
     def is_local_window_open(self, item, *, now=None):
         self.window_checks += 1
-        return self.window_checks < 3
+        # Initial discovery, eligibility filtering and the pre-row guard remain
+        # open. The fourth check happens after OCR, immediately before CRM write.
+        return self.window_checks < 4
+
+
+class MixedWindowQueue(RoundQueue):
+    """The first selected row expires, while the next timezone remains safe."""
+
+    def __init__(self, settings):
+        super().__init__(settings, count=2)
+        self.window_checks: dict[str, int] = {}
+
+    def list_all(self):
+        return self.items
+
+    def is_local_window_open(self, item, *, now=None):
+        checks = self.window_checks.get(item.row_id, 0) + 1
+        self.window_checks[item.row_id] = checks
+        if item.row_id == "2":
+            return checks == 1
+        return True
 
 
 class FakeOcr:
@@ -590,6 +610,38 @@ def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, setting
     assert source.items[0].status == ItemStatus.PENDING
     assert source.items[0].attempts == 0
     assert source.items[0].values[source.columns.phone] == ""
+    assert summary.captured_time_deferred == 1
+    assert summary.stopped_reason.startswith("Отложено по времени")
+
+
+def test_expired_row_does_not_stop_a_later_safe_timezone(
+    tmp_path, settings, monkeypatch
+):
+    source = MixedWindowQueue(settings)
+    browser = SequencedBrowser({"3": ["+79997654321"]})
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+
+    with StateStore(tmp_path / "mixed-window-state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="capture",
+            live=True,
+        ).run(10)
+
+    assert browser.calls == ["3"]
+    assert source.items[0].status in ("", ItemStatus.PENDING)
+    assert source.items[1].status == ItemStatus.CAPTURED
+    assert summary.time_deferred == 1
+    assert summary.captured == 1
+    # The safe row must be processed first; only then may the run stop because
+    # every row still left in the queue is outside its own local-time window.
     assert summary.stopped_reason.startswith("Отложено по времени")
 
 
