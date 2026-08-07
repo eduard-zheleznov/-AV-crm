@@ -80,6 +80,30 @@ def test_extension_driver_accepts_loopback_configuration(settings):
     configured.validate()
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("avito_extension_health_ttl", 4, "AVITO_EXTENSION_HEALTH_TTL_SECONDS"),
+        ("avito_extension_health_ttl", 301, "AVITO_EXTENSION_HEALTH_TTL_SECONDS"),
+        (
+            "avito_extension_recovery_backoff",
+            0,
+            "AVITO_EXTENSION_RECOVERY_BACKOFF_SECONDS",
+        ),
+        (
+            "avito_extension_recovery_backoff",
+            61,
+            "AVITO_EXTENSION_RECOVERY_BACKOFF_SECONDS",
+        ),
+    ],
+)
+def test_extension_health_limits_are_bounded(settings, field, value, message):
+    configured = replace(settings, **{field: value})
+
+    with pytest.raises(ConfigurationError, match=message):
+        configured.validate()
+
+
 def test_robot_handoff_requires_local_gemini_key_when_enabled(settings):
     configured = replace(settings, robot_handoff_enabled=True, gemini_api_key="")
 

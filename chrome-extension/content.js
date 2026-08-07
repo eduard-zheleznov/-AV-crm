@@ -32,6 +32,10 @@ const PHONE_RE = /(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}/g;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "avito_crm_probe") {
+    sendResponse(probePage(message.expectedUrl, message.mode));
+    return false;
+  }
   if (message?.type !== "avito_crm_reveal_once") {
     return false;
   }
@@ -303,11 +307,8 @@ async function waitForTargetReady(expectedUrl, timeoutMs) {
     if (manualReason()) {
       return true;
     }
-    if (
-      sameListingPath(location.href, expectedUrl) &&
-      document.readyState === "complete" &&
-      hasRenderedListingSurface()
-    ) {
+    const probe = probePage(expectedUrl, "listing");
+    if (probe.rendered && sameListingPath(location.href, expectedUrl)) {
       return true;
     }
     await delay(250);
@@ -327,17 +328,36 @@ function hasRenderedListingSurface() {
 }
 
 function sameListingPath(actualUrl, expectedUrl) {
-  try {
-    const actual = new URL(actualUrl);
-    const expected = new URL(expectedUrl);
-    const normalizePath = (value) => value.replace(/\/+$/, "");
-    return (
-      /(^|\.)avito\.ru$/i.test(actual.hostname) &&
-      normalizePath(actual.pathname) === normalizePath(expected.pathname)
-    );
-  } catch (_error) {
-    return false;
-  }
+  return globalThis.AVITO_CRM_RUNTIME_CORE.sameListingIdentity(actualUrl, expectedUrl);
+}
+
+function probePage(expectedUrl, mode) {
+  const manual = Boolean(manualReason());
+  const auth = isAuthPage(location.href) || hasVisibleAuthDialog();
+  const inactive = Boolean(inactiveReason());
+  const visibleHeadings = Array.from(document.querySelectorAll("h1")).filter((heading) =>
+    isVisible(heading)
+  ).length;
+  const bodyLength = (document.body?.innerText || "").trim().length;
+  const rendered =
+    manual ||
+    auth ||
+    inactive ||
+    Boolean(findPhone()) ||
+    Boolean(findPhoneButton()) ||
+    (bodyLength > 200 && visibleHeadings > 0) ||
+    (mode === "health" && bodyLength > 200);
+  return {
+    actualUrl: location.href,
+    expectedUrl,
+    readyState: document.readyState,
+    rendered,
+    manual,
+    auth,
+    inactive,
+    bodyLength,
+    visibleHeadings
+  };
 }
 
 function normalizePhone(value) {

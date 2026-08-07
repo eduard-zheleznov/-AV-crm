@@ -13,8 +13,10 @@ from avito_crm.chrome_extension import ChromeExtensionBrowser
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import (
+    BrowserOperationError,
     InactiveListingError,
     InvalidListingError,
+    ListingNavigationError,
     ManualActionRequired,
     NotificationError,
     OperatorStopRequested,
@@ -155,6 +157,26 @@ class Pipeline:
                         else AvitoBrowser
                     )
                     browser = stack.enter_context(browser_type(self.settings, ocr, notifier))
+                    extension_preflight = (
+                        getattr(browser, "preflight", None)
+                        if self.settings.avito_browser_driver == "chrome_extension"
+                        else None
+                    )
+                    if callable(extension_preflight):
+                        self._report_phase(
+                            phase,
+                            "Предстартовая проверка обычного Chrome без открытия номера.",
+                        )
+                        try:
+                            extension_preflight(force=True)
+                        except (BrowserOperationError, ManualActionRequired) as exc:
+                            summary.stopped_reason = (
+                                "Предстартовая проверка Chrome/расширения не пройдена: "
+                                f"{_safe_error(exc)}"
+                            )
+                            LOGGER.error(summary.stopped_reason)
+                            self._report_phase(phase, summary.stopped_reason)
+                            return summary
                 self._report_phase(phase, "Обрабатываем очередь Avito по одной строке.")
 
                 round_number = 0
@@ -240,6 +262,23 @@ class Pipeline:
                                 should_stop = True
                                 break
                             continue
+                        extension_preflight = (
+                            getattr(browser, "preflight", None)
+                            if self.settings.avito_browser_driver == "chrome_extension"
+                            else None
+                        )
+                        if callable(extension_preflight):
+                            try:
+                                extension_preflight()
+                            except (BrowserOperationError, ManualActionRequired) as exc:
+                                summary.stopped_reason = (
+                                    "Chrome/расширение не восстановились перед следующей "
+                                    f"строкой: {_safe_error(exc)}"
+                                )
+                                LOGGER.error(summary.stopped_reason)
+                                self._report_phase(phase, summary.stopped_reason)
+                                should_stop = True
+                                break
                         repeat_flow = self._is_repeat_flow(item)
                         recreate_flow = self._is_recreate_flow(item)
                         attempted_this_round = True
@@ -542,6 +581,29 @@ class Pipeline:
                             consecutive_failures = 0
                             unresolved_technical_rows.discard(item.row_id)
                             summary.errors = len(unresolved_technical_rows)
+                            self._report_progress(progress, summary, item.row_id)
+                        except ListingNavigationError as exc:
+                            self._finalize_expected(
+                                canonical_url,
+                                item,
+                                attempts,
+                                ItemStatus.INVALID,
+                                str(exc),
+                                summary.run_id,
+                                phone=stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
+                            )
+                            summary.invalid += 1
+                            consecutive_failures = 0
+                            unresolved_technical_rows.discard(item.row_id)
+                            summary.errors = len(unresolved_technical_rows)
+                            LOGGER.info(
+                                "Строка %s: неверный маршрут объявления: %s",
+                                item.row_id,
+                                exc,
+                            )
                             self._report_progress(progress, summary, item.row_id)
                         except InactiveListingError as exc:
                             self._finalize_expected(

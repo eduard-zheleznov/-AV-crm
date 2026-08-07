@@ -4,9 +4,11 @@ from dataclasses import replace
 import pytest
 
 from avito_crm.errors import (
+    BrowserInfrastructureError,
     BrowserOperationError,
     CrmError,
     InactiveListingError,
+    ListingNavigationError,
     OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
@@ -271,6 +273,57 @@ def test_normal_listing_outcomes_are_terminal_not_technical_errors(
     assert getattr(summary, counter) == 1
     assert summary.errors == 0
     assert summary.rounds == 1
+
+
+def test_wrong_listing_redirect_is_invalid_not_browser_infra(tmp_path, settings, monkeypatch):
+    source = RoundQueue(settings)
+    browser = SequencedBrowser({"2": [ListingNavigationError("другое объявление")]})
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert source.items[0].status == ItemStatus.INVALID
+    assert summary.invalid == 1
+    assert summary.errors == 0
+
+
+def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, settings, monkeypatch):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+    )
+    source = RoundQueue(configured)
+
+    class FailedCanaryBrowser:
+        captchas_solved = 0
+
+        def preflight(self, *, force=False):
+            assert force is True
+            raise BrowserInfrastructureError("renderer не отвечает")
+
+        def reveal_phone(self, *_args, **_kwargs):
+            raise AssertionError("Строка не должна открываться до canary")
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.ChromeExtensionBrowser",
+        lambda *_args, **_kwargs: nullcontext(FailedCanaryBrowser()),
+    )
+
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            configured,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(10)
+
+    assert summary.inspected == 0
+    assert summary.processed == 0
+    assert source.patches == []
+    assert summary.stopped_reason.startswith("Предстартовая проверка")
 
 
 def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(

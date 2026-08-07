@@ -38,6 +38,14 @@ class PageNotReadyError(BrowserOperationError):
     """The requested Avito listing did not finish navigation or rendering."""
 
 
+class BrowserInfrastructureError(PageNotReadyError):
+    """Chrome, its renderer, or the extension bridge failed before a listing attempt."""
+
+
+class ListingNavigationError(AppError):
+    """Avito completed navigation on a different listing than the queue requested."""
+
+
 class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 
