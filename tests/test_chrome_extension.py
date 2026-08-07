@@ -627,6 +627,8 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"Input.dispatchMouseEvent"' in trusted_click
     assert "chromeApi.debugger.attach" in trusted_click
     assert "chromeApi.debugger.detach" in trusted_click
+    assert '"Page.bringToFront"' in trusted_click
+    assert 'expression: "window.focus()"' in trusted_click
     assert "options.measureTarget" in trusted_click
 
     service_worker = (

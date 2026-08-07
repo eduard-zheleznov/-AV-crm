@@ -158,3 +158,9 @@ hit target, затем service worker повторно проверяет comman
 сразу посылает CDP mouse events. Pre-attach coordinates не передаются. Любая
 ошибка attach/content/revalidation/input завершается fail-closed, debugger снимается
 в `finally`, OCR до reveal confirmation не запускается.
+
+Live canary `1.0.12` открыл правильное объявление и видимую зелёную кнопку, но
+номер не раскрылся; на экране остался выделенный omnibox URL. Патч `1.12.30` /
+`1.0.13` поэтому до fresh measurement явно вызывает CDP `Page.bringToFront`, затем
+`Runtime.evaluate` с `window.focus()` и `userGesture: true`. Ошибка любой команды не
+допускает measurement или mouse input; debugger снимается в `finally`.

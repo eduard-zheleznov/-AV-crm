@@ -67,6 +67,24 @@
         timeoutMs,
         "attached_focus_timeout"
       );
+      // tabs.update(active) can leave Chrome's omnibox focused. Bring the
+      // renderer target to the foreground through CDP before asking content
+      // for coordinates, then focus the page with a user gesture context.
+      await withTimeout(
+        chromeApi.debugger.sendCommand(target, "Page.bringToFront", {}),
+        timeoutMs,
+        "debugger_page_focus_timeout"
+      );
+      await withTimeout(
+        chromeApi.debugger.sendCommand(target, "Runtime.evaluate", {
+          expression: "window.focus()",
+          userGesture: true,
+          awaitPromise: false,
+          returnByValue: true
+        }),
+        timeoutMs,
+        "debugger_page_focus_timeout"
+      );
       if (typeof options.measureTarget !== "function") {
         throw codedError("target_measurement_unavailable");
       }

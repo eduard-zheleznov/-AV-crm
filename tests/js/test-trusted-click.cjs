@@ -64,7 +64,7 @@ function fakeChrome({ failAt = "" } = {}) {
         },
         async sendCommand(target, method, params) {
           calls.push(["send", target, method, params]);
-          if (failAt === params.type) {
+          if (failAt === method || failAt === params.type) {
             throw new Error("CDP input failed");
           }
         },
@@ -110,10 +110,14 @@ async function main() {
     { ok: true, code: "browser_click_dispatched" }
   );
   assert.deepEqual(
-    success.calls.map((call) => call[0] === "send" ? call[3].type : call[0]),
+    success.calls.map((call) =>
+      call[0] === "send" ? (call[3].type || call[2]) : call[0]
+    ),
     [
       "attach",
       "focus",
+      "Page.bringToFront",
+      "Runtime.evaluate",
       "measure",
       "revalidate",
       "mouseMoved",
@@ -122,12 +126,19 @@ async function main() {
       "detach"
     ]
   );
-  for (const call of success.calls.filter((item) => item[0] === "send")) {
+  for (const call of success.calls.filter(
+    (item) => item[0] === "send" && item[2] === "Input.dispatchMouseEvent"
+  )) {
     assert.deepEqual(call[1], { tabId: 42 });
     assert.equal(call[2], "Input.dispatchMouseEvent");
     assert.equal(call[3].x, 640.5);
     assert.equal(call[3].y, 480.25);
   }
+  const pageFocus = success.calls.find(
+    (item) => item[0] === "send" && item[2] === "Runtime.evaluate"
+  );
+  assert.equal(pageFocus[3].expression, "window.focus()");
+  assert.equal(pageFocus[3].userGesture, true);
 
   const inputFailure = fakeChrome({ failAt: "mousePressed" });
   assert.deepEqual(
@@ -159,6 +170,24 @@ async function main() {
   assert.equal(attachFailure.calls.some((call) => call[0] === "send"), false);
   assert.equal(attachFailure.calls.some((call) => call[0] === "detach"), false);
 
+  const pageFocusFailure = fakeChrome({ failAt: "Page.bringToFront" });
+  assert.deepEqual(
+    await trustedClick.dispatch(
+      pageFocusFailure.api,
+      { tabId: 42 },
+      dispatchOptions(pageFocusFailure.calls)
+    ),
+    { ok: false, code: "browser_click_unavailable" }
+  );
+  assert.equal(pageFocusFailure.calls.some((call) => call[0] === "measure"), false);
+  assert.equal(
+    pageFocusFailure.calls.some(
+      (call) => call[0] === "send" && call[2] === "Input.dispatchMouseEvent"
+    ),
+    false
+  );
+  assert.equal(pageFocusFailure.calls.at(-1)[0], "detach");
+
   const missingContent = fakeChrome();
   assert.deepEqual(
     await trustedClick.dispatch(
@@ -173,7 +202,12 @@ async function main() {
     ),
     { ok: false, code: "content_script_unavailable" }
   );
-  assert.equal(missingContent.calls.some((call) => call[0] === "send"), false);
+  assert.equal(
+    missingContent.calls.some(
+      (call) => call[0] === "send" && call[2] === "Input.dispatchMouseEvent"
+    ),
+    false
+  );
   assert.equal(missingContent.calls.at(-1)[0], "detach");
 
   const stopped = fakeChrome();
@@ -190,7 +224,12 @@ async function main() {
     ),
     { ok: false, code: "command_cancelled" }
   );
-  assert.equal(stopped.calls.some((call) => call[0] === "send"), false);
+  assert.equal(
+    stopped.calls.some(
+      (call) => call[0] === "send" && call[2] === "Input.dispatchMouseEvent"
+    ),
+    false
+  );
   assert.equal(stopped.calls.at(-1)[0], "detach");
 
   const detachFailure = fakeChrome({ failAt: "detach" });
