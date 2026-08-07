@@ -17,20 +17,30 @@
     if (!context.sameListingIdentity(context.actualUrl, context.expectedUrl)) {
       return { ok: false, code: "listing_mismatch" };
     }
+    return { ok: true, code: "validated" };
+  }
+
+  function validateTargetMeasurement(measurement) {
+    if (!measurement?.ok) {
+      return {
+        ok: false,
+        code: safeCode(measurement?.code, "target_measurement_unavailable")
+      };
+    }
     for (const key of ["x", "y", "width", "height"]) {
-      if (!Number.isFinite(request[key])) {
+      if (!Number.isFinite(measurement[key])) {
         return { ok: false, code: "invalid_coordinates" };
       }
     }
     if (
-      request.x < 0 ||
-      request.y < 0 ||
-      request.x > 10000 ||
-      request.y > 10000 ||
-      request.width < 2 ||
-      request.height < 2 ||
-      request.width > 5000 ||
-      request.height > 5000
+      measurement.x < 0 ||
+      measurement.y < 0 ||
+      measurement.x > 10000 ||
+      measurement.y > 10000 ||
+      measurement.width < 2 ||
+      measurement.height < 2 ||
+      measurement.width > 5000 ||
+      measurement.height > 5000
     ) {
       return { ok: false, code: "invalid_coordinates" };
     }
@@ -43,16 +53,54 @@
     let attached = false;
     let attachPromise = null;
     let pressed = false;
+    let coordinates = null;
     let result = { ok: false, code: "browser_click_unavailable" };
     try {
       attachPromise = chromeApi.debugger.attach(target, "1.3");
       await withTimeout(attachPromise, timeoutMs, "debugger_attach_timeout");
       attached = true;
+      if (typeof options.afterAttach !== "function") {
+        throw codedError("attached_focus_unavailable");
+      }
+      await withTimeout(
+        Promise.resolve().then(() => options.afterAttach()),
+        timeoutMs,
+        "attached_focus_timeout"
+      );
+      if (typeof options.measureTarget !== "function") {
+        throw codedError("target_measurement_unavailable");
+      }
+      const measurement = await withTimeout(
+        Promise.resolve().then(() => options.measureTarget()),
+        Math.max(timeoutMs, Number(options.measureTimeoutMs) || 0),
+        "target_measurement_timeout"
+      );
+      const measurementValidation = validateTargetMeasurement(measurement);
+      if (!measurementValidation.ok) {
+        throw codedError(measurementValidation.code);
+      }
+      coordinates = {
+        x: measurement.x,
+        y: measurement.y,
+        width: measurement.width,
+        height: measurement.height
+      };
+      if (typeof options.revalidate !== "function") {
+        throw codedError("pre_dispatch_validation_unavailable");
+      }
+      const liveValidation = await withTimeout(
+        Promise.resolve().then(() => options.revalidate()),
+        timeoutMs,
+        "pre_dispatch_validation_timeout"
+      );
+      if (!liveValidation?.ok) {
+        throw codedError(liveValidation?.code || "pre_dispatch_validation_failed");
+      }
       await withTimeout(
         chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
           type: "mouseMoved",
-          x: request.x,
-          y: request.y
+          x: coordinates.x,
+          y: coordinates.y
         }),
         timeoutMs,
         "debugger_input_timeout"
@@ -61,8 +109,8 @@
       await withTimeout(
         chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
           type: "mousePressed",
-          x: request.x,
-          y: request.y,
+          x: coordinates.x,
+          y: coordinates.y,
           button: "left",
           buttons: 1,
           clickCount: 1
@@ -74,8 +122,8 @@
       await withTimeout(
         chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
           type: "mouseReleased",
-          x: request.x,
-          y: request.y,
+          x: coordinates.x,
+          y: coordinates.y,
           button: "left",
           buttons: 0,
           clickCount: 1
@@ -90,8 +138,8 @@
         await withTimeout(
           chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
             type: "mouseReleased",
-            x: request.x,
-            y: request.y,
+            x: coordinates?.x || 0,
+            y: coordinates?.y || 0,
             button: "left",
             buttons: 0,
             clickCount: 1
@@ -143,9 +191,13 @@
   }
 
   function errorCode(error) {
+    if (typeof error?.code === "string" && error.code) {
+      return safeCode(error.code, "browser_click_unavailable");
+    }
     const message = String(error?.message || error || "").toLowerCase();
     if (message.includes("timeout")) {
-      return message.includes("attach") ? "debugger_attach_timeout" : "debugger_input_timeout";
+      const timeoutCode = message.match(/[a-z0-9_]+_timeout/)?.[0] || "";
+      return safeCode(timeoutCode, "debugger_input_timeout");
     }
     if (message.includes("another debugger") || message.includes("already attached")) {
       return "debugger_busy";
@@ -153,10 +205,21 @@
     return "browser_click_unavailable";
   }
 
+  function codedError(code) {
+    const error = new Error(String(code || "browser_click_unavailable"));
+    error.code = safeCode(code, "browser_click_unavailable");
+    return error;
+  }
+
+  function safeCode(value, fallback) {
+    const normalized = String(value || "").trim();
+    return /^[a-z0-9_]{1,80}$/.test(normalized) ? normalized : fallback;
+  }
+
   const delay = (milliseconds) =>
     new Promise((resolve) => globalObject.setTimeout(resolve, milliseconds));
 
-  const api = { dispatch, validateRequest, withTimeout };
+  const api = { dispatch, validateRequest, validateTargetMeasurement, withTimeout };
   globalObject.AVITO_CRM_TRUSTED_CLICK = api;
   if (typeof module !== "undefined" && module.exports) {
     module.exports = api;

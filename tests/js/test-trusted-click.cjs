@@ -4,13 +4,7 @@ const assert = require("node:assert/strict");
 const trustedClick = require("../../chrome-extension/trusted-click.js");
 
 const listingUrl = "https://www.avito.ru/moskva/usluga_123456789";
-const request = {
-  commandId: "command-1",
-  x: 320.5,
-  y: 440.25,
-  width: 180,
-  height: 48
-};
+const request = { commandId: "command-1" };
 const context = {
   currentCommandId: "command-1",
   currentCommandType: "reveal_phone",
@@ -46,7 +40,13 @@ assert.equal(
   "listing_mismatch"
 );
 assert.equal(
-  trustedClick.validateRequest({ ...request, x: Number.NaN }, context).code,
+  trustedClick.validateTargetMeasurement({
+    ok: true,
+    x: Number.NaN,
+    y: 200,
+    width: 180,
+    height: 48
+  }).code,
   "invalid_coordinates"
 );
 
@@ -79,33 +79,70 @@ function fakeChrome({ failAt = "" } = {}) {
   };
 }
 
+function dispatchOptions(calls, overrides = {}) {
+  return {
+    timeoutMs: 500,
+    measureTimeoutMs: 500,
+    async afterAttach() {
+      calls.push(["focus"]);
+    },
+    async measureTarget() {
+      calls.push(["measure"]);
+      return { ok: true, x: 640.5, y: 480.25, width: 200, height: 52 };
+    },
+    async revalidate() {
+      calls.push(["revalidate"]);
+      return { ok: true, code: "validated" };
+    },
+    ...overrides
+  };
+}
+
 async function main() {
   const success = fakeChrome();
   assert.deepEqual(
     await trustedClick.dispatch(
       success.api,
-      { tabId: 42, x: request.x, y: request.y },
-      { timeoutMs: 500 }
+      // These deliberately stale pre-attach coordinates must never be used.
+      { tabId: 42, x: 1, y: 2 },
+      dispatchOptions(success.calls)
     ),
     { ok: true, code: "browser_click_dispatched" }
   );
   assert.deepEqual(
     success.calls.map((call) => call[0] === "send" ? call[3].type : call[0]),
-    ["attach", "mouseMoved", "mousePressed", "mouseReleased", "detach"]
+    [
+      "attach",
+      "focus",
+      "measure",
+      "revalidate",
+      "mouseMoved",
+      "mousePressed",
+      "mouseReleased",
+      "detach"
+    ]
   );
   for (const call of success.calls.filter((item) => item[0] === "send")) {
     assert.deepEqual(call[1], { tabId: 42 });
     assert.equal(call[2], "Input.dispatchMouseEvent");
+    assert.equal(call[3].x, 640.5);
+    assert.equal(call[3].y, 480.25);
   }
 
   const inputFailure = fakeChrome({ failAt: "mousePressed" });
   assert.deepEqual(
     await trustedClick.dispatch(
       inputFailure.api,
-      { tabId: 42, x: request.x, y: request.y },
-      { timeoutMs: 500 }
+      { tabId: 42 },
+      dispatchOptions(inputFailure.calls)
     ),
     { ok: false, code: "browser_click_unavailable" }
+  );
+  assert.equal(
+    inputFailure.calls.filter(
+      (call) => call[0] === "send" && call[3].type === "mouseReleased"
+    ).length,
+    1
   );
   assert.equal(inputFailure.calls.at(-1)[0], "detach");
 
@@ -113,20 +150,55 @@ async function main() {
   assert.deepEqual(
     await trustedClick.dispatch(
       attachFailure.api,
-      { tabId: 42, x: request.x, y: request.y },
-      { timeoutMs: 500 }
+      { tabId: 42 },
+      dispatchOptions(attachFailure.calls)
     ),
     { ok: false, code: "debugger_busy" }
   );
+  assert.equal(attachFailure.calls.some((call) => call[0] === "measure"), false);
   assert.equal(attachFailure.calls.some((call) => call[0] === "send"), false);
   assert.equal(attachFailure.calls.some((call) => call[0] === "detach"), false);
+
+  const missingContent = fakeChrome();
+  assert.deepEqual(
+    await trustedClick.dispatch(
+      missingContent.api,
+      { tabId: 42 },
+      dispatchOptions(missingContent.calls, {
+        async measureTarget() {
+          missingContent.calls.push(["measure"]);
+          return { ok: false, code: "content_script_unavailable" };
+        }
+      })
+    ),
+    { ok: false, code: "content_script_unavailable" }
+  );
+  assert.equal(missingContent.calls.some((call) => call[0] === "send"), false);
+  assert.equal(missingContent.calls.at(-1)[0], "detach");
+
+  const stopped = fakeChrome();
+  assert.deepEqual(
+    await trustedClick.dispatch(
+      stopped.api,
+      { tabId: 42 },
+      dispatchOptions(stopped.calls, {
+        async revalidate() {
+          stopped.calls.push(["revalidate"]);
+          return { ok: false, code: "command_cancelled" };
+        }
+      })
+    ),
+    { ok: false, code: "command_cancelled" }
+  );
+  assert.equal(stopped.calls.some((call) => call[0] === "send"), false);
+  assert.equal(stopped.calls.at(-1)[0], "detach");
 
   const detachFailure = fakeChrome({ failAt: "detach" });
   assert.deepEqual(
     await trustedClick.dispatch(
       detachFailure.api,
-      { tabId: 42, x: request.x, y: request.y },
-      { timeoutMs: 500 }
+      { tabId: 42 },
+      dispatchOptions(detachFailure.calls)
     ),
     { ok: true, code: "browser_click_dispatched_detach_unconfirmed" }
   );

@@ -38,15 +38,27 @@ const INACTIVE_PATTERNS = [
 const CONTENT_SCRIPT_VERSION = INSTALLED_CONTENT_VERSION;
 const PHONE_BUTTON_RE = /(?:показать\s+(?:номер(?:\s+телефона)?|телефон)|позвонить)/i;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+let activeRevealCommandId = null;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "avito_crm_probe") {
     sendResponse(probePage(message.expectedUrl, message.mode));
     return false;
   }
+  if (message?.type === "avito_crm_measure_click_target") {
+    measureAttachedClickTarget(message)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, code: "target_measurement_unavailable" }));
+    return true;
+  }
   if (message?.type !== "avito_crm_reveal_once") {
     return false;
   }
+  if (activeRevealCommandId && activeRevealCommandId !== message.commandId) {
+    sendResponse({ status: "error", reason: "Другая команда уже активна" });
+    return false;
+  }
+  activeRevealCommandId = message.commandId;
   revealOnce(message)
     .then((result) => sendResponse(result))
     .catch((error) =>
@@ -54,7 +66,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         status: "error",
         reason: error?.message ? error.message.slice(0, 300) : String(error).slice(0, 300)
       })
-    );
+    )
+    .finally(() => {
+      if (activeRevealCommandId === message.commandId) {
+        activeRevealCommandId = null;
+      }
+    });
   return true;
 });
 
@@ -207,14 +224,12 @@ function isActionableClickTarget(button) {
 }
 
 async function requestBrowserClick(button, command) {
-  const rect = button.getBoundingClientRect();
+  // Do not send coordinates measured before chrome.debugger.attach: Chrome may
+  // resize the viewport when attaching. The service worker asks this content
+  // script for a fresh target while the debugger is already attached.
   const request = chrome.runtime.sendMessage({
     type: "avito_crm_browser_click",
-    commandId: command.commandId,
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2,
-    width: rect.width,
-    height: rect.height
+    commandId: command.commandId
   });
   let timer = null;
   const timeout = new Promise((resolve) => {
@@ -230,6 +245,48 @@ async function requestBrowserClick(button, command) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function measureAttachedClickTarget(message) {
+  if (message.commandId !== activeRevealCommandId) {
+    return { ok: false, code: "command_mismatch" };
+  }
+  if (
+    message.expectedContentVersion &&
+    message.expectedContentVersion !== CONTENT_SCRIPT_VERSION
+  ) {
+    return { ok: false, code: "stale_content_script" };
+  }
+  if (
+    !globalThis.AVITO_CRM_RUNTIME_CORE.sameListingIdentity(
+      window.location.href,
+      message.expectedUrl
+    )
+  ) {
+    return { ok: false, code: "listing_mismatch" };
+  }
+  if (manualReason()) {
+    return { ok: false, code: "manual_required" };
+  }
+  let button = await prepareClickTarget(findPhoneButton());
+  if (!button) {
+    return { ok: false, code: "click_target_unavailable" };
+  }
+  // Re-query once after focus/scroll settles. If the viewport changed, only
+  // this final DOMRect is used; any earlier rectangle is discarded.
+  await delay(50);
+  button = findPhoneButton();
+  if (!button || !isActionableClickTarget(button)) {
+    return { ok: false, code: "click_target_unavailable" };
+  }
+  const rect = button.getBoundingClientRect();
+  return {
+    ok: true,
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+    width: rect.width,
+    height: rect.height
+  };
 }
 
 async function waitForRevealTransition(before, deadline, manualTimeoutMs) {

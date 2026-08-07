@@ -143,3 +143,18 @@ fallback через `chrome.scripting.executeScript`, только в main frame
 Avito surface и с повторной exact-tab/same-listing проверкой. Content bootstrap
 идемпотентен. JSONL пишет только privacy-safe `actualSurface`, `pendingSurface` и
 статус injection, без полного URL.
+
+## Trusted-click viewport regression `1.12.28` / `1.0.11`
+
+Две CDP dispatch вернули success, но DOM reveal не изменился. Координаты
+кнопки измерялись content script до `chrome.debugger.attach`; attach может
+добавить infobar и изменить viewport, поэтому CDP мог получать устаревший
+центр. Точное совпадение click target с другим элементом ретроспективно не
+наблюдалось, поэтому это root cause с высокой, но не live-confirmed уверенностью.
+
+Патч `1.12.29` / extension `1.0.12` выполняет attach до измерения. После attach
+вкладка фокусируется, content script заново ищет кнопку и проверяет
+hit target, затем service worker повторно проверяет command/tab/listing/STOP и
+сразу посылает CDP mouse events. Pre-attach coordinates не передаются. Любая
+ошибка attach/content/revalidation/input завершается fail-closed, debugger снимается
+в `finally`, OCR до reveal confirmation не запускается.

@@ -613,6 +613,7 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert 'notifyStatus("reveal_confirmed"' in content
     assert "actionAttempt <= 2" in content
     assert "avito_crm_browser_click" in content
+    assert "avito_crm_measure_click_target" in content
     assert "expectedContentVersion" in (
         Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
     ).read_text(encoding="utf-8")
@@ -626,12 +627,15 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"Input.dispatchMouseEvent"' in trusted_click
     assert "chromeApi.debugger.attach" in trusted_click
     assert "chromeApi.debugger.detach" in trusted_click
+    assert "options.measureTarget" in trusted_click
 
     service_worker = (
         Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
     ).read_text(encoding="utf-8")
     assert "NAVIGATION.shouldInject" in service_worker
     assert "NAVIGATION.injectContentFiles" in service_worker
+    assert "measureBrowserClickTarget" in service_worker
+    assert "x: message.x" not in service_worker
     assert "content_script_reload" not in service_worker
 
     navigation_core = (

@@ -11,7 +11,8 @@ const NAVIGATION = globalThis.AVITO_CRM_NAVIGATION_CORE;
 const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
-const BROWSER_CLICK_API_TIMEOUT_MS = 1000;
+const BROWSER_CLICK_API_TIMEOUT_MS = 1500;
+const CONTENT_TARGET_MEASURE_TIMEOUT_MS = 4000;
 const CONTENT_SCRIPT_GRACE_MS = 1000;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
@@ -219,37 +220,80 @@ async function executeCommand(command) {
 
 async function handleBrowserClick(message, sender) {
   const senderTabId = sender?.tab?.id;
-  let tab = await browserClickTab(senderTabId);
-  let validation = validateBrowserClick(message, senderTabId, tab);
-  if (!validation.ok) {
-    return validation;
-  }
-  const focused = await TRUSTED_CLICK.withTimeout(
-    focusTab(senderTabId),
-    BROWSER_CLICK_API_TIMEOUT_MS,
-    "tab_focus_timeout"
-  )
-    .then(() => true)
-    .catch(() => false);
-  if (!focused) {
-    return { ok: false, code: "tab_focus_timeout" };
-  }
-  // STOP/cancellation or a redirect may race with focus. Revalidate the live
-  // command, exact tab and listing immediately before attaching the debugger.
-  tab = await browserClickTab(senderTabId);
-  validation = validateBrowserClick(message, senderTabId, tab);
+  let validation = await validateBrowserClickLive(message, senderTabId);
   if (!validation.ok) {
     return validation;
   }
   return await TRUSTED_CLICK.dispatch(
     chrome,
+    { tabId: senderTabId },
     {
-      tabId: senderTabId,
-      x: message.x,
-      y: message.y
-    },
-    { timeoutMs: BROWSER_CLICK_API_TIMEOUT_MS }
+      timeoutMs: BROWSER_CLICK_API_TIMEOUT_MS,
+      measureTimeoutMs: CONTENT_TARGET_MEASURE_TIMEOUT_MS,
+      // Attaching may add a Chrome infobar and resize the viewport. Focus and
+      // measure only after attach; coordinates sent by the initiating content
+      // message are intentionally ignored.
+      afterAttach: () => focusTab(senderTabId),
+      measureTarget: () => measureBrowserClickTarget(senderTabId, message),
+      // STOP, command replacement, tab replacement or an Avito redirect may
+      // race with measurement. Fail closed immediately before CDP input.
+      revalidate: () => validateBrowserClickLive(message, senderTabId)
+    }
   );
+}
+
+async function measureBrowserClickTarget(tabId, message) {
+  try {
+    const measurement = await TRUSTED_CLICK.withTimeout(
+      chrome.tabs.sendMessage(tabId, {
+        type: "avito_crm_measure_click_target",
+        commandId: message.commandId,
+        expectedUrl: currentCommand?.url || "",
+        expectedContentVersion: EXTENSION_VERSION
+      }),
+      CONTENT_TARGET_MEASURE_TIMEOUT_MS,
+      "target_measurement_timeout"
+    );
+    return measurement || { ok: false, code: "target_measurement_unavailable" };
+  } catch (error) {
+    return {
+      ok: false,
+      code: isMissingContentScriptError(safeMessage(error))
+        ? "content_script_unavailable"
+        : "target_measurement_unavailable"
+    };
+  }
+}
+
+async function validateBrowserClickLive(message, senderTabId) {
+  const tab = await browserClickTab(senderTabId);
+  const validation = validateBrowserClick(message, senderTabId, tab);
+  if (!validation.ok) {
+    return validation;
+  }
+  try {
+    const response = await TRUSTED_CLICK.withTimeout(
+      fetch(
+        `${BASE_URL}/v1/command-status?id=${encodeURIComponent(message.commandId)}`,
+        { method: "GET", headers: AUTH_HEADERS, cache: "no-store" }
+      ),
+      BROWSER_CLICK_API_TIMEOUT_MS,
+      "command_status_timeout"
+    );
+    if (!response.ok) {
+      return { ok: false, code: "command_status_unavailable" };
+    }
+    const payload = await response.json();
+    if (payload.status !== "active") {
+      return {
+        ok: false,
+        code: payload.status === "cancelled" ? "command_cancelled" : "command_inactive"
+      };
+    }
+  } catch (_error) {
+    return { ok: false, code: "command_status_unavailable" };
+  }
+  return validation;
 }
 
 async function browserClickTab(tabId) {
