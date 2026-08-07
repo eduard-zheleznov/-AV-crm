@@ -78,6 +78,40 @@
     return { ok: true, code: "inject_content_files" };
   }
 
+  function renderedProbeToken(probe) {
+    if (!probe || !probe.rendered) {
+      return "";
+    }
+    const bodyLength = Math.max(0, Number(probe.bodyLength) || 0);
+    const bodyBucket = Math.floor(bodyLength / 100);
+    return [
+      String(probe.readyState || "unknown"),
+      bodyBucket,
+      Math.max(0, Number(probe.visibleHeadings) || 0),
+      Boolean(probe.hasPhone),
+      Boolean(probe.hasPhoneButton),
+      String(probe.contentVersion || "")
+    ].join(":");
+  }
+
+  function advanceRenderedStability(previous, probe, nowMs, options = {}) {
+    const token = renderedProbeToken(probe);
+    const now = Number(nowMs) || 0;
+    const minSamples = Math.max(2, Number(options.minSamples) || 4);
+    const minStableMs = Math.max(500, Number(options.minStableMs) || 1500);
+    const same = Boolean(previous && token && previous.token === token);
+    const state = {
+      token,
+      samples: same ? previous.samples + 1 : token ? 1 : 0,
+      sinceMs: same ? previous.sinceMs : now
+    };
+    state.stableForMs = state.samples ? Math.max(0, now - state.sinceMs) : 0;
+    state.ready = Boolean(
+      token && state.samples >= minSamples && state.stableForMs >= minStableMs
+    );
+    return state;
+  }
+
   async function injectContentFiles(chromeApi, tabId, expectedUrl, mode, runtime) {
     let tab = null;
     try {
@@ -101,9 +135,11 @@
   }
 
   const api = {
+    advanceRenderedStability,
     contentGate,
     injectContentFiles,
     isExpectedSurface,
+    renderedProbeToken,
     shouldInject,
     surfaceClass
   };

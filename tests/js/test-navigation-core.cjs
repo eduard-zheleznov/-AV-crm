@@ -145,6 +145,50 @@ assert.equal(
   "injection_already_attempted"
 );
 
+const interactiveRendered = {
+  readyState: "interactive",
+  rendered: true,
+  bodyLength: 2609,
+  visibleHeadings: 1,
+  hasPhone: false,
+  hasPhoneButton: true,
+  contentVersion: "1.0.18"
+};
+let stable = null;
+for (const now of [0, 500, 1000]) {
+  stable = navigation.advanceRenderedStability(stable, interactiveRendered, now, {
+    minSamples: 4,
+    minStableMs: 1500
+  });
+  assert.equal(stable.ready, false);
+}
+stable = navigation.advanceRenderedStability(stable, interactiveRendered, 1500, {
+  minSamples: 4,
+  minStableMs: 1500
+});
+assert.equal(stable.ready, true);
+
+let changing = navigation.advanceRenderedStability(null, interactiveRendered, 0);
+changing = navigation.advanceRenderedStability(
+  changing,
+  { ...interactiveRendered, bodyLength: 2810 },
+  500
+);
+assert.equal(changing.samples, 1);
+assert.equal(changing.ready, false);
+changing = navigation.advanceRenderedStability(
+  changing,
+  { ...interactiveRendered, bodyLength: 2810, hasPhoneButton: false },
+  1000
+);
+assert.equal(changing.samples, 1);
+assert.equal(changing.ready, false);
+assert.equal(
+  navigation.advanceRenderedStability(changing, { ...interactiveRendered, rendered: false }, 2000)
+    .ready,
+  false
+);
+
 function fakeChrome(tab, { executeError = null } = {}) {
   const calls = [];
   return {

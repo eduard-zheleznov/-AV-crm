@@ -211,3 +211,19 @@ coordinates, CDP pointer/key events и Windows SendInput не использую
 privacy-safe status фиксируются только `eventTrusted`, активность user gesture и
 тип элемента; URL и телефон туда не попадают. OCR остаётся недоступен до
 подтверждённого DOM reveal, а открытый modal сначала читается напрямую из DOM.
+
+## Stable rendered readiness `1.12.36` / `1.0.18`
+
+Live-диагностика `1.0.17` доказала, что оба bounded navigation attempt
+открыли правильный Avito ID с `rendered=true`, текущим content script,
+одним h1 и непустым DOM, но Chrome все 45 с оставался
+`tabStatus=loading` / `readyState=interactive`. Strict complete был ложным
+browser-infra gate, а не признаком неготовой страницы.
+
+`1.0.18` требует current content version, exact listing ID, empty `pendingUrl`
+и четыре одинаковых privacy-safe rendered-probe на интервале не менее
+1,5 с. Затем content script выбирает actionable reveal-кнопку среди всех
+кандидатов, прокручивает её в viewport и ждёт три стабильных sample
+одного DOM-элемента. MAIN-world `Runtime.evaluate(userGesture:true)` и все
+command/tab/listing/STOP gate сохранены. Отдельного gate по `readyState`
+больше нет: его заменяют rendered-stability и стабильная actionable-кнопка.

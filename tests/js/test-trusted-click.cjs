@@ -88,7 +88,7 @@ async function main() {
     trustedClick.mainWorldRevealExpression("123456789"),
     {
       document: {
-        readyState: "complete",
+        readyState: "interactive",
         querySelectorAll: () => [button],
         elementFromPoint: () => button,
         addEventListener: (_name, listener) => {

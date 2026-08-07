@@ -104,7 +104,6 @@
       const expectedId = ${serializedListingId};
       const actualId = (location.pathname.match(/_(\\d+)(?:\\/?$)/) || [])[1] || "";
       if (actualId !== expectedId) return {ok:false, code:"listing_mismatch"};
-      if (document.readyState !== "complete") return {ok:false, code:"document_not_complete"};
       const revealRe = /(?:показать\\s+(?:номер(?:\\s+телефона)?|телефон)|позвонить)/i;
       const visible = (element) => {
         if (!element || !element.isConnected) return false;

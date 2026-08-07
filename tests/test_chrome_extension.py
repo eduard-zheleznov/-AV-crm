@@ -257,6 +257,8 @@ def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings)
             "contentInjectionAttempted": True,
             "contentInjectionStatus": "injected",
             "contentVersion": EXPECTED_EXTENSION_VERSION,
+            "stableSamples": 4,
+            "stableForMs": 1500,
             "actualUrl": "https://www.avito.ru/moskva/secret-slug_123456789",
             "attempts": [
                 {
@@ -282,6 +284,8 @@ def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings)
     assert record["diagnostics"]["pendingSurface"] == "avito:listing"
     assert record["diagnostics"]["contentInjectionAttempted"] is True
     assert record["diagnostics"]["contentInjectionStatus"] == "injected"
+    assert record["diagnostics"]["stableSamples"] == 4
+    assert record["diagnostics"]["stableForMs"] == 1500
     assert "https://" not in content
     assert "do-not-log" not in content
     assert "+79991234567" not in content
@@ -631,6 +635,12 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert "native-click" not in service_worker
     assert "x: message.x" not in service_worker
     assert "content_script_reload" not in service_worker
+    assert "advanceRenderedStability" in service_worker
+    assert "chrome_tab_not_complete" not in service_worker
+
+    assert "findPhoneButtons" in content
+    assert "button === previousButton" in content
+    assert 'probe.readyState === "complete"' not in content
 
     trusted_click = (
         Path(__file__).parents[1] / "chrome-extension" / "trusted-click.js"
@@ -638,6 +648,8 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"Runtime.evaluate"' in trusted_click
     assert "userGesture: true" in trusted_click
     assert "button.click()" in trusted_click
+    assert "document_not_complete" not in trusted_click
+    assert "document_not_ready" not in trusted_click
     assert '"Input.dispatchMouseEvent"' not in trusted_click
     assert "SendInput" not in trusted_click
 

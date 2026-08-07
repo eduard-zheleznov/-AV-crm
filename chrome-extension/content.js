@@ -549,43 +549,87 @@ function phoneSurfaceMetrics() {
   };
 }
 
-function findPhoneButton() {
+function findPhoneButtons() {
   const candidates = document.querySelectorAll(
     '[data-marker*="phone" i], button, a, [role="button"]'
   );
+  const matches = [];
+  const seen = new Set();
   for (const element of candidates) {
     const label = `${element.textContent || ""} ${element.getAttribute("aria-label") || ""}`;
-    if (
-      isVisible(element) &&
-      PHONE_BUTTON_RE.test(label) &&
-      !element.disabled &&
-      element.getAttribute("aria-disabled") !== "true"
-    ) {
-      return element.closest('button, a, [role="button"]') || element;
+    if (!isVisible(element) || !PHONE_BUTTON_RE.test(label)) {
+      continue;
     }
+    const button = element.closest('button, a, [role="button"]') || element;
+    if (
+      seen.has(button) ||
+      !isVisible(button) ||
+      button.disabled ||
+      button.getAttribute("aria-disabled") === "true"
+    ) {
+      continue;
+    }
+    seen.add(button);
+    matches.push(button);
   }
-  return null;
+  return matches;
+}
+
+function findPhoneButton() {
+  const buttons = findPhoneButtons();
+  return buttons.find((button) => isActionableClickTarget(button)) || buttons[0] || null;
 }
 
 async function waitForStablePhoneButton(timeoutMs) {
   const deadline = Date.now() + Math.max(1500, Number(timeoutMs) || 3000);
+  let previousButton = null;
   let previousToken = "";
   let stableSamples = 0;
+  let stableSince = 0;
   while (Date.now() < deadline) {
-    const button = findPhoneButton();
+    const buttons = findPhoneButtons();
+    let button = buttons.find((candidate) => isActionableClickTarget(candidate)) || null;
+    if (!button && buttons.length) {
+      button = nearestViewportCandidate(buttons);
+      button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
+      previousButton = null;
+      previousToken = "";
+      stableSamples = 0;
+      stableSince = 0;
+      await delay(350);
+      continue;
+    }
     const token = button && isActionableClickTarget(button) ? clickTargetToken(button) : "";
-    if (token && token === previousToken) {
+    if (token && button === previousButton && token === previousToken) {
       stableSamples += 1;
     } else {
+      previousButton = button;
       previousToken = token;
       stableSamples = token ? 1 : 0;
+      stableSince = token ? Date.now() : 0;
     }
-    if (stableSamples >= 3 && document.readyState === "complete") {
+    if (
+      stableSamples >= 3 &&
+      stableSince &&
+      Date.now() - stableSince >= 600
+    ) {
       return button;
     }
     await delay(300);
   }
   return null;
+}
+
+function nearestViewportCandidate(buttons) {
+  const centerY = window.innerHeight / 2;
+  return buttons.reduce((best, candidate) => {
+    const rect = candidate.getBoundingClientRect();
+    const distance = Math.abs(rect.top + rect.height / 2 - centerY);
+    if (!best || distance < best.distance) {
+      return { button: candidate, distance };
+    }
+    return best;
+  }, null).button;
 }
 
 function clickTargetToken(button) {
@@ -625,7 +669,6 @@ async function waitForTargetReady(expectedUrl, timeoutMs) {
     const probe = probePage(expectedUrl, "listing");
     if (
       probe.rendered &&
-      probe.readyState === "complete" &&
       sameListingPath(location.href, expectedUrl)
     ) {
       return true;
@@ -658,12 +701,14 @@ function probePage(expectedUrl, mode) {
     isVisible(heading)
   ).length;
   const bodyLength = (document.body?.innerText || "").trim().length;
+  const phone = Boolean(findPhone());
+  const hasPhoneButton = findPhoneButtons().length > 0;
   const rendered =
     manual ||
     auth ||
     inactive ||
-    Boolean(findPhone()) ||
-    Boolean(findPhoneButton()) ||
+    phone ||
+    hasPhoneButton ||
     (bodyLength > 200 && visibleHeadings > 0) ||
     (mode === "health" && bodyLength > 200);
   return {
@@ -676,7 +721,9 @@ function probePage(expectedUrl, mode) {
     auth,
     inactive,
     bodyLength,
-    visibleHeadings
+    visibleHeadings,
+    hasPhone: phone,
+    hasPhoneButton
   };
 }
 

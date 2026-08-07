@@ -84,14 +84,11 @@
       }
       return { status: "loading", reason: "listing_navigation_pending", actualUrl };
     }
-    return probe?.rendered && probe?.readyState === "complete"
+    return probe?.rendered
       ? { status: "ready", reason: probe?.inactive ? "inactive_rendered" : "listing_rendered", actualUrl }
       : {
           status: "loading",
-          reason:
-            probe?.readyState === "complete"
-              ? "listing_not_rendered"
-              : "document_not_complete",
+          reason: "listing_not_rendered",
           actualUrl
         };
   }

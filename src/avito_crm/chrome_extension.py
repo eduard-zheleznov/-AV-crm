@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.17"
+EXPECTED_EXTENSION_VERSION = "1.0.18"
 
 
 @dataclass(slots=True)
@@ -956,6 +956,8 @@ _DIAGNOSTIC_KEYS = frozenset(
         "expectedId",
         "expectedListingId",
         "inactive",
+        "hasPhone",
+        "hasPhoneButton",
         "manual",
         "mode",
         "navigation",
@@ -968,6 +970,8 @@ _DIAGNOSTIC_KEYS = frozenset(
         "rendered",
         "stage",
         "status",
+        "stableForMs",
+        "stableSamples",
         "tabId",
         "tabStatus",
         "visibleHeadings",

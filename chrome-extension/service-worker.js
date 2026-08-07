@@ -13,6 +13,8 @@ const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
 const BROWSER_CLICK_API_TIMEOUT_MS = 1500;
 const CONTENT_SCRIPT_GRACE_MS = 1000;
+const RENDERED_STABLE_SAMPLES = 4;
+const RENDERED_STABLE_MS = 1500;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
   ? {
@@ -446,12 +448,14 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   let contentInjectionAttempted = false;
   let contentInjectionStatus = "not_needed";
   let committedSurfaceSince = 0;
+  let renderedStability = null;
   let classification = { status: "loading", reason: "navigation_started" };
   while (Date.now() < deadline) {
     tab = await chrome.tabs.get(tabId);
     const contentGate = NAVIGATION.contentGate(tab, expectedUrl, mode, RUNTIME);
     if (!contentGate.ok) {
       committedSurfaceSince = 0;
+      renderedStability = null;
       probe = null;
       classification =
         contentGate.code === "unexpected_surface"
@@ -477,6 +481,7 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
       probe = await probeTab(tabId, expectedUrl, mode);
       probeError = "";
       if (probe?.contentVersion !== EXTENSION_VERSION) {
+        renderedStability = null;
         classification = {
           status: "loading",
           reason: "stale_content_script",
@@ -494,16 +499,25 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
         }
       } else {
         classification = RUNTIME.classifyProbe(probe, expectedUrl, mode);
-        if (
-          mode === "listing" &&
-          classification.status === "ready" &&
-          tab?.status !== "complete"
-        ) {
-          classification = {
-            status: "loading",
-            reason: "chrome_tab_not_complete",
-            actualUrl: tab?.url || ""
-          };
+        if (mode === "listing" && classification.status === "ready") {
+          renderedStability = NAVIGATION.advanceRenderedStability(
+            renderedStability,
+            probe,
+            Date.now(),
+            {
+              minSamples: RENDERED_STABLE_SAMPLES,
+              minStableMs: RENDERED_STABLE_MS
+            }
+          );
+          if (!renderedStability.ready) {
+            classification = {
+              status: "loading",
+              reason: "rendered_stabilizing",
+              actualUrl: tab?.url || ""
+            };
+          }
+        } else if (mode === "listing") {
+          renderedStability = null;
         }
       }
       if (
@@ -517,6 +531,7 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
         };
       }
     } catch (error) {
+      renderedStability = null;
       probe = null;
       probeError = safeMessage(error);
       const missingReceiver = isMissingContentScriptError(probeError);
@@ -578,12 +593,16 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
           inactive: probe.inactive,
           bodyLength: probe.bodyLength,
           visibleHeadings: probe.visibleHeadings,
+          hasPhone: probe.hasPhone,
+          hasPhoneButton: probe.hasPhoneButton,
           contentVersion: probe.contentVersion
         }
       : null,
     probeError,
     contentInjectionAttempted,
-    contentInjectionStatus
+    contentInjectionStatus,
+    stableSamples: renderedStability?.samples || 0,
+    stableForMs: renderedStability?.stableForMs || 0
   };
   return { tab, classification, diagnostics };
 }

@@ -30,7 +30,7 @@ assert.equal(
     expected,
     "listing"
   ).status,
-  "loading"
+  "ready"
 );
 
 assert.equal(
