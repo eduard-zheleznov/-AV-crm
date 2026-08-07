@@ -6,6 +6,7 @@ import pytest
 from avito_crm.errors import (
     BrowserInfrastructureError,
     BrowserOperationError,
+    ClickNotEffectiveError,
     CrmError,
     InactiveListingError,
     ListingNavigationError,
@@ -324,6 +325,26 @@ def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, setting
     assert summary.processed == 0
     assert source.patches == []
     assert summary.stopped_reason.startswith("Предстартовая проверка")
+
+
+def test_ineffective_click_stops_run_without_consuming_attempt_or_using_ocr(
+    tmp_path, settings, monkeypatch
+):
+    source = RoundQueue(settings, count=2)
+    browser = SequencedBrowser(
+        {
+            "2": [ClickNotEffectiveError("кнопка не раскрылась")],
+            "3": ["+79997654321"],
+        }
+    )
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2"]
+    assert source.items[0].status == ItemStatus.RETRY_TECHNICAL
+    assert source.items[0].attempts == 0
+    assert summary.processed == 1
+    assert summary.stopped_reason.startswith("Остановлено: Chrome")
 
 
 def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(

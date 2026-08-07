@@ -89,11 +89,78 @@
       : { status: "loading", reason: "listing_not_rendered", actualUrl };
   }
 
+  const PHONE_SEPARATORS = "[\\s\\u00a0()\\-\u2013\u2014.]*";
+  const RUSSIAN_PHONE_RE = new RegExp(
+    `(?:^|[^\\d])((?:\\+?7|8)${PHONE_SEPARATORS}\\d{3}${PHONE_SEPARATORS}` +
+      `\\d{3}${PHONE_SEPARATORS}\\d{2}${PHONE_SEPARATORS}\\d{2})(?!\\d)`,
+    "g"
+  );
+
+  function normalizeRussianPhone(value) {
+    const source = String(value || "");
+    if (/avito\.ru\/\S*_\d{8,}(?:[/?#]|$)/i.test(source)) {
+      return "";
+    }
+    RUSSIAN_PHONE_RE.lastIndex = 0;
+    const match = RUSSIAN_PHONE_RE.exec(source);
+    if (!match) {
+      return "";
+    }
+    const digits = match[1].replace(/\D/g, "");
+    if (digits.length !== 11 || (digits[0] !== "7" && digits[0] !== "8")) {
+      return "";
+    }
+    return `+7${digits.slice(1)}`;
+  }
+
+  function extractRussianPhone(values) {
+    for (const value of values || []) {
+      const phone = normalizeRussianPhone(value);
+      if (phone) {
+        return phone;
+      }
+    }
+    return "";
+  }
+
+  function hasMaskedRussianPhone(value) {
+    const source = String(value || "").toLowerCase();
+    return /(?:\+?7|8)[\s\u00a0()\-\u2013\u2014.]{0,8}(?:[*\u2022\u00b7x\u0445])/.test(source);
+  }
+
+  function classifyRevealTransition(before, after) {
+    if (after?.phone) {
+      return { status: "confirmed", reason: "phone_dom" };
+    }
+    if (before?.buttonPresent && !after?.buttonPresent) {
+      return { status: "confirmed", reason: "button_disappeared" };
+    }
+    if (
+      after?.revealedSurface &&
+      (!before?.revealedSurface || before?.stateToken !== after?.stateToken)
+    ) {
+      return { status: "confirmed", reason: "revealed_surface_changed" };
+    }
+    if (
+      before?.buttonPresent &&
+      after?.buttonPresent &&
+      before?.buttonToken !== after?.buttonToken &&
+      !after?.buttonLooksReveal
+    ) {
+      return { status: "confirmed", reason: "button_state_changed" };
+    }
+    return { status: "pending", reason: "dispatch_without_effect" };
+  }
+
   const api = {
     avitoUrl,
     classifyProbe,
+    classifyRevealTransition,
+    extractRussianPhone,
+    hasMaskedRussianPhone,
     isManualSurface,
     listingId,
+    normalizeRussianPhone,
     normalizedPath,
     sameListingIdentity
   };

@@ -21,6 +21,7 @@ from avito_crm.chrome_extension import (
 from avito_crm.errors import (
     BrowserInfrastructureError,
     BrowserOperationError,
+    ClickNotEffectiveError,
     ManualActionRequired,
     OperatorStopRequested,
     PageNotReadyError,
@@ -557,6 +558,30 @@ def test_extension_browser_maps_an_unloaded_page_to_a_safe_retry(settings):
 
     with browser, pytest.raises(PageNotReadyError, match="не успела"):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_extension_browser_stops_before_ocr_when_click_has_no_effect(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "click_not_effective",
+            {"reason": "DOM не изменился"},
+        )
+    )
+
+    with browser, pytest.raises(ClickNotEffectiveError, match="DOM не изменился"):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_content_script_does_not_report_dispatch_as_reveal_success():
+    content_path = Path(__file__).parents[1] / "chrome-extension" / "content.js"
+    content = content_path.read_text(encoding="utf-8")
+
+    assert 'notifyStatus("clicked"' not in content
+    assert 'notifyStatus("click_dispatched"' in content
+    assert 'notifyStatus("reveal_confirmed"' in content
+    assert "actionAttempt <= 2" in content
 
 
 def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):

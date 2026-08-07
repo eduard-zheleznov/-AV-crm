@@ -46,6 +46,10 @@ class ListingNavigationError(AppError):
     """Avito completed navigation on a different listing than the queue requested."""
 
 
+class ClickNotEffectiveError(AppError):
+    """Chrome dispatched the bounded click sequence but Avito did not reveal a phone."""
+
+
 class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 

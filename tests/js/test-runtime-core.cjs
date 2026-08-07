@@ -73,3 +73,46 @@ assert.equal(
   "manual_required"
 );
 
+assert.equal(runtime.normalizeRussianPhone("+7\u00a0999\u00a0123–45–67"), "+79991234567");
+assert.equal(runtime.normalizeRussianPhone("8 (999) 123-45-67"), "+79991234567");
+assert.equal(
+  runtime.extractRussianPhone(["Временный номер", "Телефон: +7 999 123 45 67"]),
+  "+79991234567"
+);
+assert.equal(runtime.normalizeRussianPhone("+7 (***) ***-45-67"), "");
+assert.equal(runtime.hasMaskedRussianPhone("+7 ••• •••-45-67"), true);
+assert.equal(runtime.normalizeRussianPhone("Avito ID 1234567890"), "");
+assert.equal(
+  runtime.normalizeRussianPhone("https://www.avito.ru/moskva/item_89991234567"),
+  ""
+);
+
+const unchangedReveal = {
+  phone: "",
+  buttonPresent: true,
+  buttonLooksReveal: true,
+  buttonToken: "показать телефон",
+  revealedSurface: false,
+  stateToken: "0:0:1"
+};
+assert.equal(
+  runtime.classifyRevealTransition(unchangedReveal, { ...unchangedReveal }).status,
+  "pending"
+);
+assert.equal(
+  runtime.classifyRevealTransition(unchangedReveal, {
+    ...unchangedReveal,
+    buttonPresent: false
+  }).status,
+  "confirmed"
+);
+assert.equal(
+  runtime.classifyRevealTransition(unchangedReveal, {
+    ...unchangedReveal,
+    buttonLooksReveal: false,
+    buttonToken: "временный номер",
+    revealedSurface: true,
+    stateToken: "1:1:1"
+  }).status,
+  "confirmed"
+);

@@ -27,6 +27,7 @@ from avito_crm.config import Settings
 from avito_crm.errors import (
     BrowserInfrastructureError,
     BrowserOperationError,
+    ClickNotEffectiveError,
     InactiveListingError,
     ListingNavigationError,
     ManualActionRequired,
@@ -43,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.8"
+EXPECTED_EXTENSION_VERSION = "1.0.9"
 
 
 @dataclass(slots=True)
@@ -664,6 +665,10 @@ class ChromeExtensionBrowser:
             raise ListingNavigationError(
                 str(payload.get("reason", "Avito открыл другое объявление"))
             )
+        if status == "click_not_effective":
+            raise ClickNotEffectiveError(
+                str(payload.get("reason", "Avito не подтвердил раскрытие номера"))
+            )
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
         if status == "button_missing":
@@ -721,8 +726,12 @@ class ChromeExtensionBrowser:
             )
         elif event.status == "clicking":
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
-        elif event.status == "clicked":
-            LOGGER.info("Обычный Chrome: команда клика отправлена")
+        elif event.status == "click_dispatched":
+            LOGGER.info("Обычный Chrome: клик отправлен; ожидаем изменение DOM")
+        elif event.status == "click_recovery":
+            LOGGER.warning("Обычный Chrome: первый клик не подтверждён; один повтор")
+        elif event.status == "reveal_confirmed":
+            LOGGER.info("Обычный Chrome: раскрытие номера подтверждено DOM")
 
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:

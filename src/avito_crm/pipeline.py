@@ -14,6 +14,7 @@ from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import (
     BrowserOperationError,
+    ClickNotEffectiveError,
     InactiveListingError,
     InvalidListingError,
     ListingNavigationError,
@@ -582,6 +583,38 @@ class Pipeline:
                             unresolved_technical_rows.discard(item.row_id)
                             summary.errors = len(unresolved_technical_rows)
                             self._report_progress(progress, summary, item.row_id)
+                        except ClickNotEffectiveError as exc:
+                            status = (
+                                ItemStatus.RECREATE_PENDING
+                                if recreate_flow
+                                else ItemStatus.REPEAT_RETRY_TECHNICAL
+                                if repeat_flow
+                                else ItemStatus.RETRY_TECHNICAL
+                            )
+                            self._finalize_expected(
+                                canonical_url,
+                                item,
+                                previous_attempts,
+                                status,
+                                str(exc),
+                                summary.run_id,
+                                phone=stored_phone or "",
+                                repeat_phone_attempts=(
+                                    repeat_phone_attempts if repeat_flow else None
+                                ),
+                                next_retry_at=self._next_phone_retry_at(),
+                            )
+                            summary.retries += 1
+                            unresolved_technical_rows.add(item.row_id)
+                            summary.errors = len(unresolved_technical_rows)
+                            summary.stopped_reason = (
+                                "Остановлено: Chrome не подтвердил раскрытие "
+                                "номера после ограниченного повтора клика"
+                            )
+                            LOGGER.error("Строка %s: %s", item.row_id, exc)
+                            self._report_progress(progress, summary, item.row_id)
+                            should_stop = True
+                            break
                         except ListingNavigationError as exc:
                             self._finalize_expected(
                                 canonical_url,
