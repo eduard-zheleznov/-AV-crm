@@ -607,14 +607,22 @@ class Pipeline:
                             summary.retries += 1
                             unresolved_technical_rows.add(item.row_id)
                             summary.errors = len(unresolved_technical_rows)
-                            summary.stopped_reason = (
-                                "Остановлено: Chrome не подтвердил раскрытие "
-                                "номера после ограниченного повтора клика"
+                            consecutive_failures += 1
+                            LOGGER.warning(
+                                "Строка %s: Chrome не подтвердил раскрытие номера; "
+                                "строка сохранена для повтора без расходования попытки: %s",
+                                item.row_id,
+                                exc,
                             )
-                            LOGGER.error("Строка %s: %s", item.row_id, exc)
                             self._report_progress(progress, summary, item.row_id)
-                            should_stop = True
-                            break
+                            if consecutive_failures >= self.settings.max_consecutive_failures:
+                                summary.stopped_reason = (
+                                    "Аварийная остановка после "
+                                    f"{consecutive_failures} последовательных "
+                                    "неподтверждённых кликов Chrome"
+                                )
+                                should_stop = True
+                                break
                         except ListingNavigationError as exc:
                             self._finalize_expected(
                                 canonical_url,

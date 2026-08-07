@@ -327,7 +327,7 @@ def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, setting
     assert summary.stopped_reason.startswith("Предстартовая проверка")
 
 
-def test_ineffective_click_stops_run_without_consuming_attempt_or_using_ocr(
+def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
     tmp_path, settings, monkeypatch
 ):
     source = RoundQueue(settings, count=2)
@@ -340,11 +340,40 @@ def test_ineffective_click_stops_run_without_consuming_attempt_or_using_ocr(
 
     summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
 
-    assert browser.calls == ["2"]
+    assert browser.calls == ["2", "3"]
     assert source.items[0].status == ItemStatus.RETRY_TECHNICAL
     assert source.items[0].attempts == 0
-    assert summary.processed == 1
-    assert summary.stopped_reason.startswith("Остановлено: Chrome")
+    assert source.items[1].status == ItemStatus.CAPTURED
+    assert summary.processed == 2
+    assert summary.captured == 1
+    assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
+
+
+def test_ineffective_click_stops_after_consecutive_failure_limit(
+    tmp_path, settings, monkeypatch
+):
+    settings = replace(settings, max_consecutive_failures=2)
+    source = RoundQueue(settings, count=3)
+    browser = SequencedBrowser(
+        {
+            "2": [ClickNotEffectiveError("кнопка не раскрылась")],
+            "3": [ClickNotEffectiveError("кнопка не раскрылась")],
+            "4": ["+79997654321"],
+        }
+    )
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2", "3"]
+    assert source.items[0].status == ItemStatus.RETRY_TECHNICAL
+    assert source.items[1].status == ItemStatus.RETRY_TECHNICAL
+    assert source.items[0].attempts == 0
+    assert source.items[1].attempts == 0
+    assert source.items[2].status == ""
+    assert summary.processed == 2
+    assert summary.stopped_reason == (
+        "Аварийная остановка после 2 последовательных неподтверждённых кликов Chrome"
+    )
 
 
 def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
