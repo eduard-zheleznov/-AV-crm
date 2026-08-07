@@ -226,7 +226,7 @@ async function handleBrowserClick(message, sender) {
   }
   return await TRUSTED_CLICK.dispatch(
     chrome,
-    { tabId: senderTabId },
+    { tabId: senderTabId, activation: message.activation || "mouse" },
     {
       timeoutMs: BROWSER_CLICK_API_TIMEOUT_MS,
       measureTimeoutMs: CONTENT_TARGET_MEASURE_TIMEOUT_MS,
@@ -248,6 +248,7 @@ async function measureBrowserClickTarget(tabId, message) {
       chrome.tabs.sendMessage(tabId, {
         type: "avito_crm_measure_click_target",
         commandId: message.commandId,
+        activation: message.activation || "mouse",
         expectedUrl: currentCommand?.url || "",
         expectedContentVersion: EXTENSION_VERSION
       }),

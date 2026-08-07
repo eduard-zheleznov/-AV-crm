@@ -17,10 +17,13 @@
     if (!context.sameListingIdentity(context.actualUrl, context.expectedUrl)) {
       return { ok: false, code: "listing_mismatch" };
     }
+    if (!["mouse", "enter", "space"].includes(request.activation || "mouse")) {
+      return { ok: false, code: "invalid_activation" };
+    }
     return { ok: true, code: "validated" };
   }
 
-  function validateTargetMeasurement(measurement) {
+  function validateTargetMeasurement(measurement, activation = "mouse") {
     if (!measurement?.ok) {
       return {
         ok: false,
@@ -44,15 +47,20 @@
     ) {
       return { ok: false, code: "invalid_coordinates" };
     }
+    if (activation !== "mouse" && measurement.focused !== true) {
+      return { ok: false, code: "click_target_not_focused" };
+    }
     return { ok: true, code: "validated" };
   }
 
   async function dispatch(chromeApi, request, options = {}) {
     const timeoutMs = Math.max(500, Number(options.timeoutMs) || 1500);
     const target = { tabId: request.tabId };
+    const activation = request.activation || "mouse";
     let attached = false;
     let attachPromise = null;
     let pressed = false;
+    let pressedKey = null;
     let coordinates = null;
     let result = { ok: false, code: "browser_click_unavailable" };
     try {
@@ -93,7 +101,7 @@
         Math.max(timeoutMs, Number(options.measureTimeoutMs) || 0),
         "target_measurement_timeout"
       );
-      const measurementValidation = validateTargetMeasurement(measurement);
+      const measurementValidation = validateTargetMeasurement(measurement, activation);
       if (!measurementValidation.ok) {
         throw codedError(measurementValidation.code);
       }
@@ -114,43 +122,18 @@
       if (!liveValidation?.ok) {
         throw codedError(liveValidation?.code || "pre_dispatch_validation_failed");
       }
-      await withTimeout(
-        chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
-          type: "mouseMoved",
-          x: coordinates.x,
-          y: coordinates.y
-        }),
-        timeoutMs,
-        "debugger_input_timeout"
-      );
-      pressed = true;
-      await withTimeout(
-        chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
-          type: "mousePressed",
-          x: coordinates.x,
-          y: coordinates.y,
-          button: "left",
-          buttons: 1,
-          clickCount: 1
-        }),
-        timeoutMs,
-        "debugger_input_timeout"
-      );
-      await delay(80);
-      await withTimeout(
-        chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
-          type: "mouseReleased",
-          x: coordinates.x,
-          y: coordinates.y,
-          button: "left",
-          buttons: 0,
-          clickCount: 1
-        }),
-        timeoutMs,
-        "debugger_input_timeout"
-      );
-      pressed = false;
-      result = { ok: true, code: "browser_click_dispatched" };
+      if (activation === "mouse") {
+        await dispatchMouse(chromeApi, target, coordinates, timeoutMs, (value) => {
+          pressed = value;
+        });
+        result = { ok: true, code: "browser_click_dispatched" };
+      } else {
+        const key = activation === "enter" ? enterKey() : spaceKey();
+        pressedKey = key;
+        await dispatchKey(chromeApi, target, key, timeoutMs);
+        pressedKey = null;
+        result = { ok: true, code: `browser_${activation}_dispatched` };
+      }
     } catch (error) {
       if (attached && pressed) {
         await withTimeout(
@@ -166,6 +149,18 @@
           "debugger_release_timeout"
         ).catch(() => undefined);
         pressed = false;
+      }
+      if (attached && pressedKey) {
+        await withTimeout(
+          chromeApi.debugger.sendCommand(
+            target,
+            "Input.dispatchKeyEvent",
+            keyEvent("keyUp", pressedKey)
+          ),
+          500,
+          "debugger_key_release_timeout"
+        ).catch(() => undefined);
+        pressedKey = null;
       }
       if (!attached && attachPromise) {
         // A timed-out attach cannot be cancelled. If Chrome completes it late,
@@ -198,6 +193,87 @@
       }
     }
     return result;
+  }
+
+  async function dispatchMouse(chromeApi, target, coordinates, timeoutMs, setPressed) {
+    await withTimeout(
+      chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: coordinates.x,
+        y: coordinates.y
+      }),
+      timeoutMs,
+      "debugger_input_timeout"
+    );
+    setPressed(true);
+    await withTimeout(
+      chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: coordinates.x,
+        y: coordinates.y,
+        button: "left",
+        buttons: 1,
+        clickCount: 1
+      }),
+      timeoutMs,
+      "debugger_input_timeout"
+    );
+    await delay(80);
+    await withTimeout(
+      chromeApi.debugger.sendCommand(target, "Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: coordinates.x,
+        y: coordinates.y,
+        button: "left",
+        buttons: 0,
+        clickCount: 1
+      }),
+      timeoutMs,
+      "debugger_input_timeout"
+    );
+    setPressed(false);
+  }
+
+  async function dispatchKey(chromeApi, target, key, timeoutMs) {
+    await withTimeout(
+      chromeApi.debugger.sendCommand(
+        target,
+        "Input.dispatchKeyEvent",
+        keyEvent("keyDown", key)
+      ),
+      timeoutMs,
+      "debugger_input_timeout"
+    );
+    await delay(80);
+    await withTimeout(
+      chromeApi.debugger.sendCommand(
+        target,
+        "Input.dispatchKeyEvent",
+        keyEvent("keyUp", key)
+      ),
+      timeoutMs,
+      "debugger_input_timeout"
+    );
+  }
+
+  function enterKey() {
+    return { key: "Enter", code: "Enter", virtualKeyCode: 13, text: "\r" };
+  }
+
+  function spaceKey() {
+    return { key: " ", code: "Space", virtualKeyCode: 32, text: " " };
+  }
+
+  function keyEvent(type, key) {
+    return {
+      type,
+      key: key.key,
+      code: key.code,
+      windowsVirtualKeyCode: key.virtualKeyCode,
+      nativeVirtualKeyCode: key.virtualKeyCode,
+      text: type === "keyDown" ? key.text : "",
+      unmodifiedText: type === "keyDown" ? key.text : ""
+    };
   }
 
   function withTimeout(promise, timeoutMs, code) {

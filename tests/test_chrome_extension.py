@@ -609,9 +609,10 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     content = content_path.read_text(encoding="utf-8")
 
     assert 'notifyStatus("clicked"' not in content
-    assert 'notifyStatus("click_dispatched"' in content
+    assert '"click_dispatched"' in content
+    assert '"keyboard_dispatched"' in content
     assert 'notifyStatus("reveal_confirmed"' in content
-    assert "actionAttempt <= 2" in content
+    assert 'const activationPlan = ["mouse", "enter", "space"]' in content
     assert "avito_crm_browser_click" in content
     assert "avito_crm_measure_click_target" in content
     assert "expectedContentVersion" in (
@@ -630,6 +631,8 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"Page.bringToFront"' in trusted_click
     assert 'expression: "window.focus()"' in trusted_click
     assert "options.measureTarget" in trusted_click
+    assert '"Input.dispatchKeyEvent"' in trusted_click
+    assert 'activation !== "mouse" && measurement.focused !== true' in trusted_click
 
     service_worker = (
         Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"

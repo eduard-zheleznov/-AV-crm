@@ -40,6 +40,10 @@ assert.equal(
   "listing_mismatch"
 );
 assert.equal(
+  trustedClick.validateRequest({ ...request, activation: "tab" }, context).code,
+  "invalid_activation"
+);
+assert.equal(
   trustedClick.validateTargetMeasurement({
     ok: true,
     x: Number.NaN,
@@ -48,6 +52,13 @@ assert.equal(
     height: 48
   }).code,
   "invalid_coordinates"
+);
+assert.equal(
+  trustedClick.validateTargetMeasurement(
+    { ok: true, x: 200, y: 200, width: 180, height: 48, focused: false },
+    "enter"
+  ).code,
+  "click_target_not_focused"
 );
 
 function fakeChrome({ failAt = "" } = {}) {
@@ -88,7 +99,14 @@ function dispatchOptions(calls, overrides = {}) {
     },
     async measureTarget() {
       calls.push(["measure"]);
-      return { ok: true, x: 640.5, y: 480.25, width: 200, height: 52 };
+      return {
+        ok: true,
+        x: 640.5,
+        y: 480.25,
+        width: 200,
+        height: 52,
+        focused: true
+      };
     },
     async revalidate() {
       calls.push(["revalidate"]);
@@ -156,6 +174,80 @@ async function main() {
     1
   );
   assert.equal(inputFailure.calls.at(-1)[0], "detach");
+
+  for (const activation of ["enter", "space"]) {
+    const keyboard = fakeChrome();
+    assert.deepEqual(
+      await trustedClick.dispatch(
+        keyboard.api,
+        { tabId: 42, activation },
+        dispatchOptions(keyboard.calls)
+      ),
+      { ok: true, code: `browser_${activation}_dispatched` }
+    );
+    assert.deepEqual(
+      keyboard.calls
+        .filter((call) => call[0] === "send" && call[2] === "Input.dispatchKeyEvent")
+        .map((call) => call[3].type),
+      ["keyDown", "keyUp"]
+    );
+    assert.equal(
+      keyboard.calls.some(
+        (call) => call[0] === "send" && call[2] === "Input.dispatchMouseEvent"
+      ),
+      false
+    );
+    assert.equal(keyboard.calls.at(-1)[0], "detach");
+  }
+
+  const unfocusedKeyboard = fakeChrome();
+  assert.deepEqual(
+    await trustedClick.dispatch(
+      unfocusedKeyboard.api,
+      { tabId: 42, activation: "enter" },
+      dispatchOptions(unfocusedKeyboard.calls, {
+        async measureTarget() {
+          unfocusedKeyboard.calls.push(["measure"]);
+          return {
+            ok: true,
+            x: 640.5,
+            y: 480.25,
+            width: 200,
+            height: 52,
+            focused: false
+          };
+        }
+      })
+    ),
+    { ok: false, code: "click_target_not_focused" }
+  );
+  assert.equal(
+    unfocusedKeyboard.calls.some(
+      (call) => call[0] === "send" && call[2] === "Input.dispatchKeyEvent"
+    ),
+    false
+  );
+  assert.equal(unfocusedKeyboard.calls.at(-1)[0], "detach");
+
+  const keyFailure = fakeChrome({ failAt: "keyDown" });
+  assert.deepEqual(
+    await trustedClick.dispatch(
+      keyFailure.api,
+      { tabId: 42, activation: "enter" },
+      dispatchOptions(keyFailure.calls)
+    ),
+    { ok: false, code: "browser_click_unavailable" }
+  );
+  assert.equal(
+    keyFailure.calls.filter(
+      (call) =>
+        call[0] === "send" &&
+        call[2] === "Input.dispatchKeyEvent" &&
+        call[3].type === "keyUp"
+    ).length,
+    1
+  );
+  assert.equal(keyFailure.calls.at(-1)[0], "detach");
 
   const attachFailure = fakeChrome({ failAt: "attach" });
   assert.deepEqual(

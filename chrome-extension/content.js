@@ -122,14 +122,17 @@ async function revealOnce(command) {
 }
 
 async function revealWithVerifiedClick(initialButton, command) {
-  const overallDeadline = Date.now() + Math.max(3000, Number(command.phoneWaitMs) || 10000);
+  const overallDeadline =
+    Date.now() + Math.max(15000, Number(command.phoneWaitMs) || 10000);
+  const activationPlan = ["mouse", "enter", "space"];
   let button = initialButton;
   let phoneRegion = null;
 
-  for (let actionAttempt = 1; actionAttempt <= 2; actionAttempt += 1) {
+  for (let actionAttempt = 0; actionAttempt < activationPlan.length; actionAttempt += 1) {
+    const activation = activationPlan[actionAttempt];
     button = await prepareClickTarget(button);
     if (!button) {
-      if (actionAttempt === 1) {
+      if (actionAttempt < activationPlan.length - 1) {
         notifyStatus("click_recovery", "кнопка будет найдена повторно");
         await delay(500);
         continue;
@@ -145,21 +148,32 @@ async function revealWithVerifiedClick(initialButton, command) {
 
     const before = revealState(button);
     phoneRegion = screenRegion(button);
-    notifyStatus("clicking", "кнопка показа телефона готова");
-    const dispatched = await requestBrowserClick(button, command);
+    notifyStatus(
+      activation === "mouse" ? "clicking" : "keyboard_recovery",
+      activation === "mouse"
+        ? "кнопка показа телефона готова"
+        : `кнопка повторно проверена; активация ${activation}`
+    );
+    const dispatched = await requestBrowserActivation(command, activation);
     if (!dispatched.ok) {
-      if (actionAttempt === 1) {
-        notifyStatus("click_recovery", "browser-level клик недоступен; повторяем один раз");
+      if (actionAttempt < activationPlan.length - 1) {
+        notifyStatus(
+          "click_recovery",
+          "browser-level активация недоступна; пробуем следующий bounded метод"
+        );
         button = findPhoneButton();
         await delay(500);
         continue;
       }
       return browserClickUnavailable(dispatched.code);
     }
-    notifyStatus("click_dispatched", "browser-level клик отправлен; ожидаем изменение DOM");
+    notifyStatus(
+      activation === "mouse" ? "click_dispatched" : "keyboard_dispatched",
+      `browser-level ${activation} отправлен; ожидаем изменение DOM`
+    );
 
     const verificationDeadline =
-      actionAttempt === 1
+      actionAttempt < activationPlan.length - 1
         ? Math.min(overallDeadline, Date.now() + 3000)
         : overallDeadline;
     const transition = await waitForRevealTransition(
@@ -179,8 +193,11 @@ async function revealWithVerifiedClick(initialButton, command) {
         phoneRegion
       );
     }
-    if (actionAttempt === 1) {
-      notifyStatus("click_recovery", "первый клик не изменил DOM; повторяем один раз");
+    if (actionAttempt < activationPlan.length - 1) {
+      notifyStatus(
+        "click_recovery",
+        `${activation} не изменил DOM; переходим к следующему bounded методу`
+      );
       button = findPhoneButton();
       await delay(500);
     }
@@ -223,13 +240,14 @@ function isActionableClickTarget(button) {
   );
 }
 
-async function requestBrowserClick(button, command) {
+async function requestBrowserActivation(command, activation) {
   // Do not send coordinates measured before chrome.debugger.attach: Chrome may
   // resize the viewport when attaching. The service worker asks this content
   // script for a fresh target while the debugger is already attached.
   const request = chrome.runtime.sendMessage({
     type: "avito_crm_browser_click",
-    commandId: command.commandId
+    commandId: command.commandId,
+    activation
   });
   let timer = null;
   const timeout = new Promise((resolve) => {
@@ -279,13 +297,18 @@ async function measureAttachedClickTarget(message) {
   if (!button || !isActionableClickTarget(button)) {
     return { ok: false, code: "click_target_unavailable" };
   }
+  const focused = document.activeElement === button;
+  if (message.activation !== "mouse" && !focused) {
+    return { ok: false, code: "click_target_not_focused" };
+  }
   const rect = button.getBoundingClientRect();
   return {
     ok: true,
     x: rect.left + rect.width / 2,
     y: rect.top + rect.height / 2,
     width: rect.width,
-    height: rect.height
+    height: rect.height,
+    focused
   };
 }
 
@@ -346,7 +369,7 @@ function clickNotEffective(code = "dispatch_without_effect") {
   return {
     status: "click_not_effective",
     reason:
-      "Avito не подтвердил раскрытие номера после двух ограниченных browser-level кликов " +
+      "Avito не подтвердил раскрытие номера после bounded mouse/Enter/Space активации " +
       `(${String(code).slice(0, 80)})`
   };
 }
@@ -362,7 +385,7 @@ function browserClickUnavailable(code) {
   return {
     status: "click_not_effective",
     reason:
-      "Browser-level ввод недоступен после одного ограниченного повтора; " +
+      "Browser-level ввод недоступен после bounded набора методов; " +
       `неподтверждённый клик не засчитан (${safeCode})`
   };
 }

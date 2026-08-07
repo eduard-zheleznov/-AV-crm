@@ -164,3 +164,15 @@ Live canary `1.0.12` открыл правильное объявление и �
 `1.0.13` поэтому до fresh measurement явно вызывает CDP `Page.bringToFront`, затем
 `Runtime.evaluate` с `window.focus()` и `userGesture: true`. Ошибка любой команды не
 допускает measurement или mouse input; debugger снимается в `finally`.
+
+Live run `1.12.31` / `1.0.13` на пяти разных строках дал 5/5
+`dispatch_without_effect`: номера и CRM-лиды не создавались, попытки строк
+остались нулевыми, circuit breaker остановил run. Это опровергло mouse CDP
+как работающий метод на этой Avito surface.
+
+Патч `1.12.32` / `1.0.14` оставляет mouse первым методом, но после
+неподтверждённого DOM reveal допускает два ограниченных keyboard-механизма:
+Enter и Space. Каждый шаг заново проходит attach/focus/re-query/hit-test и дополнительно
+требует exact DOM focus reveal-кнопки. CDP key events отправляются только после
+повторной command/tab/listing/STOP-проверки. Между методами обязателен
+DOM reveal verify; OCR до него запрещён. Circuit breaker и `attempts=0` не изменены.

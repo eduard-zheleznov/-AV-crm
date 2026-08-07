@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.13"
+EXPECTED_EXTENSION_VERSION = "1.0.14"
 
 
 @dataclass(slots=True)
