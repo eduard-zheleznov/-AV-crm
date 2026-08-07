@@ -7,7 +7,7 @@ WebDriver или remote debugging. Расширение выполняет то�
 одним ограниченным повтором, вернуть
 DOM-номер либо снимок активной вкладки для локального OCR.
 
-Версия приложения `1.12.32` требует расширение `1.0.14`. Эти две части обновляются
+Версия приложения `1.12.33` требует расширение `1.0.15`. Эти две части обновляются
 вместе; несовпадение версий блокирует запуск до чтения первой строки.
 
 ## Безопасность
@@ -83,6 +83,14 @@ dispatch расширение не считает клик успешным, п�
 с проверенной reveal-кнопкой. Перед keyDown повторно проверяются
 command/tab/listing/STOP; keyUp гарантируется как cleanup. Synthetic `.click()` не используется.
 
+В `1.0.15`, если mouse, Enter и Space не изменили DOM, разрешён ровно один
+Windows-native click за строку. Локальный мост повторно проверяет одноразовый
+capability token, command, extension instance, listing, tab, STOP, interactive desktop, exact
+`chrome.exe` window и DPI/geometry. Затем вызываются `SetCursorPos` и `SendInput`,
+а курсор возвращается на исходную позицию. Locked session, ambiguous window,
+foreground/geometry mismatch и STOP дают fail-closed. Полные URL, номера и
+координаты в диагностику не пишутся.
+
 ## Установка
 
 Закройте Chrome for Testing. Обычный Chrome можно оставить установленным и
@@ -104,7 +112,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force
 `chrome://extensions` в режиме разработчика. Загрузчик проверяет версию расширения
 и не начнёт обработку со старым сценарием.
 
-После обновления `1.0.14` Chrome может повторно показать разрешения `debugger` и
+После обновления `1.0.15` Chrome может повторно показать разрешения `debugger` и
 `scripting`. Подтвердите их только для **Avito CRM Local Bridge**, затем перезапустите обычный
 Chrome. Один раз откройте `service worker` на карточке расширения: Console должна
 быть без ошибок. Во время каждого клика Chrome может кратко показать системную

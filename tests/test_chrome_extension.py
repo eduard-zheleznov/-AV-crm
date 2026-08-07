@@ -165,6 +165,67 @@ def test_bridge_exposes_stop_to_the_waiting_extension(settings):
     assert bridge._command_status("waiting-command") == "cancelled"
 
 
+def test_bridge_native_click_endpoint_is_authenticated_and_single_use(
+    settings, monkeypatch
+):
+    port = _free_port()
+    token = "z" * 64
+    configured = replace(
+        settings,
+        avito_extension_port=port,
+        avito_extension_token=token,
+    )
+    bridge = ExtensionBridge(configured)
+    bridge.state.command = {
+        "id": "native-command",
+        "type": "reveal_phone",
+        "url": "https://www.avito.ru/moskva/test_123456789",
+        "nativeClickToken": "one-use-token",
+    }
+    bridge.state.extension_version = EXPECTED_EXTENSION_VERSION
+    bridge.state.extension_instance = "native-instance"
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        chrome_extension_module,
+        "perform_windows_native_click",
+        lambda payload: calls.append(payload),
+    )
+    payload: dict[str, object] = {
+        "commandId": "native-command",
+        "nativeToken": "one-use-token",
+        "listingId": "123456789",
+        "tabId": 42,
+        "window": {},
+        "viewport": {},
+        "target": {},
+    }
+    bridge.start()
+    try:
+        status, first = _request(
+            port,
+            token,
+            "/v1/native-click",
+            payload=payload,
+            extension_version=EXPECTED_EXTENSION_VERSION,
+            extension_instance="native-instance",
+        )
+        _status, second = _request(
+            port,
+            token,
+            "/v1/native-click",
+            payload=payload,
+            extension_version=EXPECTED_EXTENSION_VERSION,
+            extension_instance="native-instance",
+        )
+    finally:
+        bridge.close()
+
+    assert status == 200
+    assert first == {"ok": True, "code": "native_click_dispatched"}
+    assert second == {"ok": False, "code": "native_click_already_used"}
+    assert calls == [payload]
+
+
 def test_bridge_runs_a_no_click_health_probe_and_records_the_instance(settings):
     port = _free_port()
     token = "c" * 64
@@ -612,7 +673,7 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"click_dispatched"' in content
     assert '"keyboard_dispatched"' in content
     assert 'notifyStatus("reveal_confirmed"' in content
-    assert 'const activationPlan = ["mouse", "enter", "space"]' in content
+    assert 'const activationPlan = ["mouse", "enter", "space", "native"]' in content
     assert "avito_crm_browser_click" in content
     assert "avito_crm_measure_click_target" in content
     assert "expectedContentVersion" in (
@@ -640,6 +701,8 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert "NAVIGATION.shouldInject" in service_worker
     assert "NAVIGATION.injectContentFiles" in service_worker
     assert "measureBrowserClickTarget" in service_worker
+    assert "/v1/native-click" in service_worker
+    assert "nativeClickToken" in service_worker
     assert "x: message.x" not in service_worker
     assert "content_script_reload" not in service_worker
 

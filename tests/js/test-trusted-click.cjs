@@ -44,6 +44,10 @@ assert.equal(
   "invalid_activation"
 );
 assert.equal(
+  trustedClick.validateRequest({ ...request, activation: "native" }, context).code,
+  "validated"
+);
+assert.equal(
   trustedClick.validateTargetMeasurement({
     ok: true,
     x: Number.NaN,

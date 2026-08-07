@@ -54,6 +54,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 chrome.action.onClicked.addListener(() => startPolling());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "avito_crm_native_click") {
+    handleNativeClick(message, sender)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, code: "native_click_unavailable" }));
+    return true;
+  }
   if (message?.type === "avito_crm_browser_click") {
     handleBrowserClick(message, sender)
       .then(sendResponse)
@@ -240,6 +246,113 @@ async function handleBrowserClick(message, sender) {
       revalidate: () => validateBrowserClickLive(message, senderTabId)
     }
   );
+}
+
+async function handleNativeClick(message, sender) {
+  const senderTabId = sender?.tab?.id;
+  let validation = await validateBrowserClickLive(message, senderTabId);
+  if (!validation.ok) {
+    return validation;
+  }
+  if (!currentCommand?.nativeClickToken) {
+    return { ok: false, code: "native_token_unavailable" };
+  }
+  const debuggerTargets = await TRUSTED_CLICK.withTimeout(
+    chrome.debugger.getTargets(),
+    BROWSER_CLICK_API_TIMEOUT_MS,
+    "debugger_state_timeout"
+  ).catch(() => null);
+  if (
+    !debuggerTargets ||
+    debuggerTargets.some((target) => target.tabId === senderTabId && target.attached)
+  ) {
+    return { ok: false, code: "debugger_still_attached" };
+  }
+  const focused = await TRUSTED_CLICK.withTimeout(
+    focusTab(senderTabId),
+    BROWSER_CLICK_API_TIMEOUT_MS,
+    "tab_focus_timeout"
+  )
+    .then(() => true)
+    .catch(() => false);
+  if (!focused) {
+    return { ok: false, code: "tab_focus_timeout" };
+  }
+  const measurement = await measureBrowserClickTarget(senderTabId, {
+    ...message,
+    activation: "native"
+  });
+  const targetValidation = TRUSTED_CLICK.validateTargetMeasurement(
+    measurement,
+    "native"
+  );
+  if (!targetValidation.ok) {
+    return targetValidation;
+  }
+  validation = await validateBrowserClickLive(message, senderTabId);
+  if (!validation.ok) {
+    return validation;
+  }
+  const tab = await browserClickTab(senderTabId);
+  if (!tab || tab.windowId !== sender?.tab?.windowId) {
+    return { ok: false, code: "tab_mismatch" };
+  }
+  const chromeWindow = await TRUSTED_CLICK.withTimeout(
+    chrome.windows.get(tab.windowId),
+    BROWSER_CLICK_API_TIMEOUT_MS,
+    "window_lookup_timeout"
+  ).catch(() => null);
+  if (!chromeWindow || !chromeWindow.focused || chromeWindow.state === "minimized") {
+    return { ok: false, code: "chrome_window_not_ready" };
+  }
+  // Revalidate once more after all geometry reads and immediately before the
+  // authenticated localhost request that may generate the single OS click.
+  validation = await validateBrowserClickLive(message, senderTabId);
+  if (!validation.ok) {
+    return validation;
+  }
+  try {
+    const response = await TRUSTED_CLICK.withTimeout(
+      fetch(`${BASE_URL}/v1/native-click`, {
+        method: "POST",
+        headers: AUTH_HEADERS,
+        cache: "no-store",
+        body: JSON.stringify({
+          commandId: message.commandId,
+          nativeToken: currentCommand.nativeClickToken,
+          listingId: RUNTIME.listingId(currentCommand.url || ""),
+          tabId: senderTabId,
+          window: {
+            left: chromeWindow.left,
+            top: chromeWindow.top,
+            width: chromeWindow.width,
+            height: chromeWindow.height,
+            focused: chromeWindow.focused,
+            state: chromeWindow.state
+          },
+          viewport: measurement.viewport,
+          target: {
+            x: measurement.x,
+            y: measurement.y,
+            width: measurement.width,
+            height: measurement.height,
+            focused: measurement.focused
+          }
+        })
+      }),
+      CONTENT_TARGET_MEASURE_TIMEOUT_MS,
+      "native_click_timeout"
+    );
+    if (!response.ok) {
+      return { ok: false, code: "native_click_unavailable" };
+    }
+    const payload = await response.json();
+    return payload?.ok
+      ? { ok: true, code: "native_click_dispatched" }
+      : { ok: false, code: String(payload?.code || "native_click_unavailable") };
+  } catch (_error) {
+    return { ok: false, code: "native_click_unavailable" };
+  }
 }
 
 async function measureBrowserClickTarget(tabId, message) {

@@ -123,8 +123,8 @@ async function revealOnce(command) {
 
 async function revealWithVerifiedClick(initialButton, command) {
   const overallDeadline =
-    Date.now() + Math.max(15000, Number(command.phoneWaitMs) || 10000);
-  const activationPlan = ["mouse", "enter", "space"];
+    Date.now() + Math.max(30000, Number(command.phoneWaitMs) || 10000);
+  const activationPlan = ["mouse", "enter", "space", "native"];
   let button = initialButton;
   let phoneRegion = null;
 
@@ -149,7 +149,11 @@ async function revealWithVerifiedClick(initialButton, command) {
     const before = revealState(button);
     phoneRegion = screenRegion(button);
     notifyStatus(
-      activation === "mouse" ? "clicking" : "keyboard_recovery",
+      activation === "mouse"
+        ? "clicking"
+        : activation === "native"
+          ? "native_recovery"
+          : "keyboard_recovery",
       activation === "mouse"
         ? "кнопка показа телефона готова"
         : `кнопка повторно проверена; активация ${activation}`
@@ -168,7 +172,11 @@ async function revealWithVerifiedClick(initialButton, command) {
       return browserClickUnavailable(dispatched.code);
     }
     notifyStatus(
-      activation === "mouse" ? "click_dispatched" : "keyboard_dispatched",
+      activation === "mouse"
+        ? "click_dispatched"
+        : activation === "native"
+          ? "native_dispatched"
+          : "keyboard_dispatched",
       `browser-level ${activation} отправлен; ожидаем изменение DOM`
     );
 
@@ -245,7 +253,7 @@ async function requestBrowserActivation(command, activation) {
   // resize the viewport when attaching. The service worker asks this content
   // script for a fresh target while the debugger is already attached.
   const request = chrome.runtime.sendMessage({
-    type: "avito_crm_browser_click",
+    type: activation === "native" ? "avito_crm_native_click" : "avito_crm_browser_click",
     commandId: command.commandId,
     activation
   });
@@ -308,7 +316,16 @@ async function measureAttachedClickTarget(message) {
     y: rect.top + rect.height / 2,
     width: rect.width,
     height: rect.height,
-    focused
+    focused,
+    viewport: {
+      screenX: window.screenX,
+      screenY: window.screenY,
+      outerWidth: window.outerWidth,
+      outerHeight: window.outerHeight,
+      innerWidth: window.innerWidth,
+      innerHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio
+    }
   };
 }
 
@@ -369,7 +386,7 @@ function clickNotEffective(code = "dispatch_without_effect") {
   return {
     status: "click_not_effective",
     reason:
-      "Avito не подтвердил раскрытие номера после bounded mouse/Enter/Space активации " +
+      "Avito не подтвердил раскрытие номера после bounded mouse/Enter/Space/native активации " +
       `(${String(code).slice(0, 80)})`
   };
 }

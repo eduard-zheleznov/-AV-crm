@@ -176,3 +176,14 @@ Enter и Space. Каждый шаг заново проходит attach/focus/r
 требует exact DOM focus reveal-кнопки. CDP key events отправляются только после
 повторной command/tab/listing/STOP-проверки. Между методами обязателен
 DOM reveal verify; OCR до него запрещён. Circuit breaker и `attempts=0` не изменены.
+
+Live run `1.12.32` / `1.0.14` также дал 5/5 `dispatch_without_effect` после
+mouse/Enter/Space; CRM не изменилась, `attempts=0`, circuit breaker остановил
+run. Дальнейшие CDP activation variants не добавляются.
+
+Патч `1.12.33` / `1.0.15` добавляет ровно один Windows-native `SendInput`
+после неудачи трёх методов. Debugger к этому моменту обязан быть detached.
+Capability token одноразовый и атомарно расходуется до user32, поэтому
+network retry не может кликнуть дважды. Locked session, ambiguous/non-Chrome window,
+foreground/DPI/geometry mismatch и STOP дают fail-closed. После native click обязателен
+DOM reveal verify; OCR до него недоступен.

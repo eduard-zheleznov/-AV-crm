@@ -41,10 +41,12 @@ from avito_crm.models import PhoneResult
 from avito_crm.notifications import NotificationRouter
 from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url, normalize_phone
+from avito_crm.windows_native_input import NativeInputError, perform_windows_native_click
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.14"
+MAX_NATIVE_CLICK_BYTES = 32 * 1024
+EXPECTED_EXTENSION_VERSION = "1.0.15"
 
 
 @dataclass(slots=True)
@@ -65,6 +67,7 @@ class _BridgeState:
         self.extension_version = ""
         self.extension_instance = ""
         self.stopped = False
+        self.native_click_used = False
 
 
 class ExtensionBridge:
@@ -186,6 +189,9 @@ class ExtensionBridge:
             "phoneWaitMs": round(self.settings.avito_temp_number_wait_max * 1000),
             "retryDelayMs": round(self.settings.avito_phone_retry_max * 1000),
             "recoveryBackoffMs": round(self.settings.avito_extension_recovery_backoff * 1000),
+            # Authenticated, single-use capability for the current row only.
+            # It is never written to diagnostics.
+            "nativeClickToken": secrets.token_urlsafe(32),
         }
         connection_deadline = time.monotonic() + self.settings.avito_extension_connect_timeout
         with self.state.condition:
@@ -210,6 +216,7 @@ class ExtensionBridge:
             self.state.dispatched = False
             self.state.events.clear()
             self.state.result = None
+            self.state.native_click_used = False
             self.state.condition.notify_all()
         self._write_diagnostic(
             "command_created",
@@ -305,6 +312,7 @@ class ExtensionBridge:
                     self.state.dispatched = False
                     self.state.events.clear()
                     self.state.result = None
+                    self.state.native_click_used = False
                     self.state.condition.notify_all()
 
     def _write_diagnostic(self, event: str, **values: object) -> None:
@@ -434,6 +442,65 @@ class ExtensionBridge:
                 return "inactive"
             return "active"
 
+    def _receive_native_click(
+        self,
+        payload: dict[str, Any],
+        *,
+        extension_version: str,
+        extension_instance: str,
+    ) -> dict[str, object]:
+        command_id = str(payload.get("commandId", ""))
+        native_token = str(payload.get("nativeToken", ""))
+        listing_id = str(payload.get("listingId", ""))
+        tab_id = payload.get("tabId")
+        code = "native_click_unavailable"
+        with self.state.condition:
+            command = self.state.command
+            if self.state.stopped or (self.settings.data_dir / "STOP").exists():
+                return {"ok": False, "code": "command_cancelled"}
+            if not command or command_id != str(command.get("id", "")):
+                return {"ok": False, "code": "command_mismatch"}
+            if str(command.get("type", "")) != "reveal_phone":
+                return {"ok": False, "code": "command_type_mismatch"}
+            if (
+                extension_version != EXPECTED_EXTENSION_VERSION
+                or not extension_instance
+                or extension_instance != self.state.extension_instance
+            ):
+                return {"ok": False, "code": "extension_instance_mismatch"}
+            expected_token = str(command.get("nativeClickToken", ""))
+            if not native_token or not secrets.compare_digest(native_token, expected_token):
+                return {"ok": False, "code": "native_token_mismatch"}
+            expected_listing_id = _listing_id_for_diagnostic(str(command.get("url", "")))
+            if not listing_id or listing_id != expected_listing_id:
+                return {"ok": False, "code": "listing_mismatch"}
+            if isinstance(tab_id, bool) or not isinstance(tab_id, int) or tab_id <= 0:
+                return {"ok": False, "code": "tab_mismatch"}
+            if self.state.native_click_used:
+                return {"ok": False, "code": "native_click_already_used"}
+            # Consume before touching user32. Network retries can never create a
+            # second physical click for this row, even if the first response is lost.
+            self.state.native_click_used = True
+        try:
+            perform_windows_native_click(payload)
+            code = "native_click_dispatched"
+            return {"ok": True, "code": code}
+        except NativeInputError as exc:
+            code = exc.code
+            return {"ok": False, "code": code}
+        except Exception:
+            code = "native_click_unavailable"
+            return {"ok": False, "code": code}
+        finally:
+            self._write_diagnostic(
+                "native_click_result",
+                command_id=command_id,
+                command_type="reveal_phone",
+                status=code,
+                extension_version=extension_version,
+                extension_instance=extension_instance,
+            )
+
     def _handler_type(self) -> type[BaseHTTPRequestHandler]:
         bridge = self
 
@@ -492,28 +559,44 @@ class ExtensionBridge:
                 if not bridge._authorized(self.headers.get("Authorization")):
                     self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                     return
-                if urlsplit(self.path).path != "/v1/event":
+                path = urlsplit(self.path).path
+                if path not in {"/v1/event", "/v1/native-click"}:
                     self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
                     return
                 try:
                     content_length = int(self.headers.get("Content-Length", "0"))
                 except ValueError:
                     content_length = 0
-                if content_length <= 0 or content_length > MAX_EVENT_BYTES:
+                max_bytes = (
+                    MAX_NATIVE_CLICK_BYTES if path == "/v1/native-click" else MAX_EVENT_BYTES
+                )
+                if content_length <= 0 or content_length > max_bytes:
                     self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_length"})
                     return
                 try:
                     payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
                     if not isinstance(payload, dict):
                         raise ValueError("JSON должен быть объектом")
-                    bridge._receive_event(payload)
+                    if path == "/v1/event":
+                        bridge._receive_event(payload)
+                        response_payload: dict[str, object] = {"ok": True}
+                    else:
+                        response_payload = bridge._receive_native_click(
+                            payload,
+                            extension_version=self.headers.get(
+                                "X-Avito-CRM-Extension-Version", ""
+                            ).strip(),
+                            extension_instance=self.headers.get(
+                                "X-Avito-CRM-Extension-Instance", ""
+                            ).strip(),
+                        )
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
                     self._send_json(
                         HTTPStatus.BAD_REQUEST,
                         {"error": "invalid_event", "detail": str(exc)[:160]},
                     )
                     return
-                self._send_json(HTTPStatus.OK, {"ok": True})
+                self._send_json(HTTPStatus.OK, response_payload)
 
             def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -729,7 +812,15 @@ class ChromeExtensionBrowser:
         elif event.status == "click_dispatched":
             LOGGER.info("Обычный Chrome: browser-level клик отправлен; ожидаем изменение DOM")
         elif event.status == "click_recovery":
-            LOGGER.warning("Обычный Chrome: первый клик не подтверждён; один повтор")
+            LOGGER.warning("Обычный Chrome: DOM reveal не подтверждён; bounded fallback")
+        elif event.status == "keyboard_recovery":
+            LOGGER.info("Обычный Chrome: проверяем keyboard activation")
+        elif event.status == "keyboard_dispatched":
+            LOGGER.info("Обычный Chrome: keyboard activation отправлена")
+        elif event.status == "native_recovery":
+            LOGGER.warning("Обычный Chrome: подготовка одного Windows-native click")
+        elif event.status == "native_dispatched":
+            LOGGER.info("Обычный Chrome: Windows-native click отправлен")
         elif event.status == "reveal_confirmed":
             LOGGER.info("Обычный Chrome: раскрытие номера подтверждено DOM")
 

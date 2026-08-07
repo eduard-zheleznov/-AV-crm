@@ -17,7 +17,7 @@
     if (!context.sameListingIdentity(context.actualUrl, context.expectedUrl)) {
       return { ok: false, code: "listing_mismatch" };
     }
-    if (!["mouse", "enter", "space"].includes(request.activation || "mouse")) {
+    if (!["mouse", "enter", "space", "native"].includes(request.activation || "mouse")) {
       return { ok: false, code: "invalid_activation" };
     }
     return { ok: true, code: "validated" };
