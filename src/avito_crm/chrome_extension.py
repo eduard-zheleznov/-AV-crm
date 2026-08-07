@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -24,11 +25,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from avito_crm.config import Settings
 from avito_crm.errors import (
+    BrowserInfrastructureError,
     BrowserOperationError,
+    ClickNotEffectiveError,
     InactiveListingError,
+    ListingNavigationError,
     ManualActionRequired,
     NotificationError,
     OperatorStopRequested,
+    PageNotReadyError,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
 )
@@ -39,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.6"
+EXPECTED_EXTENSION_VERSION = "1.0.18"
 
 
 @dataclass(slots=True)
@@ -58,6 +63,7 @@ class _BridgeState:
         self.result: ExtensionEvent | None = None
         self.last_seen = 0.0
         self.extension_version = ""
+        self.extension_instance = ""
         self.stopped = False
 
 
@@ -69,6 +75,8 @@ class ExtensionBridge:
         self.state = _BridgeState()
         self.server: ThreadingHTTPServer | None = None
         self.thread: threading.Thread | None = None
+        self._diagnostic_lock = threading.Lock()
+        self._diagnostic_path = settings.logs_dir / "chrome-extension-health.jsonl"
 
     def start(self) -> None:
         if self.server is not None:
@@ -117,9 +125,46 @@ class ExtensionBridge:
                 self.state.condition.wait(timeout=min(remaining, 0.5))
             return True
 
+    def health_snapshot(self) -> dict[str, Any]:
+        with self.state.condition:
+            idle_seconds = max(0.0, time.monotonic() - self.state.last_seen)
+            return {
+                "connected": idle_seconds <= 5,
+                "idle_seconds": round(idle_seconds, 3),
+                "extension_version": self.state.extension_version,
+                "extension_instance": self.state.extension_instance,
+                "command_active": self.state.command is not None,
+                "command_dispatched": self.state.dispatched,
+            }
+
+    def health_probe(self) -> ExtensionEvent:
+        return self._execute(
+            command_type="health_probe",
+            url="https://www.avito.ru/",
+            row_id="startup-canary",
+            max_clicks=0,
+        )
+
     def execute(
         self,
         *,
+        url: str,
+        row_id: str,
+        max_clicks: int,
+        status_callback: Callable[[ExtensionEvent], None] | None = None,
+    ) -> ExtensionEvent:
+        return self._execute(
+            command_type="reveal_phone",
+            url=url,
+            row_id=row_id,
+            max_clicks=max_clicks,
+            status_callback=status_callback,
+        )
+
+    def _execute(
+        self,
+        *,
+        command_type: str,
         url: str,
         row_id: str,
         max_clicks: int,
@@ -130,7 +175,7 @@ class ExtensionBridge:
         command_id = uuid.uuid4().hex
         command = {
             "id": command_id,
-            "type": "reveal_phone",
+            "type": command_type,
             "url": url,
             "rowId": row_id,
             "maxClicks": max_clicks,
@@ -140,13 +185,14 @@ class ExtensionBridge:
             "manualTimeoutMs": 0,
             "phoneWaitMs": round(self.settings.avito_temp_number_wait_max * 1000),
             "retryDelayMs": round(self.settings.avito_phone_retry_max * 1000),
+            "recoveryBackoffMs": round(self.settings.avito_extension_recovery_backoff * 1000),
         }
         connection_deadline = time.monotonic() + self.settings.avito_extension_connect_timeout
         with self.state.condition:
             while time.monotonic() - self.state.last_seen > 5:
                 remaining = connection_deadline - time.monotonic()
                 if remaining <= 0:
-                    raise BrowserOperationError(
+                    raise BrowserInfrastructureError(
                         "Расширение Avito CRM не подключилось к локальному мосту. "
                         "Откройте обычный Chrome и проверьте, что расширение включено."
                     )
@@ -165,12 +211,23 @@ class ExtensionBridge:
             self.state.events.clear()
             self.state.result = None
             self.state.condition.notify_all()
+        self._write_diagnostic(
+            "command_created",
+            command_id=command_id,
+            command_type=command_type,
+            row_id=row_id,
+            url=url,
+        )
 
         operation_timeout = max(
             30.0,
-            self.settings.avito_page_timeout
-            + self.settings.avito_temp_number_wait_max
-            + (self.settings.avito_phone_retry_max * max_clicks)
+            (self.settings.avito_page_timeout * 2)
+            + self.settings.avito_extension_recovery_backoff
+            + (max_clicks * (self.settings.avito_page_timeout + 5.0))
+            + (
+                max(0, max_clicks - 1)
+                * (self.settings.avito_phone_retry_max + self.settings.avito_page_timeout)
+            )
             + 30.0,
         )
         deadline: float | None = time.monotonic() + operation_timeout
@@ -217,8 +274,15 @@ class ExtensionBridge:
                             )
                             reminder_index += 1
                         elif deadline is not None and now >= deadline:
-                            raise BrowserOperationError(
-                                "Обычный Chrome не завершил открытие номера: нет ответа расширения"
+                            self._write_diagnostic(
+                                "command_timeout",
+                                command_id=command_id,
+                                command_type=command_type,
+                                row_id=row_id,
+                                url=url,
+                            )
+                            raise BrowserInfrastructureError(
+                                "Обычный Chrome не завершил команду: нет ответа расширения"
                             )
                         else:
                             self.state.condition.wait(timeout=1.0)
@@ -243,20 +307,75 @@ class ExtensionBridge:
                     self.state.result = None
                     self.state.condition.notify_all()
 
+    def _write_diagnostic(self, event: str, **values: object) -> None:
+        record: dict[str, object] = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "event": event,
+        }
+        for key in (
+            "command_id",
+            "command_type",
+            "row_id",
+            "status",
+            "extension_version",
+            "extension_instance",
+        ):
+            value = values.get(key)
+            if value not in {None, ""}:
+                record[key] = value
+        url = str(values.get("url", "") or "")
+        listing_id = _listing_id_for_diagnostic(url) if url else ""
+        if listing_id:
+            record["listing_id"] = listing_id
+        diagnostics = values.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            record["diagnostics"] = _safe_extension_diagnostics(diagnostics)
+        try:
+            self._diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+            with self._diagnostic_lock, self._diagnostic_path.open("a", encoding="utf-8") as stream:
+                stream.write(line)
+        except OSError as exc:
+            LOGGER.warning("Не удалось записать журнал Chrome health: %s", exc)
+
     def _poll(
         self,
         timeout: float = 20.0,
         *,
         extension_version: str = "",
+        extension_instance: str = "",
     ) -> dict[str, Any] | None:
         deadline = time.monotonic() + timeout
         with self.state.condition:
+            session_changed = bool(
+                extension_instance and extension_instance.strip() != self.state.extension_instance
+            )
             self.state.last_seen = time.monotonic()
             self.state.extension_version = extension_version.strip()
+            self.state.extension_instance = extension_instance.strip()
             self.state.condition.notify_all()
+            if session_changed:
+                self._write_diagnostic(
+                    "extension_connected",
+                    extension_version=self.state.extension_version,
+                    extension_instance=self.state.extension_instance,
+                )
             while not self.state.stopped:
+                # The long-poll request itself is an idle heartbeat. Refreshing
+                # it here distinguishes an attached service worker from an old
+                # timestamp even while there is no command to dispatch.
+                self.state.last_seen = time.monotonic()
                 if self.state.command is not None and not self.state.dispatched:
                     self.state.dispatched = True
+                    self._write_diagnostic(
+                        "command_dispatched",
+                        command_id=str(self.state.command.get("id", "")),
+                        command_type=str(self.state.command.get("type", "")),
+                        row_id=str(self.state.command.get("rowId", "")),
+                        url=str(self.state.command.get("url", "")),
+                        extension_version=self.state.extension_version,
+                        extension_instance=self.state.extension_instance,
+                    )
                     return dict(self.state.command)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -271,15 +390,36 @@ class ExtensionBridge:
         if event_type not in {"status", "result"} or not status:
             raise ValueError("Некорректный тип события расширения")
         event = ExtensionEvent(event_type, status, payload)
+        command_type = ""
+        row_id = ""
+        url = ""
+        extension_version = ""
+        extension_instance = ""
         with self.state.condition:
             self.state.last_seen = time.monotonic()
             if not self.state.command or command_id != self.state.command.get("id"):
                 raise ValueError("Событие не относится к активной команде")
+            command_type = str(self.state.command.get("type", ""))
+            row_id = str(self.state.command.get("rowId", ""))
+            url = str(self.state.command.get("url", ""))
+            extension_version = self.state.extension_version
+            extension_instance = self.state.extension_instance
             if event_type == "result":
                 self.state.result = event
             else:
                 self.state.events.append(event)
             self.state.condition.notify_all()
+        self._write_diagnostic(
+            f"extension_{event_type}",
+            command_id=command_id,
+            command_type=command_type,
+            row_id=row_id,
+            url=url,
+            status=status,
+            extension_version=extension_version,
+            extension_instance=extension_instance,
+            diagnostics=payload.get("diagnostics"),
+        )
 
     def _authorized(self, header: str | None) -> bool:
         expected = f"Bearer {self.settings.avito_extension_token}"
@@ -305,7 +445,8 @@ class ExtensionBridge:
                 self._cors_headers()
                 self.send_header(
                     "Access-Control-Allow-Headers",
-                    "Authorization, Content-Type, X-Avito-CRM-Extension-Version",
+                    "Authorization, Content-Type, X-Avito-CRM-Extension-Version, "
+                    "X-Avito-CRM-Extension-Instance",
                 )
                 self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
                 self.end_headers()
@@ -317,7 +458,7 @@ class ExtensionBridge:
                 parsed = urlsplit(self.path)
                 path = parsed.path
                 if path == "/v1/health":
-                    self._send_json(HTTPStatus.OK, {"ok": True})
+                    self._send_json(HTTPStatus.OK, bridge.health_snapshot())
                     return
                 if path == "/v1/command-status":
                     command_id = str(parse_qs(parsed.query).get("id", [""])[0])
@@ -333,7 +474,11 @@ class ExtensionBridge:
                     extension_version=self.headers.get(
                         "X-Avito-CRM-Extension-Version",
                         "",
-                    )
+                    ),
+                    extension_instance=self.headers.get(
+                        "X-Avito-CRM-Extension-Instance",
+                        "",
+                    ),
                 )
                 if command is None:
                     self.send_response(HTTPStatus.NO_CONTENT)
@@ -406,6 +551,9 @@ class ChromeExtensionBrowser:
         self._manual_notified = False
         self._manual_pending = False
         self._manual_backup_alerted = False
+        self._needs_active_probe = True
+        self._last_probe_at = 0.0
+        self._last_extension_instance = ""
         self.captchas_solved = 0
 
     def __enter__(self) -> ChromeExtensionBrowser:
@@ -419,10 +567,51 @@ class ChromeExtensionBrowser:
         if self._owns_notifier:
             self.notifier.close()
 
+    def preflight(self, *, force: bool = False) -> dict[str, Any]:
+        """Prove that Chrome can render Avito without clicking or consuming a row."""
+        snapshot = self.bridge.health_snapshot()
+        instance = str(snapshot.get("extension_instance", ""))
+        probe_age = max(0.0, time.monotonic() - self._last_probe_at)
+        active_probe_required = (
+            force
+            or self._needs_active_probe
+            or not snapshot.get("connected")
+            or snapshot.get("extension_version") != EXPECTED_EXTENSION_VERSION
+            or not instance
+            or instance != self._last_extension_instance
+            or probe_age > self.settings.avito_extension_health_ttl
+        )
+        if not active_probe_required:
+            return snapshot
+
+        event = self.bridge.health_probe()
+        if event.status == "manual_required":
+            self._needs_active_probe = True
+            raise ManualActionRequired(
+                str(event.payload.get("reason", "Avito требует ручной проверки"))
+            )
+        if event.status != "healthy":
+            self._needs_active_probe = True
+            raise BrowserInfrastructureError(
+                str(
+                    event.payload.get(
+                        "reason",
+                        "Предстартовая проверка Chrome/расширения не пройдена",
+                    )
+                )
+            )
+
+        snapshot = self.bridge.health_snapshot()
+        self._last_probe_at = time.monotonic()
+        self._last_extension_instance = str(snapshot.get("extension_instance", ""))
+        self._needs_active_probe = False
+        return snapshot
+
     def reveal_phone(self, url: str, row_id: str = "", *, max_clicks: int = 2) -> PhoneResult:
         if max_clicks not in {1, 2}:
             raise ValueError("max_clicks должен быть равен 1 или 2")
         canonical_url = canonical_avito_url(url)
+        self.preflight()
         self._manual_notified = False
         self._manual_pending = False
         self._manual_backup_alerted = False
@@ -435,6 +624,9 @@ class ChromeExtensionBrowser:
             )
         except OperatorStopRequested:
             self._notify_captcha_stopped(canonical_url)
+            raise
+        except PageNotReadyError:
+            self._needs_active_probe = True
             raise
         status = event.status
         payload = event.payload
@@ -459,6 +651,24 @@ class ChromeExtensionBrowser:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
             return self.ocr.read_viewport_png(png)
+        if status in {"browser_infra", "page_not_ready", "stale_content_script"}:
+            self._needs_active_probe = True
+            raise BrowserInfrastructureError(
+                str(
+                    payload.get(
+                        "reason",
+                        "Страница объявления не успела полностью отобразиться",
+                    )
+                )
+            )
+        if status == "listing_mismatch":
+            raise ListingNavigationError(
+                str(payload.get("reason", "Avito открыл другое объявление"))
+            )
+        if status == "click_not_effective":
+            raise ClickNotEffectiveError(
+                str(payload.get("reason", "Avito не подтвердил раскрытие номера"))
+            )
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
         if status == "button_missing":
@@ -516,8 +726,12 @@ class ChromeExtensionBrowser:
             )
         elif event.status == "clicking":
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
-        elif event.status == "clicked":
-            LOGGER.info("Обычный Chrome: команда клика отправлена")
+        elif event.status == "click_dispatched":
+            LOGGER.info("Обычный Chrome: UI-gesture клик отправлен; ожидаем изменение DOM")
+        elif event.status == "click_recovery":
+            LOGGER.warning("Обычный Chrome: первый клик не подтверждён; один повтор")
+        elif event.status == "reveal_confirmed":
+            LOGGER.info("Обычный Chrome: раскрытие номера подтверждено DOM")
 
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:
@@ -544,30 +758,77 @@ class ChromeExtensionBrowser:
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         return self.settings.screenshot_dir / f"{stamp}-{digest}-{suffix}.png"
 
-    def _read_screen_capture(self, _crop: dict[str, Any], url: str) -> PhoneResult:
+    def _read_screen_capture(self, crop: dict[str, Any], url: str) -> PhoneResult:
         recognized: dict[str, tuple[int, PhoneResult]] = {}
         errors: list[str] = []
+        blank_full_frames = 0
+
+        def confirm(result: PhoneResult, source: str) -> PhoneResult | None:
+            count, _previous = recognized.get(result.phone, (0, result))
+            recognized[result.phone] = (count + 1, result)
+            if count + 1 < 2:
+                return None
+            result.source = source
+            return result
+
         for attempt in range(1, 4):
             if attempt > 1:
                 time.sleep(0.8)
+
+            # The extension knows the exact on-screen rectangle where Avito
+            # replaced the button with the image-rendered phone. OCR that small
+            # area first: it is both faster and substantially more reliable than
+            # searching the whole desktop.
+            region_png = _capture_interactive_desktop_png(crop)
+            region_artifact = self._artifact_path(url, f"extension-phone-{attempt}")
+            region_artifact.parent.mkdir(parents=True, exist_ok=True)
+            region_artifact.write_bytes(region_png)
+            if not _is_nearly_blank_capture(region_png):
+                try:
+                    region_result = self.ocr.read_png(
+                        region_png,
+                        artifact_path=region_artifact,
+                        psm=7,
+                    )
+                except PhoneNotFoundError as exc:
+                    errors.append(str(exc))
+                else:
+                    confirmed = confirm(
+                        region_result,
+                        "ocr-confirmed-avito-region",
+                    )
+                    if confirmed is not None:
+                        return confirmed
+                    # Confirm the same phone from a fresh frame before accepting
+                    # it. Do not dilute a successful exact-region result with a
+                    # broad desktop scan.
+                    continue
+
             png = _capture_interactive_desktop_png()
             artifact = self._artifact_path(url, f"extension-screen-{attempt}")
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
+            if _is_nearly_blank_capture(png, viewport=True):
+                blank_full_frames += 1
+                errors.append("страница объявления ещё не отобразилась")
+                continue
             try:
                 result = self.ocr.read_avito_screen_png(png)
             except PhoneNotFoundError as exc:
                 errors.append(str(exc))
                 continue
-            count, _previous = recognized.get(result.phone, (0, result))
-            recognized[result.phone] = (count + 1, result)
-            if count + 1 >= 2:
-                result.source = "ocr-confirmed-avito-screen"
-                return result
+            confirmed = confirm(result, "ocr-confirmed-avito-screen")
+            if confirmed is not None:
+                return confirmed
         if recognized:
             raise PhoneNotFoundError(
                 "OCR увидел номер только на одном из трёх снимков; "
                 "результат отклонён как неподтверждённый"
+            )
+        if blank_full_frames >= 2:
+            raise PageNotReadyError(
+                "Страница объявления не успела отобразиться в обычном Chrome; "
+                "строка будет повторена без расходования попытки открытия номера"
             )
         detail = errors[-1] if errors else "номер не попал в проверенные области"
         raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках экрана: {detail}")
@@ -650,3 +911,141 @@ def _capture_interactive_desktop_png(crop: object = None) -> bytes:
         return buffer.getvalue()
     except Exception as exc:
         raise BrowserOperationError(f"Не удалось сделать снимок экрана Windows: {exc}") from exc
+
+
+def _is_nearly_blank_capture(png: bytes, *, viewport: bool = False) -> bool:
+    """Return True only for a virtually empty, light browser surface."""
+    try:
+        from PIL import Image, ImageStat
+
+        image = Image.open(io.BytesIO(png)).convert("L")
+        if viewport and image.width > 100 and image.height > 100:
+            # Ignore Chrome chrome and the Windows taskbar. The failed captures
+            # contain those controls but an entirely blank page viewport.
+            image = image.crop(
+                (
+                    round(image.width * 0.03),
+                    round(image.height * 0.12),
+                    round(image.width * 0.97),
+                    round(image.height * 0.92),
+                )
+            )
+        image.thumbnail((320, 180))
+        stats = ImageStat.Stat(image)
+        return stats.mean[0] >= 246 and stats.stddev[0] <= 5
+    except Exception:
+        # Screenshot validation must never mask the normal OCR error path.
+        return False
+
+
+_DIAGNOSTIC_KEYS = frozenset(
+    {
+        "actualId",
+        "actualListingId",
+        "actualSurface",
+        "attempts",
+        "auth",
+        "bodyLength",
+        "classification",
+        "content",
+        "contentInjectionAttempted",
+        "contentInjectionStatus",
+        "contentVersion",
+        "discarded",
+        "elapsedMs",
+        "expectedId",
+        "expectedListingId",
+        "inactive",
+        "hasPhone",
+        "hasPhoneButton",
+        "manual",
+        "mode",
+        "navigation",
+        "probe",
+        "probeError",
+        "pendingSurface",
+        "readyState",
+        "reason",
+        "recovered",
+        "rendered",
+        "stage",
+        "status",
+        "stableForMs",
+        "stableSamples",
+        "tabId",
+        "tabStatus",
+        "visibleHeadings",
+    }
+)
+
+_SURFACE_CLASSES = frozenset(
+    {
+        "empty",
+        "about:blank",
+        "avito:manual",
+        "avito:listing",
+        "avito:root",
+        "avito:path",
+        "http:other",
+        "https:other",
+        "chrome:other",
+        "chrome-extension:other",
+        "other",
+        "invalid",
+    }
+)
+_CONTENT_INJECTION_STATUSES = frozenset(
+    {
+        "not_needed",
+        "stale_content_reload",
+        "injected",
+        "tab_lookup_failed",
+        "skipped_tab_unavailable",
+        "skipped_navigation_pending",
+        "skipped_document_unavailable",
+        "skipped_unexpected_surface",
+        "execute_failed",
+    }
+)
+
+
+def _listing_id_for_diagnostic(url: str) -> str:
+    """Return only the public numeric Avito id; never persist a full URL."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return ""
+    match = re.search(r"_(\d+)(?:/)?$", path)
+    return match.group(1) if match else ""
+
+
+def _safe_extension_diagnostics(
+    diagnostics: dict[str, Any],
+    *,
+    _depth: int = 0,
+) -> dict[str, Any]:
+    """Bound and allowlist extension telemetry before writing it to disk."""
+    if _depth >= 4:
+        return {}
+    safe: dict[str, Any] = {}
+    for key, value in diagnostics.items():
+        if key not in _DIAGNOSTIC_KEYS:
+            continue
+        if isinstance(value, dict):
+            safe[key] = _safe_extension_diagnostics(value, _depth=_depth + 1)
+        elif isinstance(value, list):
+            safe[key] = [
+                _safe_extension_diagnostics(item, _depth=_depth + 1)
+                for item in value[:3]
+                if isinstance(item, dict)
+            ]
+        elif isinstance(value, str):
+            if key in {"actualSurface", "pendingSurface"}:
+                safe[key] = value if value in _SURFACE_CLASSES else "invalid"
+            elif key == "contentInjectionStatus":
+                safe[key] = value if value in _CONTENT_INJECTION_STATUSES else "unknown"
+            else:
+                safe[key] = value[:300]
+        elif isinstance(value, (bool, int, float)) or value is None:
+            safe[key] = value
+    return safe

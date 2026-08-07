@@ -34,6 +34,22 @@ class BrowserOperationError(AppError):
     """A browser or page-loading operation failed for a technical reason."""
 
 
+class PageNotReadyError(BrowserOperationError):
+    """The requested Avito listing did not finish navigation or rendering."""
+
+
+class BrowserInfrastructureError(PageNotReadyError):
+    """Chrome, its renderer, or the extension bridge failed before a listing attempt."""
+
+
+class ListingNavigationError(AppError):
+    """Avito completed navigation on a different listing than the queue requested."""
+
+
+class ClickNotEffectiveError(AppError):
+    """Chrome dispatched the bounded click sequence but Avito did not reveal a phone."""
+
+
 class ManualActionRequired(AppError):
     """The browser needs operator attention before automation may continue."""
 

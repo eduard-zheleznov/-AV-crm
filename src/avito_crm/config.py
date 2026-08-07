@@ -119,6 +119,8 @@ class Settings:
     avito_extension_port: int
     avito_extension_token: str
     avito_extension_connect_timeout: float
+    avito_extension_health_ttl: float
+    avito_extension_recovery_backoff: float
     screenshot_dir: Path
 
     lptracker_base_url: str
@@ -270,6 +272,10 @@ class Settings:
             avito_extension_port=_int("AVITO_EXTENSION_PORT", 8765) or 8765,
             avito_extension_token=os.getenv("AVITO_EXTENSION_TOKEN", "").strip(),
             avito_extension_connect_timeout=_float("AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS", 30.0),
+            avito_extension_health_ttl=_float("AVITO_EXTENSION_HEALTH_TTL_SECONDS", 30.0),
+            avito_extension_recovery_backoff=_float(
+                "AVITO_EXTENSION_RECOVERY_BACKOFF_SECONDS", 5.0
+            ),
             screenshot_dir=Path(os.getenv("AVITO_SCREENSHOT_DIR", output / "diagnostics"))
             .expanduser()
             .resolve(),
@@ -567,6 +573,12 @@ class Settings:
         if self.avito_extension_connect_timeout <= 0:
             raise ConfigurationError(
                 "AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS должен быть больше нуля"
+            )
+        if not 5 <= self.avito_extension_health_ttl <= 300:
+            raise ConfigurationError("AVITO_EXTENSION_HEALTH_TTL_SECONDS должен быть от 5 до 300")
+        if not 1 <= self.avito_extension_recovery_backoff <= 60:
+            raise ConfigurationError(
+                "AVITO_EXTENSION_RECOVERY_BACKOFF_SECONDS должен быть от 1 до 60"
             )
         if self.avito_browser_driver == "chrome_extension" and len(self.avito_extension_token) < 32:
             raise ConfigurationError(

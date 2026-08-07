@@ -4,9 +4,12 @@ from dataclasses import replace
 import pytest
 
 from avito_crm.errors import (
+    BrowserInfrastructureError,
     BrowserOperationError,
+    ClickNotEffectiveError,
     CrmError,
     InactiveListingError,
+    ListingNavigationError,
     OperatorStopRequested,
     PhoneButtonUnavailableError,
     PhoneNotFoundError,
@@ -181,7 +184,27 @@ class WindowClosingQueue(RoundQueue):
 
     def is_local_window_open(self, item, *, now=None):
         self.window_checks += 1
-        return self.window_checks < 3
+        # Initial discovery, eligibility filtering and the pre-row guard remain
+        # open. The fourth check happens after OCR, immediately before CRM write.
+        return self.window_checks < 4
+
+
+class MixedWindowQueue(RoundQueue):
+    """The first selected row expires, while the next timezone remains safe."""
+
+    def __init__(self, settings):
+        super().__init__(settings, count=2)
+        self.window_checks: dict[str, int] = {}
+
+    def list_all(self):
+        return self.items
+
+    def is_local_window_open(self, item, *, now=None):
+        checks = self.window_checks.get(item.row_id, 0) + 1
+        self.window_checks[item.row_id] = checks
+        if item.row_id == "2":
+            return checks == 1
+        return True
 
 
 class FakeOcr:
@@ -251,6 +274,106 @@ def test_normal_listing_outcomes_are_terminal_not_technical_errors(
     assert getattr(summary, counter) == 1
     assert summary.errors == 0
     assert summary.rounds == 1
+
+
+def test_wrong_listing_redirect_is_invalid_not_browser_infra(tmp_path, settings, monkeypatch):
+    source = RoundQueue(settings)
+    browser = SequencedBrowser({"2": [ListingNavigationError("другое объявление")]})
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert source.items[0].status == ItemStatus.INVALID
+    assert summary.invalid == 1
+    assert summary.errors == 0
+
+
+def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, settings, monkeypatch):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+    )
+    source = RoundQueue(configured)
+
+    class FailedCanaryBrowser:
+        captchas_solved = 0
+
+        def preflight(self, *, force=False):
+            assert force is True
+            raise BrowserInfrastructureError("renderer не отвечает")
+
+        def reveal_phone(self, *_args, **_kwargs):
+            raise AssertionError("Строка не должна открываться до canary")
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.ChromeExtensionBrowser",
+        lambda *_args, **_kwargs: nullcontext(FailedCanaryBrowser()),
+    )
+
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            configured,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(10)
+
+    assert summary.inspected == 0
+    assert summary.processed == 0
+    assert source.patches == []
+    assert summary.stopped_reason.startswith("Предстартовая проверка")
+
+
+def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
+    tmp_path, settings, monkeypatch
+):
+    source = RoundQueue(settings, count=2)
+    browser = SequencedBrowser(
+        {
+            "2": [ClickNotEffectiveError("кнопка не раскрылась")],
+            "3": ["+79997654321"],
+        }
+    )
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2", "3"]
+    assert source.items[0].status == ItemStatus.RETRY_TECHNICAL
+    assert source.items[0].attempts == 0
+    assert source.items[1].status == ItemStatus.CAPTURED
+    assert summary.processed == 2
+    assert summary.captured == 1
+    assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
+
+
+def test_ineffective_click_stops_after_consecutive_failure_limit(
+    tmp_path, settings, monkeypatch
+):
+    settings = replace(settings, max_consecutive_failures=2)
+    source = RoundQueue(settings, count=3)
+    browser = SequencedBrowser(
+        {
+            "2": [ClickNotEffectiveError("кнопка не раскрылась")],
+            "3": [ClickNotEffectiveError("кнопка не раскрылась")],
+            "4": ["+79997654321"],
+        }
+    )
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2", "3"]
+    assert source.items[0].status == ItemStatus.RETRY_TECHNICAL
+    assert source.items[1].status == ItemStatus.RETRY_TECHNICAL
+    assert source.items[0].attempts == 0
+    assert source.items[1].attempts == 0
+    assert source.items[2].status == ""
+    assert summary.processed == 2
+    assert summary.stopped_reason == (
+        "Аварийная остановка после 2 последовательных неподтверждённых кликов Chrome"
+    )
 
 
 def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
@@ -590,6 +713,38 @@ def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, setting
     assert source.items[0].status == ItemStatus.PENDING
     assert source.items[0].attempts == 0
     assert source.items[0].values[source.columns.phone] == ""
+    assert summary.captured_time_deferred == 1
+    assert summary.stopped_reason.startswith("Отложено по времени")
+
+
+def test_expired_row_does_not_stop_a_later_safe_timezone(
+    tmp_path, settings, monkeypatch
+):
+    source = MixedWindowQueue(settings)
+    browser = SequencedBrowser({"3": ["+79997654321"]})
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+
+    with StateStore(tmp_path / "mixed-window-state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="capture",
+            live=True,
+        ).run(10)
+
+    assert browser.calls == ["3"]
+    assert source.items[0].status in ("", ItemStatus.PENDING)
+    assert source.items[1].status == ItemStatus.CAPTURED
+    assert summary.time_deferred == 1
+    assert summary.captured == 1
+    # The safe row must be processed first; only then may the run stop because
+    # every row still left in the queue is outside its own local-time window.
     assert summary.stopped_reason.startswith("Отложено по времени")
 
 

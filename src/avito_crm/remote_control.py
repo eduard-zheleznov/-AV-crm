@@ -144,6 +144,9 @@ class CommandState:
     base_inspected: int = 0
     base_no_answer_synced: int = 0
     base_time_deferred: int = 0
+    base_captured_time_deferred: int = 0
+    base_recovered: int = 0
+    base_crm_write_failed: int = 0
     completion_notified: bool = False
     result: dict[str, Any] = field(default_factory=dict)
 
@@ -171,6 +174,9 @@ class ProgressSnapshot:
     no_answer_synced: int = 0
     crm_sync_errors: int = 0
     time_deferred: int = 0
+    captured_time_deferred: int = 0
+    recovered: int = 0
+    crm_write_failed: int = 0
     row_id: str = ""
 
 
@@ -1433,6 +1439,9 @@ class RemoteController:
         state.base_inspected = recovered.inspected
         state.base_no_answer_synced = recovered.no_answer_synced
         state.base_time_deferred = recovered.time_deferred
+        state.base_captured_time_deferred = recovered.captured_time_deferred
+        state.base_recovered = recovered.recovered
+        state.base_crm_write_failed = recovered.crm_write_failed
         if state.max_inspected <= 0:
             state.max_inspected = _effective_max_inspected(state.target, 0)
         self._progress = recovered
@@ -1564,6 +1573,11 @@ class RemoteController:
                 no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
                 crm_sync_errors=summary.crm_sync_errors,
                 time_deferred=state.base_time_deferred + summary.time_deferred,
+                captured_time_deferred=(
+                    state.base_captured_time_deferred + summary.captured_time_deferred
+                ),
+                recovered=state.base_recovered + summary.recovered,
+                crm_write_failed=state.base_crm_write_failed + summary.crm_write_failed,
                 row_id=row_id,
             )
 
@@ -1688,6 +1702,9 @@ class RemoteController:
             "no_answer_synced": progress.no_answer_synced,
             "crm_sync_errors": progress.crm_sync_errors,
             "time_deferred": progress.time_deferred,
+            "captured_time_deferred": progress.captured_time_deferred,
+            "recovered": progress.recovered,
+            "crm_write_failed": progress.crm_write_failed,
             "max_inspected": state.max_inspected,
             "command_id": state.command_id,
         }
@@ -1742,6 +1759,11 @@ class RemoteController:
             no_answer_synced=int(result.get("no_answer_synced", 0) or 0),
             crm_sync_errors=int(result.get("crm_sync_errors", 0) or 0),
             time_deferred=int(result.get("time_deferred", 0) or 0),
+            captured_time_deferred=int(
+                result.get("captured_time_deferred", 0) or 0
+            ),
+            recovered=int(result.get("recovered", 0) or 0),
+            crm_write_failed=int(result.get("crm_write_failed", 0) or 0),
             stopped_reason=reason,
         )
         try:

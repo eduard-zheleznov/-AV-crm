@@ -832,6 +832,35 @@ def test_manual_notification_does_not_repeat_after_transient_error(settings):
     assert notices == [("700", "ambiguous phone")]
 
 
+def test_ambiguous_number_manual_review_is_silent_but_recorded(settings):
+    configured = replace(settings, gemini_api_key="test-only-key")
+    crm = FakeCrm(_lead())
+
+    class AmbiguousTranscriber:
+        def transcribe(self, _url: str) -> TranscriptionResult:
+            raise ManualReviewRequired(
+                "В разговоре не найден один однозначно продиктованный номер"
+            )
+
+    notices: list[tuple[str, str]] = []
+    with StateStore(configured.state_db) as state:
+        handler = RobotLeadHandoff(
+            configured,
+            state,
+            crm=crm,
+            transcriber=AmbiguousTranscriber(),
+            manual_notifier=lambda lead_id, reason: notices.append((lead_id, reason)),
+        )
+        summary = handler.run_once(apply=True, lead_id=700)
+
+    assert summary.manual_required == 1
+    assert summary.details == [
+        "Лид 700: ручная проверка — "
+        "В разговоре не найден один однозначно продиктованный номер"
+    ]
+    assert notices == []
+
+
 def test_completed_lead_is_idempotently_skipped_on_second_run(settings):
     configured = replace(settings, gemini_api_key="test-only-key")
     crm = FakeCrm(_lead())

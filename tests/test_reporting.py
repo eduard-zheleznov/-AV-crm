@@ -24,9 +24,11 @@ def test_compact_report_uses_the_requested_funnel_and_denominators():
     assert "3) Лидов создано: 3 (50% от открытых)" in report
     assert "Почему из открытых номеров не создан новый лид (3)" in report
     assert "Дубликаты / номер уже есть в CRM: 0 (0%)" in report
-    assert "Другое — требуется проверить журнал: 3 (100%)" in report
+    assert "Не завершена запись CRM до остановки: 3 (100%)" in report
     assert "Сколько чего из неоткрытых номеров (4)" in report
-    assert "- Другое: 1 (25%)" in report
+    assert "Неактивные / снятые объявления: 1 (25%)" in report
+    assert "Номер показан, но OCR не распознал: 1 (25%)" in report
+    assert "Другое" not in report
     assert "За запуск решено капч: 2 (20% от ссылок)" in report
     assert report.endswith(summary.stopped_reason)
 
@@ -63,7 +65,8 @@ def test_compact_report_separates_time_deferred_rows_from_unopened_other():
     report = format_run_report(summary, reason=summary.stopped_reason)
 
     assert "Сколько чего из неоткрытых номеров (1)" in report
-    assert "- Другое: 0 (0%)" in report
+    assert "Без кнопки телефона: 1 (100%)" in report
+    assert "Другое" not in report
     assert "Отложено по местному времени: 2" in report
     assert "в CRM не передавались" in report
 
@@ -89,7 +92,42 @@ def test_compact_report_says_yes_only_for_full_opened_to_crm_conversion():
     assert "да — 56%" not in partial
     assert "Почему из открытых номеров не создан новый лид (15)" in partial
     assert "Дубликаты / номер уже есть в CRM: 15 (100%)" in partial
-    assert "Другое — требуется проверить журнал: 0 (0%)" in partial
+    assert "Другое" not in partial
+
+
+def test_compact_report_reconciles_every_unopened_and_opened_without_lead_row():
+    summary = RunSummary(
+        run_id="reconciled",
+        requested=92,
+        processed=44,
+        captured=35,
+        created=29,
+        inactive=3,
+        phone_failed=2,
+        errors=4,
+        crm_write_failed=2,
+        captured_time_deferred=1,
+        recovered=1,
+        duplicates=1,
+        time_deferred=48,
+        crm_sync_errors=1,
+        stopped_reason="Остановлено оператором",
+    )
+
+    report = format_run_report(summary, reason=summary.stopped_reason)
+
+    assert "Сколько чего из неоткрытых номеров (9)" in report
+    assert "Неактивные / снятые объявления: 3 (33%)" in report
+    assert "Номер показан, но OCR не распознал: 2 (22%)" in report
+    assert "Технические ошибки загрузки: 2 (22%)" in report
+    assert "Не завершены до остановки: 2 (22%)" in report
+    assert "Почему из открытых номеров не создан новый лид (6)" in report
+    assert "Дубликаты / номер уже есть в CRM: 1 (17%)" in report
+    assert "Связаны с ранее созданным лидом: 1 (17%)" in report
+    assert "Открыты после границы времени и отложены: 1 (17%)" in report
+    assert "Ошибка записи в CRM: 2 (33%)" in report
+    assert "Не завершена запись CRM до остановки: 1 (17%)" in report
+    assert "Другое" not in report
 
 
 def test_compact_report_only_expands_attention_lines_when_needed():

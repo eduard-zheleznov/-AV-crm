@@ -1,3 +1,11 @@
+(function initializeAvitoContentScript(globalObject) {
+"use strict";
+
+const INSTALLED_CONTENT_VERSION = chrome.runtime.getManifest().version;
+if (globalObject.AVITO_CRM_CONTENT_SCRIPT_VERSION === INSTALLED_CONTENT_VERSION) {
+  return;
+}
+
 const STRONG_CHALLENGE_PATTERNS = [
   "доступ временно ограничен",
   "проблема с ip",
@@ -27,14 +35,24 @@ const INACTIVE_PATTERNS = [
   ["страница не найдена", "страница объявления не найдена"],
   ["объявление больше не актуально", "объявление больше не актуально"]
 ];
+const CONTENT_SCRIPT_VERSION = INSTALLED_CONTENT_VERSION;
 const PHONE_BUTTON_RE = /(?:показать\s+(?:номер(?:\s+телефона)?|телефон)|позвонить)/i;
-const PHONE_RE = /(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}/g;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+let activeRevealCommandId = null;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "avito_crm_probe") {
+    sendResponse(probePage(message.expectedUrl, message.mode));
+    return false;
+  }
   if (message?.type !== "avito_crm_reveal_once") {
     return false;
   }
+  if (activeRevealCommandId && activeRevealCommandId !== message.commandId) {
+    sendResponse({ status: "error", reason: "Другая команда уже активна" });
+    return false;
+  }
+  activeRevealCommandId = message.commandId;
   revealOnce(message)
     .then((result) => sendResponse(result))
     .catch((error) =>
@@ -42,14 +60,41 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         status: "error",
         reason: error?.message ? error.message.slice(0, 300) : String(error).slice(0, 300)
       })
-    );
+    )
+    .finally(() => {
+      if (activeRevealCommandId === message.commandId) {
+        activeRevealCommandId = null;
+      }
+    });
   return true;
 });
 
 async function revealOnce(command) {
+  if (
+    command.expectedContentVersion &&
+    command.expectedContentVersion !== CONTENT_SCRIPT_VERSION
+  ) {
+    return {
+      status: "stale_content_script",
+      reason: "Content script Chrome не совпадает с версией расширения"
+    };
+  }
   const manualResult = await waitForManualAction(command.manualTimeoutMs);
   if (manualResult) {
     return manualResult;
+  }
+
+  const pageReady = await waitForTargetReady(command.expectedUrl, command.pageTimeoutMs);
+  if (!pageReady) {
+    return {
+      status: "page_not_ready",
+      reason: "Страница объявления не успела полностью отобразиться"
+    };
+  }
+
+  const lateManualResult = await waitForManualAction(command.manualTimeoutMs);
+  if (lateManualResult) {
+    return lateManualResult;
   }
 
   const inactive = inactiveReason();
@@ -62,27 +107,184 @@ async function revealOnce(command) {
     return { status: "phone", phone: existing, source: "chrome-extension-dom" };
   }
 
-  const button = await waitForPhoneButton(Math.min(10000, command.phoneWaitMs));
+  const button = await waitForStablePhoneButton(Math.min(12000, command.phoneWaitMs));
   if (!button) {
-    if (hasTemporaryNumberLabel()) {
-      return { status: "screenshot", crop: captureRegion(null, null) };
-    }
     return { status: "button_missing", reason: "Кнопка показа телефона не найдена" };
   }
 
-  button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
-  await delay(750);
-  const phoneRegion = screenRegion(button);
-  button.focus({ preventScroll: true });
-  notifyStatus("clicking", "кнопка показа телефона найдена");
-  button.click();
-  notifyStatus("clicked", "команда клика отправлена");
+  return await revealWithVerifiedClick(button, command);
+}
 
-  const deadline = Date.now() + Math.max(3000, command.phoneWaitMs);
+async function revealWithVerifiedClick(initialButton, command) {
+  const overallDeadline = Date.now() + Math.max(15000, Number(command.phoneWaitMs) || 10000);
+  let button = initialButton;
+  let phoneRegion = null;
+
+  for (let actionAttempt = 1; actionAttempt <= 2; actionAttempt += 1) {
+    button = await prepareClickTarget(button);
+    if (!button) {
+      if (actionAttempt === 1) {
+        notifyStatus("click_recovery", "кнопка будет найдена повторно");
+        await delay(500);
+        continue;
+      }
+      return clickNotEffective();
+    }
+    if (manualReason()) {
+      await waitForManualAction(command.manualTimeoutMs);
+      button = findPhoneButton();
+      actionAttempt -= 1;
+      continue;
+    }
+
+    const before = revealState(button);
+    phoneRegion = screenRegion(button);
+    const gate = await requestUserGestureClick(command);
+    if (!gate.ok) {
+      if (actionAttempt === 1) {
+        notifyStatus(
+          "click_recovery",
+          "Chrome UI-gesture gate не пройден; один bounded retry"
+        );
+        button = findPhoneButton();
+        await delay(500);
+        continue;
+      }
+      return browserClickUnavailable(gate.code);
+    }
+    notifyStatus(
+      "click_dispatched",
+      `Chrome UI-gesture отправлен; trusted=${Boolean(gate.eventTrusted)} ` +
+        `activation=${Boolean(gate.userActivation)} target=${gate.targetKind || "unknown"}`
+    );
+
+    const verificationDeadline =
+      actionAttempt === 1
+        ? Math.min(overallDeadline, Date.now() + 3000)
+        : overallDeadline;
+    const transition = await waitForRevealTransition(
+      before,
+      verificationDeadline,
+      command.manualTimeoutMs
+    );
+    if (transition.result) {
+      return transition.result;
+    }
+    if (transition.confirmed) {
+      notifyStatus("reveal_confirmed", "Avito подтвердил раскрытие номера");
+      return await waitForPhoneOrOcrFallback(
+        overallDeadline,
+        command.manualTimeoutMs,
+        button,
+        phoneRegion
+      );
+    }
+    if (actionAttempt === 1) {
+      notifyStatus(
+        "click_recovery",
+        "первый Chrome UI-gesture не изменил DOM; один bounded retry"
+      );
+      button = findPhoneButton();
+      await delay(500);
+    }
+  }
+  return clickNotEffective();
+}
+
+async function prepareClickTarget(candidate) {
+  let button = candidate?.isConnected ? candidate : findPhoneButton();
+  if (!button) {
+    return null;
+  }
+  button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
+  await delay(500);
+  button = await waitForStablePhoneButton(2500);
+  if (!button) {
+    return null;
+  }
+  button.focus({ preventScroll: true });
+  await delay(100);
+  return isActionableClickTarget(button) ? button : null;
+}
+
+function isActionableClickTarget(button) {
+  if (
+    !button?.isConnected ||
+    !isVisibleInViewport(button) ||
+    button.disabled ||
+    button.getAttribute("aria-disabled") === "true"
+  ) {
+    return false;
+  }
+  const rect = button.getBoundingClientRect();
+  const centerX = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+  const centerY = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+  const topElement = document.elementFromPoint(centerX, centerY);
+  return Boolean(
+    topElement &&
+      (topElement === button || button.contains(topElement))
+  );
+}
+
+async function requestUserGestureClick(command) {
+  const request = chrome.runtime.sendMessage({
+    type: "avito_crm_browser_click",
+    commandId: command.commandId,
+    activation: "ui_eval"
+  });
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(
+      () => resolve({ ok: false, code: "browser_click_rpc_timeout" }),
+      10000
+    );
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } catch (_error) {
+    return { ok: false, code: "browser_click_rpc_failed" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function waitForRevealTransition(before, deadline, manualTimeoutMs) {
   while (Date.now() < deadline) {
-    const afterClickManual = await waitForManualAction(command.manualTimeoutMs);
-    if (afterClickManual) {
-      return afterClickManual;
+    const manualResult = await waitForManualAction(manualTimeoutMs);
+    if (manualResult) {
+      return { confirmed: false, result: manualResult };
+    }
+    if (hasAnyText(TEMP_ERROR_PATTERNS)) {
+      return {
+        confirmed: false,
+        result: {
+          status: "phone_error",
+          reason: "Avito сообщил, что временный номер сейчас показать не удалось"
+        }
+      };
+    }
+    const after = revealState(findPhoneButton());
+    const transition = globalThis.AVITO_CRM_RUNTIME_CORE.classifyRevealTransition(before, after);
+    if (transition.status === "confirmed") {
+      if (after.phone) {
+        notifyStatus("reveal_confirmed", "Avito подтвердил DOM-номер");
+        return {
+          confirmed: true,
+          result: { status: "phone", phone: after.phone, source: "chrome-extension-dom" }
+        };
+      }
+      return { confirmed: true, result: null };
+    }
+    await delay(250);
+  }
+  return { confirmed: false, result: null };
+}
+
+async function waitForPhoneOrOcrFallback(deadline, manualTimeoutMs, button, phoneRegion) {
+  while (Date.now() < deadline) {
+    const manualResult = await waitForManualAction(manualTimeoutMs);
+    if (manualResult) {
+      return manualResult;
     }
     const phone = findPhone();
     if (phone) {
@@ -94,17 +296,34 @@ async function revealOnce(command) {
         reason: "Avito сообщил, что временный номер сейчас показать не удалось"
       };
     }
-    if (hasTemporaryNumberLabel()) {
-      await delay(500);
-      const finalPhone = findPhone();
-      if (finalPhone) {
-        return { status: "phone", phone: finalPhone, source: "chrome-extension-dom" };
-      }
-      return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
-    }
-    await delay(500);
+    await delay(250);
   }
   return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
+}
+
+function clickNotEffective(code = "dispatch_without_effect") {
+  return {
+    status: "click_not_effective",
+    reason:
+      "Avito не подтвердил раскрытие номера после двух bounded Chrome UI-gesture " +
+      `(${String(code).slice(0, 80)})`
+  };
+}
+
+function browserClickUnavailable(code) {
+  const safeCode = String(code || "browser_click_unavailable").slice(0, 80);
+  if (safeCode === "listing_mismatch") {
+    return {
+      status: "listing_mismatch",
+      reason: "Managed tab ушла с ожидаемого объявления до browser-level клика"
+    };
+  }
+  return {
+    status: "click_not_effective",
+    reason:
+      "Chrome UI-gesture недоступен после bounded повтора; " +
+      `неподтверждённый клик не засчитан (${safeCode})`
+  };
 }
 
 async function waitForManualAction(_timeoutMs) {
@@ -218,57 +437,214 @@ function hasTemporaryNumberLabel() {
 }
 
 function findPhone() {
-  for (const link of document.querySelectorAll('a[href^="tel:"]')) {
-    if (!isVisible(link)) {
+  const runtime = globalThis.AVITO_CRM_RUNTIME_CORE;
+  const attributeCandidates = document.querySelectorAll(
+    'a[href^="tel:"], [aria-label], [title], [data-phone], [data-marker*="phone" i]'
+  );
+  for (const element of attributeCandidates) {
+    if (!isVisible(element)) {
       continue;
     }
-    const fromHref = normalizePhone(link.getAttribute("href") || "");
-    if (fromHref) {
-      return fromHref;
-    }
-    const fromText = normalizePhone(link.textContent || "");
-    if (fromText) {
-      return fromText;
+    const phone = runtime.extractRussianPhone([
+      element.getAttribute("href"),
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-phone"),
+      element.getAttribute("value")
+    ]);
+    if (phone) {
+      return phone;
     }
   }
 
-  const selectors = [
+  const textSelectors = [
     '[data-marker*="phone" i]',
-    '[aria-label*="телефон" i]',
-    '[class*="phone" i]'
+    '[class*="phone" i]',
+    '[class*="contact" i]',
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    'button, a, [role="button"]'
+  ];
+  for (const element of document.querySelectorAll(textSelectors.join(","))) {
+    if (!isVisible(element)) {
+      continue;
+    }
+    const phone = runtime.extractRussianPhone([element.innerText, element.textContent]);
+    if (phone) {
+      return phone;
+    }
+  }
+
+  const bodyText = document.body?.innerText || "";
+  for (const pattern of ["временный номер", "телефон", "позвонить"]) {
+    let offset = bodyText.toLowerCase().indexOf(pattern);
+    while (offset >= 0) {
+      const context = bodyText.slice(Math.max(0, offset - 80), offset + pattern.length + 160);
+      const phone = normalizePhone(context);
+      if (phone) {
+        return phone;
+      }
+      offset = bodyText.toLowerCase().indexOf(pattern, offset + pattern.length);
+    }
+  }
+  return "";
+}
+
+function revealState(button) {
+  const currentButton = button?.isConnected ? button : findPhoneButton();
+  const metrics = phoneSurfaceMetrics();
+  const buttonLabel = currentButton
+    ? `${currentButton.innerText || currentButton.textContent || ""} ${currentButton.getAttribute("aria-label") || ""}`
+        .trim()
+        .toLowerCase()
+    : "";
+  return {
+    phone: findPhone(),
+    buttonPresent: Boolean(currentButton && isVisible(currentButton)),
+    buttonLooksReveal: PHONE_BUTTON_RE.test(buttonLabel),
+    buttonToken: buttonLabel,
+    revealedSurface: metrics.revealedSurface,
+    stateToken: `${metrics.surfaceCount}:${metrics.maskedCount}:${Number(metrics.temporaryLabel)}`
+  };
+}
+
+function phoneSurfaceMetrics() {
+  const runtime = globalThis.AVITO_CRM_RUNTIME_CORE;
+  let surfaceCount = 0;
+  let maskedCount = 0;
+  const selectors = [
+    'a[href^="tel:"]',
+    '[data-marker*="phone" i]',
+    '[class*="phone" i]',
+    '[class*="contact" i]',
+    '[role="dialog"]',
+    '[aria-modal="true"]'
   ];
   for (const element of document.querySelectorAll(selectors.join(","))) {
     if (!isVisible(element)) {
       continue;
     }
-    const phone = normalizePhone(element.textContent || element.getAttribute("aria-label") || "");
-    if (phone) {
-      return phone;
+    const label = `${element.innerText || element.textContent || ""} ${element.getAttribute("aria-label") || ""}`;
+    if (PHONE_BUTTON_RE.test(label)) {
+      continue;
+    }
+    if (
+      normalizePhone(label) ||
+      runtime.hasMaskedRussianPhone(label) ||
+      label.toLowerCase().includes("временный номер") ||
+      label.toLowerCase().includes("звонок через авито")
+    ) {
+      surfaceCount += 1;
+    }
+    if (runtime.hasMaskedRussianPhone(label)) {
+      maskedCount += 1;
     }
   }
-  const fromVisiblePage = normalizePhone(document.body?.innerText || "");
-  if (fromVisiblePage) {
-    return fromVisiblePage;
-  }
-  return "";
+  const temporaryLabel = hasTemporaryNumberLabel();
+  return {
+    surfaceCount,
+    maskedCount,
+    temporaryLabel,
+    revealedSurface: surfaceCount > 0 || maskedCount > 0
+  };
 }
 
-function findPhoneButton() {
+function findPhoneButtons() {
   const candidates = document.querySelectorAll(
     '[data-marker*="phone" i], button, a, [role="button"]'
   );
+  const matches = [];
+  const seen = new Set();
   for (const element of candidates) {
     const label = `${element.textContent || ""} ${element.getAttribute("aria-label") || ""}`;
-    if (
-      isVisible(element) &&
-      PHONE_BUTTON_RE.test(label) &&
-      !element.disabled &&
-      element.getAttribute("aria-disabled") !== "true"
-    ) {
-      return element.closest('button, a, [role="button"]') || element;
+    if (!isVisible(element) || !PHONE_BUTTON_RE.test(label)) {
+      continue;
     }
+    const button = element.closest('button, a, [role="button"]') || element;
+    if (
+      seen.has(button) ||
+      !isVisible(button) ||
+      button.disabled ||
+      button.getAttribute("aria-disabled") === "true"
+    ) {
+      continue;
+    }
+    seen.add(button);
+    matches.push(button);
+  }
+  return matches;
+}
+
+function findPhoneButton() {
+  const buttons = findPhoneButtons();
+  return buttons.find((button) => isActionableClickTarget(button)) || buttons[0] || null;
+}
+
+async function waitForStablePhoneButton(timeoutMs) {
+  const deadline = Date.now() + Math.max(1500, Number(timeoutMs) || 3000);
+  let previousButton = null;
+  let previousToken = "";
+  let stableSamples = 0;
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    const buttons = findPhoneButtons();
+    let button = buttons.find((candidate) => isActionableClickTarget(candidate)) || null;
+    if (!button && buttons.length) {
+      button = nearestViewportCandidate(buttons);
+      button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
+      previousButton = null;
+      previousToken = "";
+      stableSamples = 0;
+      stableSince = 0;
+      await delay(350);
+      continue;
+    }
+    const token = button && isActionableClickTarget(button) ? clickTargetToken(button) : "";
+    if (token && button === previousButton && token === previousToken) {
+      stableSamples += 1;
+    } else {
+      previousButton = button;
+      previousToken = token;
+      stableSamples = token ? 1 : 0;
+      stableSince = token ? Date.now() : 0;
+    }
+    if (
+      stableSamples >= 3 &&
+      stableSince &&
+      Date.now() - stableSince >= 600
+    ) {
+      return button;
+    }
+    await delay(300);
   }
   return null;
+}
+
+function nearestViewportCandidate(buttons) {
+  const centerY = window.innerHeight / 2;
+  return buttons.reduce((best, candidate) => {
+    const rect = candidate.getBoundingClientRect();
+    const distance = Math.abs(rect.top + rect.height / 2 - centerY);
+    if (!best || distance < best.distance) {
+      return { button: candidate, distance };
+    }
+    return best;
+  }, null).button;
+}
+
+function clickTargetToken(button) {
+  const rect = button.getBoundingClientRect();
+  const label = `${button.textContent || ""} ${button.getAttribute("aria-label") || ""}`
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return [
+    label,
+    Math.round(rect.left),
+    Math.round(rect.top),
+    Math.round(rect.width),
+    Math.round(rect.height)
+  ].join(":");
 }
 
 async function waitForPhoneButton(timeoutMs) {
@@ -283,16 +659,76 @@ async function waitForPhoneButton(timeoutMs) {
   return null;
 }
 
+async function waitForTargetReady(expectedUrl, timeoutMs) {
+  const waitMs = Math.max(3000, Math.min(15000, Number(timeoutMs) || 10000));
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (manualReason()) {
+      return true;
+    }
+    const probe = probePage(expectedUrl, "listing");
+    if (
+      probe.rendered &&
+      sameListingPath(location.href, expectedUrl)
+    ) {
+      return true;
+    }
+    await delay(250);
+  }
+  return false;
+}
+
+function hasRenderedListingSurface() {
+  if (inactiveReason() || findPhone() || findPhoneButton()) {
+    return true;
+  }
+  const bodyText = (document.body?.innerText || "").trim();
+  return (
+    bodyText.length > 200 &&
+    Array.from(document.querySelectorAll("h1")).some((heading) => isVisible(heading))
+  );
+}
+
+function sameListingPath(actualUrl, expectedUrl) {
+  return globalThis.AVITO_CRM_RUNTIME_CORE.sameListingIdentity(actualUrl, expectedUrl);
+}
+
+function probePage(expectedUrl, mode) {
+  const manual = Boolean(manualReason());
+  const auth = isAuthPage(location.href) || hasVisibleAuthDialog();
+  const inactive = Boolean(inactiveReason());
+  const visibleHeadings = Array.from(document.querySelectorAll("h1")).filter((heading) =>
+    isVisible(heading)
+  ).length;
+  const bodyLength = (document.body?.innerText || "").trim().length;
+  const phone = Boolean(findPhone());
+  const hasPhoneButton = findPhoneButtons().length > 0;
+  const rendered =
+    manual ||
+    auth ||
+    inactive ||
+    phone ||
+    hasPhoneButton ||
+    (bodyLength > 200 && visibleHeadings > 0) ||
+    (mode === "health" && bodyLength > 200);
+  return {
+    contentVersion: CONTENT_SCRIPT_VERSION,
+    actualUrl: location.href,
+    expectedUrl,
+    readyState: document.readyState,
+    rendered,
+    manual,
+    auth,
+    inactive,
+    bodyLength,
+    visibleHeadings,
+    hasPhone: phone,
+    hasPhoneButton
+  };
+}
+
 function normalizePhone(value) {
-  const match = String(value).match(PHONE_RE)?.[0];
-  if (!match) {
-    return "";
-  }
-  const digits = match.replace(/\D/g, "");
-  if (digits.length !== 11 || (digits[0] !== "7" && digits[0] !== "8")) {
-    return "";
-  }
-  return `+7${digits.slice(1)}`;
+  return globalThis.AVITO_CRM_RUNTIME_CORE.normalizeRussianPhone(value);
 }
 
 function screenRegion(element) {
@@ -381,3 +817,6 @@ function isVisibleInViewport(element) {
     rect.left < window.innerWidth
   );
 }
+
+globalObject.AVITO_CRM_CONTENT_SCRIPT_VERSION = CONTENT_SCRIPT_VERSION;
+})(globalThis);
