@@ -9,7 +9,12 @@ import pytest
 
 @pytest.mark.parametrize(
     "script_name",
-    ["test-runtime-core.cjs", "test-trusted-click.cjs"],
+    [
+        "test-runtime-core.cjs",
+        "test-content-bootstrap.cjs",
+        "test-navigation-core.cjs",
+        "test-trusted-click.cjs",
+    ],
 )
 def test_extension_runtime_core_offline_contract(script_name: str) -> None:
     node = shutil.which("node")

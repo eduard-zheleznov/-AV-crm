@@ -1,3 +1,11 @@
+(function initializeAvitoContentScript(globalObject) {
+"use strict";
+
+const INSTALLED_CONTENT_VERSION = chrome.runtime.getManifest().version;
+if (globalObject.AVITO_CRM_CONTENT_SCRIPT_VERSION === INSTALLED_CONTENT_VERSION) {
+  return;
+}
+
 const STRONG_CHALLENGE_PATTERNS = [
   "доступ временно ограничен",
   "проблема с ip",
@@ -27,7 +35,7 @@ const INACTIVE_PATTERNS = [
   ["страница не найдена", "страница объявления не найдена"],
   ["объявление больше не актуально", "объявление больше не актуально"]
 ];
-const CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version;
+const CONTENT_SCRIPT_VERSION = INSTALLED_CONTENT_VERSION;
 const PHONE_BUTTON_RE = /(?:показать\s+(?:номер(?:\s+телефона)?|телефон)|позвонить)/i;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -706,3 +714,6 @@ function isVisibleInViewport(element) {
     rect.left < window.innerWidth
   );
 }
+
+globalObject.AVITO_CRM_CONTENT_SCRIPT_VERSION = CONTENT_SCRIPT_VERSION;
+})(globalThis);

@@ -243,6 +243,7 @@ def test_manifest_matches_the_required_extension_version():
 
     assert manifest["version"] == EXPECTED_EXTENSION_VERSION
     assert "debugger" in manifest["permissions"]
+    assert "scripting" in manifest["permissions"]
 
 
 def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings):
@@ -251,12 +252,18 @@ def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings)
         "extension_result",
         url="https://www.avito.ru/moskva/secret-slug_123456789?token=do-not-log",
         diagnostics={
+            "actualSurface": "about:blank",
+            "pendingSurface": "avito:listing",
+            "contentInjectionAttempted": True,
+            "contentInjectionStatus": "injected",
             "contentVersion": EXPECTED_EXTENSION_VERSION,
             "actualUrl": "https://www.avito.ru/moskva/secret-slug_123456789",
             "attempts": [
                 {
                     "stage": "navigation",
                     "actualListingId": "123456789",
+                    "actualSurface": "https://www.avito.ru/moskva/secret-path",
+                    "contentInjectionStatus": "https://do-not-log.example",
                     "tabStatus": "loading",
                     "phone": "+79991234567",
                 }
@@ -268,7 +275,13 @@ def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings)
     record = json.loads(content)
     assert record["listing_id"] == "123456789"
     assert record["diagnostics"]["attempts"][0]["tabStatus"] == "loading"
+    assert record["diagnostics"]["attempts"][0]["actualSurface"] == "invalid"
+    assert record["diagnostics"]["attempts"][0]["contentInjectionStatus"] == "unknown"
     assert record["diagnostics"]["contentVersion"] == EXPECTED_EXTENSION_VERSION
+    assert record["diagnostics"]["actualSurface"] == "about:blank"
+    assert record["diagnostics"]["pendingSurface"] == "avito:listing"
+    assert record["diagnostics"]["contentInjectionAttempted"] is True
+    assert record["diagnostics"]["contentInjectionStatus"] == "injected"
     assert "https://" not in content
     assert "do-not-log" not in content
     assert "+79991234567" not in content
@@ -613,6 +626,20 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"Input.dispatchMouseEvent"' in trusted_click
     assert "chromeApi.debugger.attach" in trusted_click
     assert "chromeApi.debugger.detach" in trusted_click
+
+    service_worker = (
+        Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
+    ).read_text(encoding="utf-8")
+    assert "NAVIGATION.shouldInject" in service_worker
+    assert "NAVIGATION.injectContentFiles" in service_worker
+    assert "content_script_reload" not in service_worker
+
+    navigation_core = (
+        Path(__file__).parents[1] / "chrome-extension" / "navigation-core.js"
+    ).read_text(encoding="utf-8")
+    assert "chromeApi.scripting.executeScript" in navigation_core
+    assert '["runtime-core.js", "content.js"]' in navigation_core
+    assert 'raw === "about:blank"' in navigation_core
 
 
 def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):

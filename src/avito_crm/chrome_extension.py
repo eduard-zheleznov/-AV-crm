@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.10"
+EXPECTED_EXTENSION_VERSION = "1.0.11"
 
 
 @dataclass(slots=True)
@@ -942,11 +942,14 @@ _DIAGNOSTIC_KEYS = frozenset(
     {
         "actualId",
         "actualListingId",
+        "actualSurface",
         "attempts",
         "auth",
         "bodyLength",
         "classification",
         "content",
+        "contentInjectionAttempted",
+        "contentInjectionStatus",
         "contentVersion",
         "discarded",
         "elapsedMs",
@@ -958,6 +961,7 @@ _DIAGNOSTIC_KEYS = frozenset(
         "navigation",
         "probe",
         "probeError",
+        "pendingSurface",
         "readyState",
         "reason",
         "recovered",
@@ -967,6 +971,36 @@ _DIAGNOSTIC_KEYS = frozenset(
         "tabId",
         "tabStatus",
         "visibleHeadings",
+    }
+)
+
+_SURFACE_CLASSES = frozenset(
+    {
+        "empty",
+        "about:blank",
+        "avito:manual",
+        "avito:listing",
+        "avito:root",
+        "avito:path",
+        "http:other",
+        "https:other",
+        "chrome:other",
+        "chrome-extension:other",
+        "other",
+        "invalid",
+    }
+)
+_CONTENT_INJECTION_STATUSES = frozenset(
+    {
+        "not_needed",
+        "stale_content_reload",
+        "injected",
+        "tab_lookup_failed",
+        "skipped_tab_unavailable",
+        "skipped_navigation_pending",
+        "skipped_document_unavailable",
+        "skipped_unexpected_surface",
+        "execute_failed",
     }
 )
 
@@ -1002,7 +1036,12 @@ def _safe_extension_diagnostics(
                 if isinstance(item, dict)
             ]
         elif isinstance(value, str):
-            safe[key] = value[:300]
+            if key in {"actualSurface", "pendingSurface"}:
+                safe[key] = value if value in _SURFACE_CLASSES else "invalid"
+            elif key == "contentInjectionStatus":
+                safe[key] = value if value in _CONTENT_INJECTION_STATUSES else "unknown"
+            else:
+                safe[key] = value[:300]
         elif isinstance(value, (bool, int, float)) or value is None:
             safe[key] = value
     return safe

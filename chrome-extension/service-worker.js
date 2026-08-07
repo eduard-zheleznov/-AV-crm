@@ -1,11 +1,18 @@
-importScripts("config.local.js", "runtime-core.js", "trusted-click.js");
+importScripts(
+  "config.local.js",
+  "runtime-core.js",
+  "navigation-core.js",
+  "trusted-click.js"
+);
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
 const RUNTIME = globalThis.AVITO_CRM_RUNTIME_CORE;
+const NAVIGATION = globalThis.AVITO_CRM_NAVIGATION_CORE;
 const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
 const BROWSER_CLICK_API_TIMEOUT_MS = 1000;
+const CONTENT_SCRIPT_GRACE_MS = 1000;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
   ? {
@@ -408,7 +415,10 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   const startedAt = Date.now();
   const deadline = startedAt + Math.max(3000, Number(timeoutMs) || 45000);
   const initial = await chrome.tabs.get(tabId);
-  if (forceReload && isExpectedSurface(initial.url || "", expectedUrl, mode)) {
+  if (
+    forceReload &&
+    NAVIGATION.isExpectedSurface(initial.url || "", expectedUrl, mode, RUNTIME)
+  ) {
     await chrome.tabs.reload(tabId);
   } else {
     await chrome.tabs.update(tabId, { url: expectedUrl, active: true });
@@ -417,9 +427,36 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   let probe = null;
   let probeError = "";
   let staleContentReloaded = false;
+  let contentInjectionAttempted = false;
+  let contentInjectionStatus = "not_needed";
+  let committedSurfaceSince = 0;
   let classification = { status: "loading", reason: "navigation_started" };
   while (Date.now() < deadline) {
     tab = await chrome.tabs.get(tabId);
+    const contentGate = NAVIGATION.contentGate(tab, expectedUrl, mode, RUNTIME);
+    if (!contentGate.ok) {
+      committedSurfaceSince = 0;
+      probe = null;
+      classification =
+        contentGate.code === "unexpected_surface"
+          ? classifyWithoutContent(tab, expectedUrl, mode)
+          : {
+              status: "loading",
+              reason: contentGate.code,
+              actualUrl: tab?.url || ""
+            };
+      if (
+        classification.status === "manual_required" ||
+        classification.status === "listing_mismatch"
+      ) {
+        break;
+      }
+      await delay(500);
+      continue;
+    }
+    if (!committedSurfaceSince) {
+      committedSurfaceSince = Date.now();
+    }
     try {
       probe = await probeTab(tabId, expectedUrl, mode);
       probeError = "";
@@ -431,8 +468,12 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
         };
         if (!staleContentReloaded) {
           staleContentReloaded = true;
+          contentInjectionAttempted = false;
+          contentInjectionStatus = "stale_content_reload";
+          committedSurfaceSince = 0;
           await chrome.tabs.reload(tabId);
           await delay(500);
+          probe = null;
           continue;
         }
       } else {
@@ -449,19 +490,35 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
         };
       }
     } catch (error) {
+      probe = null;
       probeError = safeMessage(error);
-      if (!staleContentReloaded && isMissingContentScriptError(probeError)) {
-        staleContentReloaded = true;
-        classification = {
-          status: "loading",
-          reason: "content_script_reload",
-          actualUrl: tab?.url || ""
-        };
-        await chrome.tabs.reload(tabId).catch(() => undefined);
-        await delay(500);
+      const missingReceiver = isMissingContentScriptError(probeError);
+      classification = classifyWithoutContent(tab, expectedUrl, mode);
+      const injectionDecision = NAVIGATION.shouldInject(
+        {
+          tab,
+          expectedUrl,
+          mode,
+          missingReceiver,
+          attempted: contentInjectionAttempted,
+          committedForMs: Date.now() - committedSurfaceSince,
+          graceMs: CONTENT_SCRIPT_GRACE_MS
+        },
+        RUNTIME
+      );
+      if (injectionDecision.ok) {
+        const recovery = await NAVIGATION.injectContentFiles(
+          chrome,
+          tabId,
+          expectedUrl,
+          mode,
+          RUNTIME
+        );
+        contentInjectionAttempted = contentInjectionAttempted || recovery.attempted;
+        contentInjectionStatus = recovery.status;
+        await delay(250);
         continue;
       }
-      classification = classifyWithoutContent(tab, expectedUrl, mode);
     }
     if (
       classification.status === "ready" ||
@@ -480,6 +537,8 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
     tabStatus: tab?.status || "unknown",
     discarded: Boolean(tab?.discarded),
     actualUrl: tab?.url || "",
+    actualSurface: NAVIGATION.surfaceClass(tab?.url || "", RUNTIME),
+    pendingSurface: NAVIGATION.surfaceClass(tab?.pendingUrl || "", RUNTIME),
     expectedListingId: RUNTIME.listingId(expectedUrl),
     actualListingId: RUNTIME.listingId(tab?.url || ""),
     classification,
@@ -495,7 +554,9 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
           contentVersion: probe.contentVersion
         }
       : null,
-    probeError
+    probeError,
+    contentInjectionAttempted,
+    contentInjectionStatus
   };
   return { tab, classification, diagnostics };
 }
@@ -530,16 +591,6 @@ function classifyWithoutContent(tab, expectedUrl, mode) {
     }
   }
   return { status: "loading", reason: "content_script_unavailable", actualUrl };
-}
-
-function isExpectedSurface(actualUrl, expectedUrl, mode = "listing") {
-  if (RUNTIME.isManualSurface(actualUrl)) {
-    return true;
-  }
-  if (mode === "health") {
-    return Boolean(RUNTIME.avitoUrl(actualUrl));
-  }
-  return RUNTIME.sameListingIdentity(actualUrl, expectedUrl);
 }
 
 async function postEvent(payload) {

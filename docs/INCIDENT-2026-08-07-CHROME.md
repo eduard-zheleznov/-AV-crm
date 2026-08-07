@@ -123,3 +123,23 @@ Service worker проверяет текущие command ID, managed tab ID и A
 всегда снимает debugger в `finally`, допускает не более одного recovery и по-прежнему
 запрещает OCR без подтверждённого reveal. Version handshake принудительно
 перезагружает вкладку со старым/отсутствующим content script до клика.
+
+## Startup navigation regression `1.12.27` / `1.0.10`
+
+После deploy обе попытки startup health probe завершались примерно через 45 секунд:
+`tabStatus=complete`, `probe=null`, `content_script_unavailable`, `Receiving end does
+not exist`; видимая surface оставалась `about:blank`. Расширение было включено,
+service worker и bridge активны, host access к Avito разрешён, Errors отсутствовали.
+
+Root cause: сразу после `tabs.update` Avito URL находился в `pendingUrl`, static
+content script с `run_at=document_idle` ещё закономерно отсутствовал. Recovery
+ошибочно вызывал `tabs.reload` до commit, тем самым отменяя pending navigation и
+перезагружая committed `about:blank`.
+
+Патч `1.12.28` / extension `1.0.11` запрещает probe/reload/injection при наличии
+`pendingUrl`, сохраняет готовность по DOM без требования `status=complete` и после
+commit даёт static script grace-период. Затем допускается ровно один programmatic
+fallback через `chrome.scripting.executeScript`, только в main frame ожидаемой
+Avito surface и с повторной exact-tab/same-listing проверкой. Content bootstrap
+идемпотентен. JSONL пишет только privacy-safe `actualSurface`, `pendingSurface` и
+статус injection, без полного URL.
