@@ -84,9 +84,16 @@
       }
       return { status: "loading", reason: "listing_navigation_pending", actualUrl };
     }
-    return probe?.rendered
+    return probe?.rendered && probe?.readyState === "complete"
       ? { status: "ready", reason: probe?.inactive ? "inactive_rendered" : "listing_rendered", actualUrl }
-      : { status: "loading", reason: "listing_not_rendered", actualUrl };
+      : {
+          status: "loading",
+          reason:
+            probe?.readyState === "complete"
+              ? "listing_not_rendered"
+              : "document_not_complete",
+          actualUrl
+        };
   }
 
   const PHONE_SEPARATORS = "[\\s\\u00a0()\\-\u2013\u2014.]*";

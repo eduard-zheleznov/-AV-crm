@@ -242,7 +242,7 @@ def test_manifest_matches_the_required_extension_version():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["version"] == EXPECTED_EXTENSION_VERSION
-    assert "debugger" not in manifest["permissions"]
+    assert "debugger" in manifest["permissions"]
     assert "scripting" in manifest["permissions"]
 
 
@@ -612,12 +612,12 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert '"click_dispatched"' in content
     assert 'notifyStatus("reveal_confirmed"' in content
     assert "actionAttempt <= 2" in content
-    assert "avito_crm_dom_click_gate" in content
+    assert "avito_crm_browser_click" in content
     assert "expectedContentVersion" in (
         Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
     ).read_text(encoding="utf-8")
     assert ".dispatchEvent(" not in content
-    assert content.count("button.click()") == 1
+    assert "button.click()" not in content
     assert "topElement.contains(button)" not in content
 
     service_worker = (
@@ -625,12 +625,21 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     ).read_text(encoding="utf-8")
     assert "NAVIGATION.shouldInject" in service_worker
     assert "NAVIGATION.injectContentFiles" in service_worker
-    assert "handleDomClickGate" in service_worker
-    assert "handleBrowserClick(" not in service_worker
+    assert "handleBrowserClick" in service_worker
+    assert "dispatchUserGestureClick" in service_worker
     assert "measureBrowserClickTarget" not in service_worker
     assert "native-click" not in service_worker
     assert "x: message.x" not in service_worker
     assert "content_script_reload" not in service_worker
+
+    trusted_click = (
+        Path(__file__).parents[1] / "chrome-extension" / "trusted-click.js"
+    ).read_text(encoding="utf-8")
+    assert '"Runtime.evaluate"' in trusted_click
+    assert "userGesture: true" in trusted_click
+    assert "button.click()" in trusted_click
+    assert '"Input.dispatchMouseEvent"' not in trusted_click
+    assert "SendInput" not in trusted_click
 
     navigation_core = (
         Path(__file__).parents[1] / "chrome-extension" / "navigation-core.js"

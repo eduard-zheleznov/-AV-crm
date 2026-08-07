@@ -11,13 +11,26 @@ assert.deepEqual(
   runtime.classifyProbe(
     {
       actualUrl: canonicalRedirect,
-      readyState: "interactive",
+      readyState: "complete",
       rendered: true
     },
     expected,
     "listing"
   ).status,
   "ready"
+);
+
+assert.equal(
+  runtime.classifyProbe(
+    {
+      actualUrl: canonicalRedirect,
+      readyState: "interactive",
+      rendered: true
+    },
+    expected,
+    "listing"
+  ).status,
+  "loading"
 );
 
 assert.equal(

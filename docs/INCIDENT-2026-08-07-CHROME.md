@@ -189,3 +189,25 @@ activation path, но не возвращает старый ложнополо�
 по DOM. Разрешён ровно один повтор на заново найденном элементе; OCR недостижим до
 reveal, а повторный no-effect сохраняет `attempts=0` и участвует в circuit breaker.
 Разрешение `debugger` и native-input endpoint удалены.
+
+## Manual control и coordinate-free UI gesture `1.12.35` / `1.0.17`
+
+Два canary `1.12.34` / `1.0.16` выполнили по два literal DOM-click, но не раскрыли
+номер. На второй полностью отрисованной странице операторский клик немедленно открыл
+modal `Временный номер:` с полным телефоном. Это доказало исправность объявления,
+аккаунта, кнопки и DOM-парсера и локализовало сбой в автоматической активации.
+
+Отдельно подтверждён ранний readiness: `1.0.16` принимал listing сразу после первой
+видимой кнопки, даже при незавершённой загрузке Chrome. `1.0.17` возвращает
+fail-closed gate `tab.status=complete + document.readyState=complete`, сохраняя
+сопоставление по Avito ID вместо хрупкого exact slug, и требует три стабильных
+измерения кнопки.
+
+Клик выполняется coordinate-free: после двух exact command/tab/listing/STOP gate
+`chrome.debugger` запускает одну MAIN-world `Runtime.evaluate` с `userGesture:true`.
+В той же evaluation заново находится видимая enabled reveal-кнопка и вызывается
+`.click()`. Debugger снимается в `finally`; разрешён один bounded retry. Mouse
+coordinates, CDP pointer/key events и Windows SendInput не используются. В
+privacy-safe status фиксируются только `eventTrusted`, активность user gesture и
+тип элемента; URL и телефон туда не попадают. OCR остаётся недоступен до
+подтверждённого DOM reveal, а открытый modal сначала читается напрямую из DOM.

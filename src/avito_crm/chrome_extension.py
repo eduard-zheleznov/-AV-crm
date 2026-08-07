@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.16"
+EXPECTED_EXTENSION_VERSION = "1.0.17"
 
 
 @dataclass(slots=True)
@@ -727,7 +727,7 @@ class ChromeExtensionBrowser:
         elif event.status == "clicking":
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
         elif event.status == "click_dispatched":
-            LOGGER.info("Обычный Chrome: browser-level клик отправлен; ожидаем изменение DOM")
+            LOGGER.info("Обычный Chrome: UI-gesture клик отправлен; ожидаем изменение DOM")
         elif event.status == "click_recovery":
             LOGGER.warning("Обычный Chrome: первый клик не подтверждён; один повтор")
         elif event.status == "reveal_confirmed":

@@ -53,10 +53,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 chrome.action.onClicked.addListener(() => startPolling());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "avito_crm_dom_click_gate") {
-    handleDomClickGate(message, sender)
+  if (message?.type === "avito_crm_browser_click") {
+    handleBrowserClick(message, sender)
       .then(sendResponse)
-      .catch(() => sendResponse({ ok: false, code: "dom_click_gate_unavailable" }));
+      .catch(() => sendResponse({ ok: false, code: "browser_click_unavailable" }));
     return true;
   }
   if (message?.type !== "avito_crm_status" || !currentCommandId) {
@@ -86,8 +86,24 @@ function startPolling() {
   });
 }
 
-async function handleDomClickGate(message, sender) {
-  return await validateBrowserClickLive(message, sender?.tab?.id);
+async function handleBrowserClick(message, sender) {
+  const senderTabId = sender?.tab?.id;
+  let validation = await validateBrowserClickLive(message, senderTabId);
+  if (!validation.ok) {
+    return validation;
+  }
+  const listingId = RUNTIME.listingId(currentCommand?.url || "");
+  if (!listingId) {
+    return { ok: false, code: "listing_mismatch" };
+  }
+  return await TRUSTED_CLICK.dispatchUserGestureClick(
+    chrome,
+    { tabId: senderTabId, listingId },
+    {
+      timeoutMs: Math.max(2500, BROWSER_CLICK_API_TIMEOUT_MS),
+      revalidate: () => validateBrowserClickLive(message, senderTabId)
+    }
+  );
 }
 
 function validConfig() {
@@ -478,6 +494,17 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
         }
       } else {
         classification = RUNTIME.classifyProbe(probe, expectedUrl, mode);
+        if (
+          mode === "listing" &&
+          classification.status === "ready" &&
+          tab?.status !== "complete"
+        ) {
+          classification = {
+            status: "loading",
+            reason: "chrome_tab_not_complete",
+            actualUrl: tab?.url || ""
+          };
+        }
       }
       if (
         classification.status === "listing_mismatch" &&

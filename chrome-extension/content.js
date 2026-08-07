@@ -107,7 +107,7 @@ async function revealOnce(command) {
     return { status: "phone", phone: existing, source: "chrome-extension-dom" };
   }
 
-  const button = await waitForPhoneButton(Math.min(10000, command.phoneWaitMs));
+  const button = await waitForStablePhoneButton(Math.min(12000, command.phoneWaitMs));
   if (!button) {
     return { status: "button_missing", reason: "Кнопка показа телефона не найдена" };
   }
@@ -139,12 +139,12 @@ async function revealWithVerifiedClick(initialButton, command) {
 
     const before = revealState(button);
     phoneRegion = screenRegion(button);
-    const gate = await requestDomClickGate(command);
+    const gate = await requestUserGestureClick(command);
     if (!gate.ok) {
       if (actionAttempt === 1) {
         notifyStatus(
           "click_recovery",
-          "safety gate DOM-click не пройден; один bounded retry"
+          "Chrome UI-gesture gate не пройден; один bounded retry"
         );
         button = findPhoneButton();
         await delay(500);
@@ -152,31 +152,11 @@ async function revealWithVerifiedClick(initialButton, command) {
       }
       return browserClickUnavailable(gate.code);
     }
-    // Restore the exact activation path that worked in extension 1.0.7, but
-    // never trust dispatch itself as success. Re-query after the asynchronous
-    // command/tab/listing/STOP gate so a stale element cannot be clicked.
-    button = findPhoneButton();
-    if (
-      !button ||
-      !isActionableClickTarget(button) ||
-      !globalThis.AVITO_CRM_RUNTIME_CORE.sameListingIdentity(
-        window.location.href,
-        command.expectedUrl
-      ) ||
-      manualReason()
-    ) {
-      if (actionAttempt === 1) {
-        notifyStatus("click_recovery", "DOM-click target будет найден повторно");
-        button = findPhoneButton();
-        await delay(500);
-        continue;
-      }
-      return clickNotEffective("dom_target_changed");
-    }
-    button.focus({ preventScroll: true });
-    notifyStatus("clicking", "кнопка показа телефона готова к DOM-click");
-    button.click();
-    notifyStatus("click_dispatched", "DOM-click отправлен; ожидаем изменение DOM");
+    notifyStatus(
+      "click_dispatched",
+      `Chrome UI-gesture отправлен; trusted=${Boolean(gate.eventTrusted)} ` +
+        `activation=${Boolean(gate.userActivation)} target=${gate.targetKind || "unknown"}`
+    );
 
     const verificationDeadline =
       actionAttempt === 1
@@ -202,7 +182,7 @@ async function revealWithVerifiedClick(initialButton, command) {
     if (actionAttempt === 1) {
       notifyStatus(
         "click_recovery",
-        "первый DOM-click не изменил DOM; один bounded retry"
+        "первый Chrome UI-gesture не изменил DOM; один bounded retry"
       );
       button = findPhoneButton();
       await delay(500);
@@ -217,10 +197,9 @@ async function prepareClickTarget(candidate) {
     return null;
   }
   button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
-  // Extension 1.0.7 used this settle interval before its successful DOM path.
-  await delay(750);
-  button = findPhoneButton();
-  if (!button || !isActionableClickTarget(button)) {
+  await delay(500);
+  button = await waitForStablePhoneButton(2500);
+  if (!button) {
     return null;
   }
   button.focus({ preventScroll: true });
@@ -247,11 +226,11 @@ function isActionableClickTarget(button) {
   );
 }
 
-async function requestDomClickGate(command) {
+async function requestUserGestureClick(command) {
   const request = chrome.runtime.sendMessage({
-    type: "avito_crm_dom_click_gate",
+    type: "avito_crm_browser_click",
     commandId: command.commandId,
-    activation: "dom"
+    activation: "ui_eval"
   });
   let timer = null;
   const timeout = new Promise((resolve) => {
@@ -326,7 +305,7 @@ function clickNotEffective(code = "dispatch_without_effect") {
   return {
     status: "click_not_effective",
     reason:
-      "Avito не подтвердил раскрытие номера после двух bounded DOM-click " +
+      "Avito не подтвердил раскрытие номера после двух bounded Chrome UI-gesture " +
       `(${String(code).slice(0, 80)})`
   };
 }
@@ -342,7 +321,7 @@ function browserClickUnavailable(code) {
   return {
     status: "click_not_effective",
     reason:
-      "Browser-level ввод недоступен после bounded набора методов; " +
+      "Chrome UI-gesture недоступен после bounded повтора; " +
       `неподтверждённый клик не засчитан (${safeCode})`
   };
 }
@@ -588,6 +567,42 @@ function findPhoneButton() {
   return null;
 }
 
+async function waitForStablePhoneButton(timeoutMs) {
+  const deadline = Date.now() + Math.max(1500, Number(timeoutMs) || 3000);
+  let previousToken = "";
+  let stableSamples = 0;
+  while (Date.now() < deadline) {
+    const button = findPhoneButton();
+    const token = button && isActionableClickTarget(button) ? clickTargetToken(button) : "";
+    if (token && token === previousToken) {
+      stableSamples += 1;
+    } else {
+      previousToken = token;
+      stableSamples = token ? 1 : 0;
+    }
+    if (stableSamples >= 3 && document.readyState === "complete") {
+      return button;
+    }
+    await delay(300);
+  }
+  return null;
+}
+
+function clickTargetToken(button) {
+  const rect = button.getBoundingClientRect();
+  const label = `${button.textContent || ""} ${button.getAttribute("aria-label") || ""}`
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+  return [
+    label,
+    Math.round(rect.left),
+    Math.round(rect.top),
+    Math.round(rect.width),
+    Math.round(rect.height)
+  ].join(":");
+}
+
 async function waitForPhoneButton(timeoutMs) {
   const deadline = Date.now() + Math.max(1000, timeoutMs);
   while (Date.now() < deadline) {
@@ -608,7 +623,11 @@ async function waitForTargetReady(expectedUrl, timeoutMs) {
       return true;
     }
     const probe = probePage(expectedUrl, "listing");
-    if (probe.rendered && sameListingPath(location.href, expectedUrl)) {
+    if (
+      probe.rendered &&
+      probe.readyState === "complete" &&
+      sameListingPath(location.href, expectedUrl)
+    ) {
       return true;
     }
     await delay(250);
