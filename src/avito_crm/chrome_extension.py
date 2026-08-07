@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.9"
+EXPECTED_EXTENSION_VERSION = "1.0.10"
 
 
 @dataclass(slots=True)
@@ -651,7 +651,7 @@ class ChromeExtensionBrowser:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_bytes(png)
             return self.ocr.read_viewport_png(png)
-        if status in {"browser_infra", "page_not_ready"}:
+        if status in {"browser_infra", "page_not_ready", "stale_content_script"}:
             self._needs_active_probe = True
             raise BrowserInfrastructureError(
                 str(
@@ -727,7 +727,7 @@ class ChromeExtensionBrowser:
         elif event.status == "clicking":
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
         elif event.status == "click_dispatched":
-            LOGGER.info("Обычный Chrome: клик отправлен; ожидаем изменение DOM")
+            LOGGER.info("Обычный Chrome: browser-level клик отправлен; ожидаем изменение DOM")
         elif event.status == "click_recovery":
             LOGGER.warning("Обычный Chrome: первый клик не подтверждён; один повтор")
         elif event.status == "reveal_confirmed":
@@ -947,6 +947,7 @@ _DIAGNOSTIC_KEYS = frozenset(
         "bodyLength",
         "classification",
         "content",
+        "contentVersion",
         "discarded",
         "elapsedMs",
         "expectedId",

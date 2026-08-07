@@ -1,9 +1,11 @@
-importScripts("config.local.js", "runtime-core.js");
+importScripts("config.local.js", "runtime-core.js", "trusted-click.js");
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
 const RUNTIME = globalThis.AVITO_CRM_RUNTIME_CORE;
+const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
+const BROWSER_CLICK_API_TIMEOUT_MS = 1000;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
   ? {
@@ -17,6 +19,7 @@ const AUTH_HEADERS = CONFIG
 let polling = false;
 let managedTabId = null;
 let currentCommandId = null;
+let currentCommand = null;
 
 class BrowserInfrastructureError extends Error {
   constructor(message, diagnostics = {}) {
@@ -42,7 +45,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 chrome.action.onClicked.addListener(() => startPolling());
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "avito_crm_browser_click") {
+    handleBrowserClick(message, sender)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, code: "browser_click_unavailable" }));
+    return true;
+  }
   if (message?.type !== "avito_crm_status" || !currentCommandId) {
     return false;
   }
@@ -111,6 +120,7 @@ async function pollLoop() {
 
 async function executeCommand(command) {
   currentCommandId = command.id;
+  currentCommand = command;
   try {
     const prepared = await getManagedTab(command);
     if (command.type === "health_probe") {
@@ -196,7 +206,66 @@ async function executeCommand(command) {
     }).catch(() => undefined);
   } finally {
     currentCommandId = null;
+    currentCommand = null;
   }
+}
+
+async function handleBrowserClick(message, sender) {
+  const senderTabId = sender?.tab?.id;
+  let tab = await browserClickTab(senderTabId);
+  let validation = validateBrowserClick(message, senderTabId, tab);
+  if (!validation.ok) {
+    return validation;
+  }
+  const focused = await TRUSTED_CLICK.withTimeout(
+    focusTab(senderTabId),
+    BROWSER_CLICK_API_TIMEOUT_MS,
+    "tab_focus_timeout"
+  )
+    .then(() => true)
+    .catch(() => false);
+  if (!focused) {
+    return { ok: false, code: "tab_focus_timeout" };
+  }
+  // STOP/cancellation or a redirect may race with focus. Revalidate the live
+  // command, exact tab and listing immediately before attaching the debugger.
+  tab = await browserClickTab(senderTabId);
+  validation = validateBrowserClick(message, senderTabId, tab);
+  if (!validation.ok) {
+    return validation;
+  }
+  return await TRUSTED_CLICK.dispatch(
+    chrome,
+    {
+      tabId: senderTabId,
+      x: message.x,
+      y: message.y
+    },
+    { timeoutMs: BROWSER_CLICK_API_TIMEOUT_MS }
+  );
+}
+
+async function browserClickTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return null;
+  }
+  return await TRUSTED_CLICK.withTimeout(
+    chrome.tabs.get(tabId),
+    BROWSER_CLICK_API_TIMEOUT_MS,
+    "tab_lookup_timeout"
+  ).catch(() => null);
+}
+
+function validateBrowserClick(message, senderTabId, tab) {
+  return TRUSTED_CLICK.validateRequest(message, {
+    currentCommandId,
+    currentCommandType: currentCommand?.type || "",
+    managedTabId,
+    senderTabId,
+    actualUrl: tab?.url || "",
+    expectedUrl: currentCommand?.url || "",
+    sameListingIdentity: RUNTIME.sameListingIdentity
+  });
 }
 
 async function getManagedTab(command) {
@@ -278,7 +347,9 @@ async function sendRevealMessage(tabId, command) {
         return await Promise.race([
           chrome.tabs.sendMessage(tabId, {
             type: "avito_crm_reveal_once",
+            commandId: command.id,
             expectedUrl: command.url,
+            expectedContentVersion: EXTENSION_VERSION,
             pageTimeoutMs: command.pageTimeoutMs,
             manualTimeoutMs: command.manualTimeoutMs,
             phoneWaitMs: command.phoneWaitMs
@@ -345,13 +416,28 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   let tab = await chrome.tabs.get(tabId);
   let probe = null;
   let probeError = "";
+  let staleContentReloaded = false;
   let classification = { status: "loading", reason: "navigation_started" };
   while (Date.now() < deadline) {
     tab = await chrome.tabs.get(tabId);
     try {
       probe = await probeTab(tabId, expectedUrl, mode);
       probeError = "";
-      classification = RUNTIME.classifyProbe(probe, expectedUrl, mode);
+      if (probe?.contentVersion !== EXTENSION_VERSION) {
+        classification = {
+          status: "loading",
+          reason: "stale_content_script",
+          actualUrl: tab?.url || ""
+        };
+        if (!staleContentReloaded) {
+          staleContentReloaded = true;
+          await chrome.tabs.reload(tabId);
+          await delay(500);
+          continue;
+        }
+      } else {
+        classification = RUNTIME.classifyProbe(probe, expectedUrl, mode);
+      }
       if (
         classification.status === "listing_mismatch" &&
         (tab?.status !== "complete" || Date.now() - startedAt < 1500)
@@ -364,6 +450,17 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
       }
     } catch (error) {
       probeError = safeMessage(error);
+      if (!staleContentReloaded && isMissingContentScriptError(probeError)) {
+        staleContentReloaded = true;
+        classification = {
+          status: "loading",
+          reason: "content_script_reload",
+          actualUrl: tab?.url || ""
+        };
+        await chrome.tabs.reload(tabId).catch(() => undefined);
+        await delay(500);
+        continue;
+      }
       classification = classifyWithoutContent(tab, expectedUrl, mode);
     }
     if (
@@ -394,12 +491,22 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
           auth: probe.auth,
           inactive: probe.inactive,
           bodyLength: probe.bodyLength,
-          visibleHeadings: probe.visibleHeadings
+          visibleHeadings: probe.visibleHeadings,
+          contentVersion: probe.contentVersion
         }
       : null,
     probeError
   };
   return { tab, classification, diagnostics };
+}
+
+function isMissingContentScriptError(message) {
+  const normalized = String(message || "").toLowerCase();
+  return (
+    normalized.includes("receiving end does not exist") ||
+    normalized.includes("could not establish connection") ||
+    normalized.includes("extension context invalidated")
+  );
 }
 
 async function probeTab(tabId, expectedUrl, mode) {

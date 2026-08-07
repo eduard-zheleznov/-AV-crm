@@ -242,6 +242,7 @@ def test_manifest_matches_the_required_extension_version():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["version"] == EXPECTED_EXTENSION_VERSION
+    assert "debugger" in manifest["permissions"]
 
 
 def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings):
@@ -250,6 +251,7 @@ def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings)
         "extension_result",
         url="https://www.avito.ru/moskva/secret-slug_123456789?token=do-not-log",
         diagnostics={
+            "contentVersion": EXPECTED_EXTENSION_VERSION,
             "actualUrl": "https://www.avito.ru/moskva/secret-slug_123456789",
             "attempts": [
                 {
@@ -266,6 +268,7 @@ def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings)
     record = json.loads(content)
     assert record["listing_id"] == "123456789"
     assert record["diagnostics"]["attempts"][0]["tabStatus"] == "loading"
+    assert record["diagnostics"]["contentVersion"] == EXPECTED_EXTENSION_VERSION
     assert "https://" not in content
     assert "do-not-log" not in content
     assert "+79991234567" not in content
@@ -574,6 +577,20 @@ def test_extension_browser_stops_before_ocr_when_click_has_no_effect(settings):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
 
+def test_extension_browser_maps_stale_content_to_browser_infrastructure(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "stale_content_script",
+            {"reason": "Content script Chrome не совпадает с версией расширения"},
+        )
+    )
+
+    with browser, pytest.raises(BrowserInfrastructureError, match="не совпадает"):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
 def test_content_script_does_not_report_dispatch_as_reveal_success():
     content_path = Path(__file__).parents[1] / "chrome-extension" / "content.js"
     content = content_path.read_text(encoding="utf-8")
@@ -582,6 +599,20 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert 'notifyStatus("click_dispatched"' in content
     assert 'notifyStatus("reveal_confirmed"' in content
     assert "actionAttempt <= 2" in content
+    assert "avito_crm_browser_click" in content
+    assert "expectedContentVersion" in (
+        Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
+    ).read_text(encoding="utf-8")
+    assert ".dispatchEvent(" not in content
+    assert "button.click(" not in content
+    assert "topElement.contains(button)" not in content
+
+    trusted_click = (
+        Path(__file__).parents[1] / "chrome-extension" / "trusted-click.js"
+    ).read_text(encoding="utf-8")
+    assert '"Input.dispatchMouseEvent"' in trusted_click
+    assert "chromeApi.debugger.attach" in trusted_click
+    assert "chromeApi.debugger.detach" in trusted_click
 
 
 def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):

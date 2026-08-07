@@ -27,6 +27,7 @@ const INACTIVE_PATTERNS = [
   ["страница не найдена", "страница объявления не найдена"],
   ["объявление больше не актуально", "объявление больше не актуально"]
 ];
+const CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version;
 const PHONE_BUTTON_RE = /(?:показать\s+(?:номер(?:\s+телефона)?|телефон)|позвонить)/i;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -50,6 +51,15 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function revealOnce(command) {
+  if (
+    command.expectedContentVersion &&
+    command.expectedContentVersion !== CONTENT_SCRIPT_VERSION
+  ) {
+    return {
+      status: "stale_content_script",
+      reason: "Content script Chrome не совпадает с версией расширения"
+    };
+  }
   const manualResult = await waitForManualAction(command.manualTimeoutMs);
   if (manualResult) {
     return manualResult;
@@ -101,12 +111,27 @@ async function revealWithVerifiedClick(initialButton, command) {
       }
       return clickNotEffective();
     }
+    if (manualReason()) {
+      await waitForManualAction(command.manualTimeoutMs);
+      button = findPhoneButton();
+      actionAttempt -= 1;
+      continue;
+    }
 
     const before = revealState(button);
     phoneRegion = screenRegion(button);
     notifyStatus("clicking", "кнопка показа телефона готова");
-    dispatchClickSequence(button);
-    notifyStatus("click_dispatched", "клик отправлен; ожидаем изменение DOM");
+    const dispatched = await requestBrowserClick(button, command);
+    if (!dispatched.ok) {
+      if (actionAttempt === 1) {
+        notifyStatus("click_recovery", "browser-level клик недоступен; повторяем один раз");
+        button = findPhoneButton();
+        await delay(500);
+        continue;
+      }
+      return browserClickUnavailable(dispatched.code);
+    }
+    notifyStatus("click_dispatched", "browser-level клик отправлен; ожидаем изменение DOM");
 
     const verificationDeadline =
       actionAttempt === 1
@@ -169,44 +194,33 @@ function isActionableClickTarget(button) {
   const topElement = document.elementFromPoint(centerX, centerY);
   return Boolean(
     topElement &&
-      (topElement === button || button.contains(topElement) || topElement.contains(button))
+      (topElement === button || button.contains(topElement))
   );
 }
 
-function dispatchClickSequence(button) {
-  const options = {
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    view: window,
-    button: 0
-  };
-  if (typeof PointerEvent === "function") {
-    button.dispatchEvent(
-      new PointerEvent("pointerdown", {
-        ...options,
-        buttons: 1,
-        pointerId: 1,
-        pointerType: "mouse",
-        isPrimary: true
-      })
+async function requestBrowserClick(button, command) {
+  const rect = button.getBoundingClientRect();
+  const request = chrome.runtime.sendMessage({
+    type: "avito_crm_browser_click",
+    commandId: command.commandId,
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2,
+    width: rect.width,
+    height: rect.height
+  });
+  let timer = null;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(
+      () => resolve({ ok: false, code: "browser_click_rpc_timeout" }),
+      10000
     );
-  }
-  button.dispatchEvent(new MouseEvent("mousedown", { ...options, buttons: 1 }));
-  if (typeof PointerEvent === "function") {
-    button.dispatchEvent(
-      new PointerEvent("pointerup", {
-        ...options,
-        buttons: 0,
-        pointerId: 1,
-        pointerType: "mouse",
-        isPrimary: true
-      })
-    );
-  }
-  button.dispatchEvent(new MouseEvent("mouseup", { ...options, buttons: 0 }));
-  if (button.isConnected) {
-    button.click();
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } catch (_error) {
+    return { ok: false, code: "browser_click_rpc_failed" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -263,10 +277,28 @@ async function waitForPhoneOrOcrFallback(deadline, manualTimeoutMs, button, phon
   return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
 }
 
-function clickNotEffective() {
+function clickNotEffective(code = "dispatch_without_effect") {
   return {
     status: "click_not_effective",
-    reason: "Avito не подтвердил раскрытие номера после двух ограниченных кликов"
+    reason:
+      "Avito не подтвердил раскрытие номера после двух ограниченных browser-level кликов " +
+      `(${String(code).slice(0, 80)})`
+  };
+}
+
+function browserClickUnavailable(code) {
+  const safeCode = String(code || "browser_click_unavailable").slice(0, 80);
+  if (safeCode === "listing_mismatch") {
+    return {
+      status: "listing_mismatch",
+      reason: "Managed tab ушла с ожидаемого объявления до browser-level клика"
+    };
+  }
+  return {
+    status: "click_not_effective",
+    reason:
+      "Browser-level ввод недоступен после одного ограниченного повтора; " +
+      `неподтверждённый клик не засчитан (${safeCode})`
   };
 }
 
@@ -571,6 +603,7 @@ function probePage(expectedUrl, mode) {
     (bodyLength > 200 && visibleHeadings > 0) ||
     (mode === "health" && bodyLength > 200);
   return {
+    contentVersion: CONTENT_SCRIPT_VERSION,
     actualUrl: location.href,
     expectedUrl,
     readyState: document.readyState,

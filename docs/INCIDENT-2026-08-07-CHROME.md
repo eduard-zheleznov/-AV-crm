@@ -106,3 +106,20 @@ script и до 10 секунд на DOM номера. Bridge мог заверш
 reveal и не проверял post-click DOM transition. Дополнительно текст «Временный номер»
 преждевременно разрешал OCR. Патч `1.12.26` / `1.0.9` добавляет click outcome contract,
 один bounded recovery и запрет OCR до DOM-confirmation.
+
+## Live canary `1.12.26` / `1.0.9`
+
+Точный операторский вывод доказал, что тест не завис: он сам завершился после
+первого неподтверждённого клика, одного повтора и ошибки
+`click_not_effective`; PowerShell остановил объединённую команду до CRM. Кнопка
+визуально осталась закрытой, очередь и CRM не затронуты. Значит, version mismatch
+и отсутствие bounded timeout не были причиной этого canary: оба synthetic
+content-script click dispatch были выполнены, но Avito не принял их как реальную
+активацию пользователя.
+
+Патч `1.12.27` / extension `1.0.10` заменяет synthetic dispatch на ограниченный
+browser-level click через `chrome.debugger` и CDP `Input.dispatchMouseEvent`.
+Service worker проверяет текущие command ID, managed tab ID и Avito listing ID,
+всегда снимает debugger в `finally`, допускает не более одного recovery и по-прежнему
+запрещает OCR без подтверждённого reveal. Version handshake принудительно
+перезагружает вкладку со старым/отсутствующим content script до клика.
