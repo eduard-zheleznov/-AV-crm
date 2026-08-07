@@ -177,13 +177,15 @@ Enter и Space. Каждый шаг заново проходит attach/focus/r
 повторной command/tab/listing/STOP-проверки. Между методами обязателен
 DOM reveal verify; OCR до него запрещён. Circuit breaker и `attempts=0` не изменены.
 
-Live run `1.12.32` / `1.0.14` также дал 5/5 `dispatch_without_effect` после
-mouse/Enter/Space; CRM не изменилась, `attempts=0`, circuit breaker остановил
-run. Дальнейшие CDP activation variants не добавляются.
+Live-проверка `1.12.33` / `1.0.15` с Windows SendInput fallback также не раскрыла
+номер на двух разных объявлениях. Вся усложнённая цепочка CDP mouse → keyboard →
+SendInput дала 0/15 подтверждённых раскрытий и была удалена из runtime.
 
-Патч `1.12.33` / `1.0.15` добавляет ровно один Windows-native `SendInput`
-после неудачи трёх методов. Debugger к этому моменту обязан быть detached.
-Capability token одноразовый и атомарно расходуется до user32, поэтому
-network retry не может кликнуть дважды. Locked session, ambiguous/non-Chrome window,
-foreground/DPI/geometry mismatch и STOP дают fail-closed. После native click обязателен
-DOM reveal verify; OCR до него недоступен.
+Точный differential с реально работавшим `content.js` версии `1.0.7` показал, что
+в нём использовались `scrollIntoView`, пауза 750 мс, `focus` и буквальный
+`button.click()`. Патч `1.12.34` / extension `1.0.16` восстанавливает именно этот
+activation path, но не возвращает старый ложноположительный успех: перед кликом
+обязательны проверки command/tab/listing/STOP, после него — подтверждение reveal
+по DOM. Разрешён ровно один повтор на заново найденном элементе; OCR недостижим до
+reveal, а повторный no-effect сохраняет `attempts=0` и участвует в circuit breaker.
+Разрешение `debugger` и native-input endpoint удалены.

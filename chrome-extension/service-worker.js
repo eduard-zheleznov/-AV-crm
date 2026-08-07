@@ -12,7 +12,6 @@ const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
 const BROWSER_CLICK_API_TIMEOUT_MS = 1500;
-const CONTENT_TARGET_MEASURE_TIMEOUT_MS = 4000;
 const CONTENT_SCRIPT_GRACE_MS = 1000;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
@@ -54,16 +53,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 chrome.action.onClicked.addListener(() => startPolling());
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type === "avito_crm_native_click") {
-    handleNativeClick(message, sender)
+  if (message?.type === "avito_crm_dom_click_gate") {
+    handleDomClickGate(message, sender)
       .then(sendResponse)
-      .catch(() => sendResponse({ ok: false, code: "native_click_unavailable" }));
-    return true;
-  }
-  if (message?.type === "avito_crm_browser_click") {
-    handleBrowserClick(message, sender)
-      .then(sendResponse)
-      .catch(() => sendResponse({ ok: false, code: "browser_click_unavailable" }));
+      .catch(() => sendResponse({ ok: false, code: "dom_click_gate_unavailable" }));
     return true;
   }
   if (message?.type !== "avito_crm_status" || !currentCommandId) {
@@ -91,6 +84,10 @@ function startPolling() {
   pollLoop().finally(() => {
     polling = false;
   });
+}
+
+async function handleDomClickGate(message, sender) {
+  return await validateBrowserClickLive(message, sender?.tab?.id);
 }
 
 function validConfig() {
@@ -221,161 +218,6 @@ async function executeCommand(command) {
   } finally {
     currentCommandId = null;
     currentCommand = null;
-  }
-}
-
-async function handleBrowserClick(message, sender) {
-  const senderTabId = sender?.tab?.id;
-  let validation = await validateBrowserClickLive(message, senderTabId);
-  if (!validation.ok) {
-    return validation;
-  }
-  return await TRUSTED_CLICK.dispatch(
-    chrome,
-    { tabId: senderTabId, activation: message.activation || "mouse" },
-    {
-      timeoutMs: BROWSER_CLICK_API_TIMEOUT_MS,
-      measureTimeoutMs: CONTENT_TARGET_MEASURE_TIMEOUT_MS,
-      // Attaching may add a Chrome infobar and resize the viewport. Focus and
-      // measure only after attach; coordinates sent by the initiating content
-      // message are intentionally ignored.
-      afterAttach: () => focusTab(senderTabId),
-      measureTarget: () => measureBrowserClickTarget(senderTabId, message),
-      // STOP, command replacement, tab replacement or an Avito redirect may
-      // race with measurement. Fail closed immediately before CDP input.
-      revalidate: () => validateBrowserClickLive(message, senderTabId)
-    }
-  );
-}
-
-async function handleNativeClick(message, sender) {
-  const senderTabId = sender?.tab?.id;
-  let validation = await validateBrowserClickLive(message, senderTabId);
-  if (!validation.ok) {
-    return validation;
-  }
-  if (!currentCommand?.nativeClickToken) {
-    return { ok: false, code: "native_token_unavailable" };
-  }
-  const debuggerTargets = await TRUSTED_CLICK.withTimeout(
-    chrome.debugger.getTargets(),
-    BROWSER_CLICK_API_TIMEOUT_MS,
-    "debugger_state_timeout"
-  ).catch(() => null);
-  if (
-    !debuggerTargets ||
-    debuggerTargets.some((target) => target.tabId === senderTabId && target.attached)
-  ) {
-    return { ok: false, code: "debugger_still_attached" };
-  }
-  const focused = await TRUSTED_CLICK.withTimeout(
-    focusTab(senderTabId),
-    BROWSER_CLICK_API_TIMEOUT_MS,
-    "tab_focus_timeout"
-  )
-    .then(() => true)
-    .catch(() => false);
-  if (!focused) {
-    return { ok: false, code: "tab_focus_timeout" };
-  }
-  const measurement = await measureBrowserClickTarget(senderTabId, {
-    ...message,
-    activation: "native"
-  });
-  const targetValidation = TRUSTED_CLICK.validateTargetMeasurement(
-    measurement,
-    "native"
-  );
-  if (!targetValidation.ok) {
-    return targetValidation;
-  }
-  validation = await validateBrowserClickLive(message, senderTabId);
-  if (!validation.ok) {
-    return validation;
-  }
-  const tab = await browserClickTab(senderTabId);
-  if (!tab || tab.windowId !== sender?.tab?.windowId) {
-    return { ok: false, code: "tab_mismatch" };
-  }
-  const chromeWindow = await TRUSTED_CLICK.withTimeout(
-    chrome.windows.get(tab.windowId),
-    BROWSER_CLICK_API_TIMEOUT_MS,
-    "window_lookup_timeout"
-  ).catch(() => null);
-  if (!chromeWindow || !chromeWindow.focused || chromeWindow.state === "minimized") {
-    return { ok: false, code: "chrome_window_not_ready" };
-  }
-  // Revalidate once more after all geometry reads and immediately before the
-  // authenticated localhost request that may generate the single OS click.
-  validation = await validateBrowserClickLive(message, senderTabId);
-  if (!validation.ok) {
-    return validation;
-  }
-  try {
-    const response = await TRUSTED_CLICK.withTimeout(
-      fetch(`${BASE_URL}/v1/native-click`, {
-        method: "POST",
-        headers: AUTH_HEADERS,
-        cache: "no-store",
-        body: JSON.stringify({
-          commandId: message.commandId,
-          nativeToken: currentCommand.nativeClickToken,
-          listingId: RUNTIME.listingId(currentCommand.url || ""),
-          tabId: senderTabId,
-          window: {
-            left: chromeWindow.left,
-            top: chromeWindow.top,
-            width: chromeWindow.width,
-            height: chromeWindow.height,
-            focused: chromeWindow.focused,
-            state: chromeWindow.state
-          },
-          viewport: measurement.viewport,
-          target: {
-            x: measurement.x,
-            y: measurement.y,
-            width: measurement.width,
-            height: measurement.height,
-            focused: measurement.focused
-          }
-        })
-      }),
-      CONTENT_TARGET_MEASURE_TIMEOUT_MS,
-      "native_click_timeout"
-    );
-    if (!response.ok) {
-      return { ok: false, code: "native_click_unavailable" };
-    }
-    const payload = await response.json();
-    return payload?.ok
-      ? { ok: true, code: "native_click_dispatched" }
-      : { ok: false, code: String(payload?.code || "native_click_unavailable") };
-  } catch (_error) {
-    return { ok: false, code: "native_click_unavailable" };
-  }
-}
-
-async function measureBrowserClickTarget(tabId, message) {
-  try {
-    const measurement = await TRUSTED_CLICK.withTimeout(
-      chrome.tabs.sendMessage(tabId, {
-        type: "avito_crm_measure_click_target",
-        commandId: message.commandId,
-        activation: message.activation || "mouse",
-        expectedUrl: currentCommand?.url || "",
-        expectedContentVersion: EXTENSION_VERSION
-      }),
-      CONTENT_TARGET_MEASURE_TIMEOUT_MS,
-      "target_measurement_timeout"
-    );
-    return measurement || { ok: false, code: "target_measurement_unavailable" };
-  } catch (error) {
-    return {
-      ok: false,
-      code: isMissingContentScriptError(safeMessage(error))
-        ? "content_script_unavailable"
-        : "target_measurement_unavailable"
-    };
   }
 }
 

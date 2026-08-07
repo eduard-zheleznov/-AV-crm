@@ -165,67 +165,6 @@ def test_bridge_exposes_stop_to_the_waiting_extension(settings):
     assert bridge._command_status("waiting-command") == "cancelled"
 
 
-def test_bridge_native_click_endpoint_is_authenticated_and_single_use(
-    settings, monkeypatch
-):
-    port = _free_port()
-    token = "z" * 64
-    configured = replace(
-        settings,
-        avito_extension_port=port,
-        avito_extension_token=token,
-    )
-    bridge = ExtensionBridge(configured)
-    bridge.state.command = {
-        "id": "native-command",
-        "type": "reveal_phone",
-        "url": "https://www.avito.ru/moskva/test_123456789",
-        "nativeClickToken": "one-use-token",
-    }
-    bridge.state.extension_version = EXPECTED_EXTENSION_VERSION
-    bridge.state.extension_instance = "native-instance"
-    calls: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        chrome_extension_module,
-        "perform_windows_native_click",
-        lambda payload: calls.append(payload),
-    )
-    payload: dict[str, object] = {
-        "commandId": "native-command",
-        "nativeToken": "one-use-token",
-        "listingId": "123456789",
-        "tabId": 42,
-        "window": {},
-        "viewport": {},
-        "target": {},
-    }
-    bridge.start()
-    try:
-        status, first = _request(
-            port,
-            token,
-            "/v1/native-click",
-            payload=payload,
-            extension_version=EXPECTED_EXTENSION_VERSION,
-            extension_instance="native-instance",
-        )
-        _status, second = _request(
-            port,
-            token,
-            "/v1/native-click",
-            payload=payload,
-            extension_version=EXPECTED_EXTENSION_VERSION,
-            extension_instance="native-instance",
-        )
-    finally:
-        bridge.close()
-
-    assert status == 200
-    assert first == {"ok": True, "code": "native_click_dispatched"}
-    assert second == {"ok": False, "code": "native_click_already_used"}
-    assert calls == [payload]
-
-
 def test_bridge_runs_a_no_click_health_probe_and_records_the_instance(settings):
     port = _free_port()
     token = "c" * 64
@@ -303,7 +242,7 @@ def test_manifest_matches_the_required_extension_version():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["version"] == EXPECTED_EXTENSION_VERSION
-    assert "debugger" in manifest["permissions"]
+    assert "debugger" not in manifest["permissions"]
     assert "scripting" in manifest["permissions"]
 
 
@@ -671,38 +610,25 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
 
     assert 'notifyStatus("clicked"' not in content
     assert '"click_dispatched"' in content
-    assert '"keyboard_dispatched"' in content
     assert 'notifyStatus("reveal_confirmed"' in content
-    assert 'const activationPlan = ["mouse", "enter", "space", "native"]' in content
-    assert "avito_crm_browser_click" in content
-    assert "avito_crm_measure_click_target" in content
+    assert "actionAttempt <= 2" in content
+    assert "avito_crm_dom_click_gate" in content
     assert "expectedContentVersion" in (
         Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
     ).read_text(encoding="utf-8")
     assert ".dispatchEvent(" not in content
-    assert "button.click(" not in content
+    assert content.count("button.click()") == 1
     assert "topElement.contains(button)" not in content
-
-    trusted_click = (
-        Path(__file__).parents[1] / "chrome-extension" / "trusted-click.js"
-    ).read_text(encoding="utf-8")
-    assert '"Input.dispatchMouseEvent"' in trusted_click
-    assert "chromeApi.debugger.attach" in trusted_click
-    assert "chromeApi.debugger.detach" in trusted_click
-    assert '"Page.bringToFront"' in trusted_click
-    assert 'expression: "window.focus()"' in trusted_click
-    assert "options.measureTarget" in trusted_click
-    assert '"Input.dispatchKeyEvent"' in trusted_click
-    assert 'activation !== "mouse" && measurement.focused !== true' in trusted_click
 
     service_worker = (
         Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
     ).read_text(encoding="utf-8")
     assert "NAVIGATION.shouldInject" in service_worker
     assert "NAVIGATION.injectContentFiles" in service_worker
-    assert "measureBrowserClickTarget" in service_worker
-    assert "/v1/native-click" in service_worker
-    assert "nativeClickToken" in service_worker
+    assert "handleDomClickGate" in service_worker
+    assert "handleBrowserClick(" not in service_worker
+    assert "measureBrowserClickTarget" not in service_worker
+    assert "native-click" not in service_worker
     assert "x: message.x" not in service_worker
     assert "content_script_reload" not in service_worker
 

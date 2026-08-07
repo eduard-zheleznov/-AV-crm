@@ -45,12 +45,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse(probePage(message.expectedUrl, message.mode));
     return false;
   }
-  if (message?.type === "avito_crm_measure_click_target") {
-    measureAttachedClickTarget(message)
-      .then(sendResponse)
-      .catch(() => sendResponse({ ok: false, code: "target_measurement_unavailable" }));
-    return true;
-  }
   if (message?.type !== "avito_crm_reveal_once") {
     return false;
   }
@@ -122,17 +116,14 @@ async function revealOnce(command) {
 }
 
 async function revealWithVerifiedClick(initialButton, command) {
-  const overallDeadline =
-    Date.now() + Math.max(30000, Number(command.phoneWaitMs) || 10000);
-  const activationPlan = ["mouse", "enter", "space", "native"];
+  const overallDeadline = Date.now() + Math.max(15000, Number(command.phoneWaitMs) || 10000);
   let button = initialButton;
   let phoneRegion = null;
 
-  for (let actionAttempt = 0; actionAttempt < activationPlan.length; actionAttempt += 1) {
-    const activation = activationPlan[actionAttempt];
+  for (let actionAttempt = 1; actionAttempt <= 2; actionAttempt += 1) {
     button = await prepareClickTarget(button);
     if (!button) {
-      if (actionAttempt < activationPlan.length - 1) {
+      if (actionAttempt === 1) {
         notifyStatus("click_recovery", "кнопка будет найдена повторно");
         await delay(500);
         continue;
@@ -148,40 +139,47 @@ async function revealWithVerifiedClick(initialButton, command) {
 
     const before = revealState(button);
     phoneRegion = screenRegion(button);
-    notifyStatus(
-      activation === "mouse"
-        ? "clicking"
-        : activation === "native"
-          ? "native_recovery"
-          : "keyboard_recovery",
-      activation === "mouse"
-        ? "кнопка показа телефона готова"
-        : `кнопка повторно проверена; активация ${activation}`
-    );
-    const dispatched = await requestBrowserActivation(command, activation);
-    if (!dispatched.ok) {
-      if (actionAttempt < activationPlan.length - 1) {
+    const gate = await requestDomClickGate(command);
+    if (!gate.ok) {
+      if (actionAttempt === 1) {
         notifyStatus(
           "click_recovery",
-          "browser-level активация недоступна; пробуем следующий bounded метод"
+          "safety gate DOM-click не пройден; один bounded retry"
         );
         button = findPhoneButton();
         await delay(500);
         continue;
       }
-      return browserClickUnavailable(dispatched.code);
+      return browserClickUnavailable(gate.code);
     }
-    notifyStatus(
-      activation === "mouse"
-        ? "click_dispatched"
-        : activation === "native"
-          ? "native_dispatched"
-          : "keyboard_dispatched",
-      `browser-level ${activation} отправлен; ожидаем изменение DOM`
-    );
+    // Restore the exact activation path that worked in extension 1.0.7, but
+    // never trust dispatch itself as success. Re-query after the asynchronous
+    // command/tab/listing/STOP gate so a stale element cannot be clicked.
+    button = findPhoneButton();
+    if (
+      !button ||
+      !isActionableClickTarget(button) ||
+      !globalThis.AVITO_CRM_RUNTIME_CORE.sameListingIdentity(
+        window.location.href,
+        command.expectedUrl
+      ) ||
+      manualReason()
+    ) {
+      if (actionAttempt === 1) {
+        notifyStatus("click_recovery", "DOM-click target будет найден повторно");
+        button = findPhoneButton();
+        await delay(500);
+        continue;
+      }
+      return clickNotEffective("dom_target_changed");
+    }
+    button.focus({ preventScroll: true });
+    notifyStatus("clicking", "кнопка показа телефона готова к DOM-click");
+    button.click();
+    notifyStatus("click_dispatched", "DOM-click отправлен; ожидаем изменение DOM");
 
     const verificationDeadline =
-      actionAttempt < activationPlan.length - 1
+      actionAttempt === 1
         ? Math.min(overallDeadline, Date.now() + 3000)
         : overallDeadline;
     const transition = await waitForRevealTransition(
@@ -201,10 +199,10 @@ async function revealWithVerifiedClick(initialButton, command) {
         phoneRegion
       );
     }
-    if (actionAttempt < activationPlan.length - 1) {
+    if (actionAttempt === 1) {
       notifyStatus(
         "click_recovery",
-        `${activation} не изменил DOM; переходим к следующему bounded методу`
+        "первый DOM-click не изменил DOM; один bounded retry"
       );
       button = findPhoneButton();
       await delay(500);
@@ -219,7 +217,8 @@ async function prepareClickTarget(candidate) {
     return null;
   }
   button.scrollIntoView({ behavior: "auto", block: "center", inline: "center" });
-  await delay(350);
+  // Extension 1.0.7 used this settle interval before its successful DOM path.
+  await delay(750);
   button = findPhoneButton();
   if (!button || !isActionableClickTarget(button)) {
     return null;
@@ -248,14 +247,11 @@ function isActionableClickTarget(button) {
   );
 }
 
-async function requestBrowserActivation(command, activation) {
-  // Do not send coordinates measured before chrome.debugger.attach: Chrome may
-  // resize the viewport when attaching. The service worker asks this content
-  // script for a fresh target while the debugger is already attached.
+async function requestDomClickGate(command) {
   const request = chrome.runtime.sendMessage({
-    type: activation === "native" ? "avito_crm_native_click" : "avito_crm_browser_click",
+    type: "avito_crm_dom_click_gate",
     commandId: command.commandId,
-    activation
+    activation: "dom"
   });
   let timer = null;
   const timeout = new Promise((resolve) => {
@@ -271,62 +267,6 @@ async function requestBrowserActivation(command, activation) {
   } finally {
     clearTimeout(timer);
   }
-}
-
-async function measureAttachedClickTarget(message) {
-  if (message.commandId !== activeRevealCommandId) {
-    return { ok: false, code: "command_mismatch" };
-  }
-  if (
-    message.expectedContentVersion &&
-    message.expectedContentVersion !== CONTENT_SCRIPT_VERSION
-  ) {
-    return { ok: false, code: "stale_content_script" };
-  }
-  if (
-    !globalThis.AVITO_CRM_RUNTIME_CORE.sameListingIdentity(
-      window.location.href,
-      message.expectedUrl
-    )
-  ) {
-    return { ok: false, code: "listing_mismatch" };
-  }
-  if (manualReason()) {
-    return { ok: false, code: "manual_required" };
-  }
-  let button = await prepareClickTarget(findPhoneButton());
-  if (!button) {
-    return { ok: false, code: "click_target_unavailable" };
-  }
-  // Re-query once after focus/scroll settles. If the viewport changed, only
-  // this final DOMRect is used; any earlier rectangle is discarded.
-  await delay(50);
-  button = findPhoneButton();
-  if (!button || !isActionableClickTarget(button)) {
-    return { ok: false, code: "click_target_unavailable" };
-  }
-  const focused = document.activeElement === button;
-  if (message.activation !== "mouse" && !focused) {
-    return { ok: false, code: "click_target_not_focused" };
-  }
-  const rect = button.getBoundingClientRect();
-  return {
-    ok: true,
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2,
-    width: rect.width,
-    height: rect.height,
-    focused,
-    viewport: {
-      screenX: window.screenX,
-      screenY: window.screenY,
-      outerWidth: window.outerWidth,
-      outerHeight: window.outerHeight,
-      innerWidth: window.innerWidth,
-      innerHeight: window.innerHeight,
-      devicePixelRatio: window.devicePixelRatio
-    }
-  };
 }
 
 async function waitForRevealTransition(before, deadline, manualTimeoutMs) {
@@ -386,7 +326,7 @@ function clickNotEffective(code = "dispatch_without_effect") {
   return {
     status: "click_not_effective",
     reason:
-      "Avito не подтвердил раскрытие номера после bounded mouse/Enter/Space/native активации " +
+      "Avito не подтвердил раскрытие номера после двух bounded DOM-click " +
       `(${String(code).slice(0, 80)})`
   };
 }
