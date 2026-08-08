@@ -72,6 +72,8 @@ class TranscriptionResult:
     confidence: float
     phone_count: int
     transcript: str = ""
+    confirmation_count: int = 2
+    dictations: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -126,6 +128,30 @@ class GeminiPhoneTranscriber:
         if not self.settings.gemini_api_key:
             raise ConfigurationError("Для распознавания не заполнен GEMINI_API_KEY")
         audio, mime_type = self._download(recording_url)
+        try:
+            return self._analyze_audio(audio, mime_type, _TRANSCRIPTION_PROMPT)
+        except ManualReviewRequired as first_error:
+            LOGGER.info(
+                "Первичный анализ номера неоднозначен; выполняем до двух строгих "
+                "контрольных проходов"
+            )
+            for _recovery_attempt in range(2):
+                try:
+                    return self._analyze_audio(
+                        audio,
+                        mime_type,
+                        _RECOVERY_TRANSCRIPTION_PROMPT,
+                    )
+                except ManualReviewRequired:
+                    continue
+            raise first_error from None
+
+    def _analyze_audio(
+        self,
+        audio: bytes,
+        mime_type: str,
+        prompt: str,
+    ) -> TranscriptionResult:
         endpoint = (
             f"{self.settings.gemini_api_base_url}/v1beta/models/"
             f"{self.settings.gemini_model}:generateContent"
@@ -138,7 +164,7 @@ class GeminiPhoneTranscriber:
                     {
                         "role": "user",
                         "parts": [
-                            {"text": _TRANSCRIPTION_PROMPT},
+                            {"text": prompt},
                             {
                                 "inline_data": {
                                     "mime_type": mime_type,
@@ -153,7 +179,14 @@ class GeminiPhoneTranscriber:
                     "responseMimeType": "application/json",
                     "responseSchema": {
                         "type": "object",
-                        "required": ["status", "phone", "confidence", "phone_count"],
+                        "required": [
+                            "status",
+                            "phone",
+                            "confidence",
+                            "phone_count",
+                            "confirmation_count",
+                            "dictations",
+                        ],
                         "properties": {
                             "status": {
                                 "type": "string",
@@ -162,6 +195,11 @@ class GeminiPhoneTranscriber:
                             "phone": {"type": "string"},
                             "confidence": {"type": "number"},
                             "phone_count": {"type": "integer"},
+                            "confirmation_count": {"type": "integer"},
+                            "dictations": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                             "transcript": {"type": "string"},
                         },
                     },
@@ -198,10 +236,16 @@ class GeminiPhoneTranscriber:
         try:
             confidence = float(parsed.get("confidence", 0))
             phone_count = int(parsed.get("phone_count", 0))
+            confirmation_count = int(parsed.get("confirmation_count", 0))
         except (TypeError, ValueError) as exc:
             raise AppError(
-                "Сервис распознавания не указал уверенность или число телефонов"
+                "Сервис распознавания не указал уверенность, число телефонов "
+                "или число подтверждений"
             ) from exc
+        raw_dictations = parsed.get("dictations")
+        if not isinstance(raw_dictations, list):
+            raise AppError("Сервис распознавания не вернул список диктовок номера")
+        dictations = tuple(str(value or "").strip() for value in raw_dictations)
         phone = normalize_phone(str(parsed.get("phone", "") or "")) or ""
         if status != "ok" or phone_count != 1 or not phone:
             raise ManualReviewRequired(
@@ -211,12 +255,34 @@ class GeminiPhoneTranscriber:
             raise ManualReviewRequired(
                 "Уверенность распознавания номера ниже безопасного порога"
             )
+        normalized_dictations = tuple(
+            candidate
+            for candidate in (normalize_phone(value) for value in dictations)
+            if candidate
+        )
+        if (
+            confirmation_count < 2
+            or len(normalized_dictations) < 2
+            or normalized_dictations.count(phone) < 2
+            or set(normalized_dictations) != {phone}
+        ):
+            raise ManualReviewRequired(
+                "Номер не подтверждён точным полным повтором собеседника"
+            )
         transcript_phones = extract_phones(transcript)
         if transcript_phones != [phone]:
             raise ManualReviewRequired(
                 "Контрольный фрагмент и итоговый номер распознавания не совпали однозначно"
             )
-        return TranscriptionResult(status, phone, confidence, phone_count, transcript)
+        return TranscriptionResult(
+            status,
+            phone,
+            confidence,
+            phone_count,
+            transcript,
+            confirmation_count,
+            normalized_dictations,
+        )
 
     def _download(self, url: str) -> tuple[bytes, str]:
         current = _validated_https_url(url)
@@ -1106,12 +1172,36 @@ def _safe_reason(exc: BaseException) -> str:
 
 _TRANSCRIPTION_PROMPT = """
 Проанализируй запись исходящего звонка. Найди только постоянный российский номер телефона,
-который собеседник явно и полностью продиктовал в разговоре. Не используй номер дозвона,
-служебные номера, цифры из приветствия, даты или цены. Не угадывай пропущенные цифры.
+который СОБЕСЕДНИК (не робот Алина) явно и полностью продиктовал в разговоре. Не используй
+номер дозвона, служебные номера, цифры из приветствия, даты или цены. Не угадывай
+пропущенные цифры.
 Верни status=ok только если найден ровно один однозначный номер из 11 цифр, начинающийся
-с 7 или 8; phone верни в формате +7XXXXXXXXXX. Если продиктовано несколько номеров,
-часть номера неразборчива или есть сомнение, верни ambiguous/no_phone и пустой phone.
-phone_count — число разных полностью продиктованных номеров. transcript — короткий фрагмент
-с произнесённым номером, без остального разговора; распознанный номер обязательно
-продублируй в этом фрагменте цифрами в формате +7XXXXXXXXXX.
+с 7 или 8, и тот же собеседник затем полностью повторил тот же номер без расхождений;
+phone верни в формате +7XXXXXXXXXX. Собирай цифры одной диктовки через паузы и группы,
+но не смешивай первую диктовку с повтором. Если полного точного повтора нет, продиктовано
+несколько разных номеров, часть номера неразборчива или есть сомнение, верни
+ambiguous/no_phone и пустой phone. phone_count — число разных полностью продиктованных
+номеров. confirmation_count — число полных совпадающих диктовок итогового номера.
+dictations — отдельные полные диктовки собеседника в порядке звучания, каждая в формате
++7XXXXXXXXXX; частичные фрагменты не включай. transcript — короткий фрагмент с первой
+диктовкой и повтором; итоговый номер обязательно укажи цифрами.
+""".strip()
+
+
+_RECOVERY_TRANSCRIPTION_PROMPT = """
+Повторно и особенно внимательно проанализируй запись исходящего звонка только для проверки
+продиктованного телефона. Разделяй голос робота Алины и голос собеседника. Ищи момент,
+где собеседник диктует постоянный российский номер группами цифр, а затем по просьбе робота
+повторяет его. Паузы, слова «так», «дальше», самокоррекция одной цифры и группировка
+по 2–4 цифры не разрывают одну диктовку. Номер дозвона Avito, бюджет, площадь, даты и цифры
+из реплик робота запрещено использовать.
+
+Верни status=ok только если из речи собеседника можно независимо собрать минимум две полные
+диктовки одного и того же российского номера (10 цифр без 7/8 либо 11 цифр с 7/8) и после
+нормализации они полностью совпадают. Не достраивай цифры и не принимай один полный номер
+плюс короткий фрагмент за подтверждение. phone — +7XXXXXXXXXX; phone_count — число разных
+полных номеров; confirmation_count — число полных совпадающих диктовок; dictations — каждая
+полная диктовка отдельно в формате +7XXXXXXXXXX; transcript — короткое цифровое
+свидетельство первой диктовки и точного повтора. При любом расхождении или неполноте верни
+ambiguous/no_phone и пустой phone.
 """.strip()

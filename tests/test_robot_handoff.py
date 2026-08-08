@@ -913,7 +913,15 @@ def test_gemini_uses_structured_json_and_never_puts_key_in_url(settings):
                                             "phone": "+79991234567",
                                             "confidence": 0.99,
                                             "phone_count": 1,
-                                            "transcript": "мой номер +7 999 123-45-67",
+                                            "confirmation_count": 2,
+                                            "dictations": [
+                                                "+79991234567",
+                                                "+79991234567",
+                                            ],
+                                            "transcript": (
+                                                "первый +7 999 123-45-67; "
+                                                "повтор +7 999 123-45-67"
+                                            ),
                                         }
                                     )
                                 }
@@ -963,7 +971,14 @@ def test_gemini_normalizes_lptracker_wav_mime_from_file_signature(settings):
                                             "phone": "+79991234567",
                                             "confidence": 0.99,
                                             "phone_count": 1,
-                                            "transcript": "+7 999 123-45-67",
+                                            "confirmation_count": 2,
+                                            "dictations": [
+                                                "+79991234567",
+                                                "+79991234567",
+                                            ],
+                                            "transcript": (
+                                                "+7 999 123-45-67; +7 999 123-45-67"
+                                            ),
                                         }
                                     )
                                 }
@@ -1050,7 +1065,15 @@ def test_gemini_uses_private_lptracker_feed_token_only_for_recording_host(settin
                                             "phone": "+79991234567",
                                             "confidence": 0.99,
                                             "phone_count": 1,
-                                            "transcript": "мой номер +7 999 123-45-67",
+                                            "confirmation_count": 2,
+                                            "dictations": [
+                                                "+79991234567",
+                                                "+79991234567",
+                                            ],
+                                            "transcript": (
+                                                "первый +7 999 123-45-67; "
+                                                "повтор +7 999 123-45-67"
+                                            ),
                                         }
                                     )
                                 }
@@ -1090,6 +1113,11 @@ def test_gemini_rejects_result_without_numeric_control_fragment(settings):
                                             "phone": "+79991234567",
                                             "confidence": 0.99,
                                             "phone_count": 1,
+                                            "confirmation_count": 2,
+                                            "dictations": [
+                                                "+79991234567",
+                                                "+79991234567",
+                                            ],
                                             "transcript": "номер продиктован словами",
                                         }
                                     )
@@ -1109,3 +1137,152 @@ def test_gemini_rejects_result_without_numeric_control_fragment(settings):
 
     with pytest.raises(ManualReviewRequired, match="Контрольный фрагмент"):
         transcriber.transcribe("https://records.example.test/call.mp3")
+
+
+def test_gemini_recovers_only_after_two_identical_complete_dictations(settings):
+    gemini_calls = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal gemini_calls
+        if request.url.host == "records.example.test":
+            return httpx.Response(200, content=b"audio", headers={"content-type": "audio/mp3"})
+        gemini_calls += 1
+        if gemini_calls == 1:
+            result = {
+                "status": "ambiguous",
+                "phone": "",
+                "confidence": 0.85,
+                "phone_count": 0,
+                "confirmation_count": 0,
+                "dictations": [],
+                "transcript": "",
+            }
+        else:
+            result = {
+                "status": "ok",
+                "phone": "+79991234567",
+                "confidence": 0.99,
+                "phone_count": 1,
+                "confirmation_count": 2,
+                "dictations": ["8 999 123 45 67", "+7 999 123-45-67"],
+                "transcript": (
+                    "первая +7 999 123-45-67; повтор +7 999 123-45-67"
+                ),
+            }
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": json.dumps(result)}]}}]},
+        )
+
+    configured = replace(settings, gemini_api_key="secret-test-key")
+    transcriber = GeminiPhoneTranscriber(
+        configured,
+        client=httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False),
+    )
+
+    result = transcriber.transcribe("https://records.example.test/call.mp3")
+
+    assert result.phone == "+79991234567"
+    assert result.confirmation_count == 2
+    assert result.dictations == ("+79991234567", "+79991234567")
+    assert gemini_calls == 2
+
+
+def test_gemini_can_recover_on_second_strict_pass(settings):
+    gemini_calls = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal gemini_calls
+        if request.url.host == "records.example.test":
+            return httpx.Response(200, content=b"audio", headers={"content-type": "audio/mp3"})
+        gemini_calls += 1
+        if gemini_calls < 3:
+            result = {
+                "status": "ambiguous",
+                "phone": "",
+                "confidence": 0.8,
+                "phone_count": 0,
+                "confirmation_count": 0,
+                "dictations": [],
+                "transcript": "",
+            }
+        else:
+            result = {
+                "status": "ok",
+                "phone": "+79991234567",
+                "confidence": 0.99,
+                "phone_count": 1,
+                "confirmation_count": 2,
+                "dictations": ["+79991234567", "+79991234567"],
+                "transcript": "+79991234567; +79991234567",
+            }
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": json.dumps(result)}]}}]},
+        )
+
+    configured = replace(settings, gemini_api_key="secret-test-key")
+    transcriber = GeminiPhoneTranscriber(
+        configured,
+        client=httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False),
+    )
+
+    assert transcriber.transcribe("https://records.example.test/call.mp3").phone == (
+        "+79991234567"
+    )
+    assert gemini_calls == 3
+
+
+@pytest.mark.parametrize(
+    ("confirmation_count", "dictations"),
+    [
+        (1, ["+79991234567"]),
+        (2, ["+79991234567", "+79997654321"]),
+    ],
+)
+def test_gemini_recovery_rejects_unconfirmed_or_mismatched_repeat(
+    settings, confirmation_count, dictations
+):
+    gemini_calls = 0
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        nonlocal gemini_calls
+        if request.url.host == "records.example.test":
+            return httpx.Response(200, content=b"audio", headers={"content-type": "audio/mp3"})
+        gemini_calls += 1
+        result = (
+            {
+                "status": "ambiguous",
+                "phone": "",
+                "confidence": 0.8,
+                "phone_count": 0,
+                "confirmation_count": 0,
+                "dictations": [],
+                "transcript": "",
+            }
+            if gemini_calls == 1
+            else {
+                "status": "ok",
+                "phone": "+79991234567",
+                "confidence": 0.99,
+                "phone_count": 1,
+                "confirmation_count": confirmation_count,
+                "dictations": dictations,
+                "transcript": "+79991234567",
+            }
+        )
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": json.dumps(result)}]}}]},
+        )
+
+    configured = replace(settings, gemini_api_key="secret-test-key")
+    transcriber = GeminiPhoneTranscriber(
+        configured,
+        client=httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False),
+    )
+
+    with pytest.raises(ManualReviewRequired, match="однозначно"):
+        transcriber.transcribe("https://records.example.test/call.mp3")
+
+    assert gemini_calls == 3
