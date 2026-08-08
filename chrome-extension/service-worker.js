@@ -1,6 +1,7 @@
-importScripts("config.local.js");
+importScripts("config.local.js", "readiness-core.js");
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
+const READINESS = globalThis.AVITO_CRM_READINESS;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
@@ -15,7 +16,22 @@ let polling = false;
 let managedTabId = null;
 let currentCommandId = null;
 
-class PageNotReadyError extends Error {}
+const NAVIGATION_ATTEMPTS = 2;
+const NAVIGATION_RETRY_DELAY_MS = 1500;
+
+class PageNotReadyError extends Error {
+  constructor(message, diagnostics = {}) {
+    super(message);
+    this.diagnostics = diagnostics;
+  }
+}
+
+class InvalidListingNavigationError extends Error {
+  constructor(message, diagnostics = {}) {
+    super(message);
+    this.diagnostics = diagnostics;
+  }
+}
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -97,11 +113,11 @@ async function pollLoop() {
 async function executeCommand(command) {
   currentCommandId = command.id;
   try {
-    const tab = await getManagedTab(command.url, command.pageTimeoutMs);
+    let tab = await getManagedTab(command.url, command.pageTimeoutMs, false);
     for (let attempt = 1; attempt <= command.maxClicks; attempt += 1) {
       if (attempt > 1) {
         await delay(Math.max(1000, command.retryDelayMs));
-        await navigateTab(tab.id, command.url, command.pageTimeoutMs, true);
+        tab = await getManagedTab(command.url, command.pageTimeoutMs, true);
       }
       await focusTab(tab.id);
       const result = await sendRevealMessage(tab.id, command);
@@ -129,36 +145,76 @@ async function executeCommand(command) {
       reason: "Avito не показал номер после разрешённого числа попыток"
     });
   } catch (error) {
+    const status =
+      error instanceof InvalidListingNavigationError
+        ? "invalid_listing"
+        : error instanceof PageNotReadyError
+          ? "page_not_ready"
+          : "error";
     await postEvent({
       id: command.id,
       type: "result",
-      status: error instanceof PageNotReadyError ? "page_not_ready" : "error",
-      reason: safeMessage(error)
+      status,
+      reason: safeMessage(error),
+      diagnostics: safeDiagnostics(error?.diagnostics)
     }).catch(() => undefined);
   } finally {
     currentCommandId = null;
   }
 }
 
-async function getManagedTab(url, pageTimeoutMs) {
-  if (managedTabId !== null) {
+async function getManagedTab(url, pageTimeoutMs, forceReload) {
+  const expectedId = READINESS.listingId(url);
+  if (!expectedId) {
+    throw new InvalidListingNavigationError(
+      "Ссылка Avito не содержит корректный ID объявления",
+      { state: "invalid_expected_url" }
+    );
+  }
+
+  let lastError = null;
+  for (let navigationAttempt = 1; navigationAttempt <= NAVIGATION_ATTEMPTS; navigationAttempt += 1) {
     try {
-      const existing = await chrome.tabs.get(managedTabId);
-      return await navigateTab(existing.id, url, pageTimeoutMs, false);
-    } catch (_error) {
-      const staleTabId = managedTabId;
-      managedTabId = null;
-      if (staleTabId !== null) {
-        await chrome.tabs.remove(staleTabId).catch(() => undefined);
+      let tab = null;
+      if (managedTabId !== null) {
+        tab = await chrome.tabs.get(managedTabId).catch(() => null);
+      }
+      if (!tab) {
+        const created = await chrome.tabs.create({ url: "about:blank", active: true });
+        managedTabId = created.id;
+        tab = created;
+      }
+      return await navigateTab(
+        tab.id,
+        url,
+        pageTimeoutMs,
+        forceReload,
+        navigationAttempt
+      );
+    } catch (error) {
+      if (error instanceof InvalidListingNavigationError) {
+        throw error;
+      }
+      lastError = error;
+      await resetManagedTab();
+      if (navigationAttempt < NAVIGATION_ATTEMPTS) {
+        await delay(NAVIGATION_RETRY_DELAY_MS);
       }
     }
   }
-  // Create an empty managed tab first. The navigation observer must be attached
-  // before the real Avito navigation starts; otherwise Chrome can report the
-  // previous page as complete and the extension captures a white/stale frame.
-  const created = await chrome.tabs.create({ url: "about:blank", active: true });
-  managedTabId = created.id;
-  return await navigateTab(created.id, url, pageTimeoutMs, false);
+  throw new PageNotReadyError(
+    "Страница объявления не отобразила рабочую область после двух ограниченных загрузок; " +
+      "строка будет повторена без расходования попытки",
+    lastError?.diagnostics || { state: "navigation_attempts_exhausted" }
+  );
+}
+
+async function resetManagedTab() {
+  const staleTabId = managedTabId;
+  managedTabId = null;
+  if (staleTabId !== null) {
+    await chrome.tabs.remove(staleTabId).catch(() => undefined);
+  }
 }
 
 async function sendRevealMessage(tabId, command) {
@@ -227,85 +283,93 @@ async function focusTab(tabId) {
   await chrome.tabs.update(tabId, { active: true });
 }
 
-function navigateTab(tabId, expectedUrl, timeoutMs, forceReload) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => {
-      chrome.tabs.onUpdated.removeListener(listener);
-      clearTimeout(timer);
-    };
-    const complete = (tab) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      cleanup();
-      resolve(tab);
-    };
-    const fail = (error) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      cleanup();
-      reject(error);
-    };
-    const listener = (updatedTabId, changeInfo, tab) => {
-      if (
-        updatedTabId === tabId &&
-        changeInfo.status === "complete" &&
-        isExpectedSurface(tab?.url || changeInfo.url || "", expectedUrl)
-      ) {
-        complete(tab);
-      }
-    };
-    const timer = setTimeout(() => {
-      fail(
-        new PageNotReadyError(
-          "Страница объявления не успела полностью загрузиться; строка будет повторена без расходования попытки"
-        )
-      );
-    }, Math.max(1000, timeoutMs));
-    // The listener is intentionally installed before update/reload.
-    chrome.tabs.onUpdated.addListener(listener);
-    chrome.tabs
-      .get(tabId)
-      .then((current) => {
-        if (forceReload && isExpectedSurface(current.url || "", expectedUrl)) {
-          return chrome.tabs.reload(tabId);
-        }
-        return chrome.tabs.update(tabId, { url: expectedUrl, active: true });
-      })
-      .then(() => chrome.tabs.get(tabId))
-      .then((tab) => {
-        if (tab.status === "complete" && isExpectedSurface(tab.url || "", expectedUrl)) {
-          complete(tab);
-        }
-      })
-      .catch(fail);
-  });
-}
-
-function isExpectedSurface(actualUrl, expectedUrl) {
-  try {
-    const actual = new URL(actualUrl);
-    const expected = new URL(expectedUrl);
-    if (!/(^|\.)avito\.ru$/i.test(actual.hostname)) {
-      return false;
-    }
-    const actualValue = `${actual.pathname}${actual.search}${actual.hash}`.toLowerCase();
-    if (
-      actualValue.includes("captcha") ||
-      actualValue.includes("/challenge") ||
-      /\/(?:auth|login)(?:[/?#]|$)/i.test(actual.pathname)
-    ) {
-      return true;
-    }
-    const normalizePath = (value) => value.replace(/\/+$/, "");
-    return normalizePath(actual.pathname) === normalizePath(expected.pathname);
-  } catch (_error) {
-    return false;
+async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, navigationAttempt) {
+  const startedAt = Date.now();
+  const deadline = startedAt + Math.max(3000, Number(timeoutMs) || 10000);
+  const current = await chrome.tabs.get(tabId);
+  if (forceReload && READINESS.sameListing(current.url || "", expectedUrl)) {
+    await chrome.tabs.reload(tabId);
+  } else {
+    await chrome.tabs.update(tabId, { url: expectedUrl, active: true });
   }
+
+  let actionableSamples = 0;
+  let renderedSamples = 0;
+  let mismatchSamples = 0;
+  let lastDiagnostics = {
+    navigationAttempt,
+    state: "navigation_started",
+    expectedId: READINESS.listingId(expectedUrl)
+  };
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId);
+    const probe = await chrome.tabs
+      .sendMessage(tabId, {
+        type: "avito_crm_readiness_probe",
+        expectedUrl
+      })
+      .catch(() => null);
+    const state = probe ? READINESS.classifyProbe(probe, expectedUrl) : "loading";
+    lastDiagnostics = {
+      navigationAttempt,
+      state,
+      expectedId: READINESS.listingId(expectedUrl),
+      actualId: READINESS.listingId(probe?.actualUrl || tab.url || ""),
+      tabStatus: tab.status || "unknown",
+      readyState: probe?.readyState || "unavailable",
+      probeConnected: Boolean(probe),
+      elapsedMs: Date.now() - startedAt
+    };
+
+    if (state === "manual_required") {
+      return tab;
+    }
+    if (state === "actionable") {
+      actionableSamples += 1;
+      renderedSamples += 1;
+      mismatchSamples = 0;
+      if (actionableSamples >= 2) {
+        return tab;
+      }
+    } else if (state === "rendered") {
+      actionableSamples = 0;
+      renderedSamples += 1;
+      mismatchSamples = 0;
+    } else if (state === "listing_mismatch") {
+      actionableSamples = 0;
+      renderedSamples = 0;
+      mismatchSamples += 1;
+      if (mismatchSamples >= 2 && probe?.rendered && tab.status !== "loading") {
+        throw new InvalidListingNavigationError(
+          "Avito открыл другое объявление вместо переданного ID",
+          lastDiagnostics
+        );
+      }
+    } else {
+      actionableSamples = 0;
+      renderedSamples = 0;
+      mismatchSamples = 0;
+    }
+    await delay(500);
+  }
+
+  const finalTab = await chrome.tabs.get(tabId);
+  if (renderedSamples >= 2 && READINESS.sameListing(finalTab.url || "", expectedUrl)) {
+    // The listing DOM is stable. Let the unchanged content.js distinguish a
+    // missing phone button from an inactive listing instead of misclassifying
+    // slow background resources as a browser failure.
+    return finalTab;
+  }
+  if (lastDiagnostics.state === "listing_mismatch") {
+    throw new InvalidListingNavigationError(
+      "Avito открыл другое объявление вместо переданного ID",
+      lastDiagnostics
+    );
+  }
+  throw new PageNotReadyError(
+    "Страница объявления не отобразила рабочую область; строка будет повторена без расходования попытки",
+    lastDiagnostics
+  );
 }
 
 async function postEvent(payload) {
@@ -325,4 +389,23 @@ function safeMessage(error) {
     return error.message.slice(0, 300);
   }
   return String(error || "неизвестная ошибка").slice(0, 300);
+}
+
+function safeDiagnostics(value) {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+  const allowed = [
+    "navigationAttempt",
+    "state",
+    "expectedId",
+    "actualId",
+    "tabStatus",
+    "readyState",
+    "probeConnected",
+    "elapsedMs"
+  ];
+  return Object.fromEntries(
+    allowed.filter((key) => value[key] !== undefined).map((key) => [key, value[key]])
+  );
 }

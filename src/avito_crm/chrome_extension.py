@@ -26,6 +26,7 @@ from avito_crm.config import Settings
 from avito_crm.errors import (
     BrowserOperationError,
     InactiveListingError,
+    InvalidListingError,
     ManualActionRequired,
     NotificationError,
     OperatorStopRequested,
@@ -40,7 +41,26 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.7"
+EXPECTED_EXTENSION_VERSION = "1.0.7.1"
+NAVIGATION_ATTEMPTS = 2
+NAVIGATION_RETRY_DELAY_SECONDS = 1.5
+
+
+def _extension_operation_timeout(settings: Settings, max_clicks: int) -> float:
+    """Return a complete bound for sequential navigation and reveal work."""
+    navigation = (
+        settings.avito_page_timeout * NAVIGATION_ATTEMPTS
+        + NAVIGATION_RETRY_DELAY_SECONDS * (NAVIGATION_ATTEMPTS - 1)
+    )
+    reveal = settings.avito_page_timeout + settings.avito_temp_number_wait_max
+    retries = max(0, max_clicks - 1)
+    return max(
+        30.0,
+        navigation
+        + (reveal * max_clicks)
+        + retries * (settings.avito_phone_retry_max + navigation)
+        + 30.0,
+    )
 
 
 @dataclass(slots=True)
@@ -141,6 +161,8 @@ class ExtensionBridge:
             "manualTimeoutMs": 0,
             "phoneWaitMs": round(self.settings.avito_temp_number_wait_max * 1000),
             "retryDelayMs": round(self.settings.avito_phone_retry_max * 1000),
+            "navigationAttempts": NAVIGATION_ATTEMPTS,
+            "navigationRetryDelayMs": round(NAVIGATION_RETRY_DELAY_SECONDS * 1000),
         }
         connection_deadline = time.monotonic() + self.settings.avito_extension_connect_timeout
         with self.state.condition:
@@ -167,13 +189,7 @@ class ExtensionBridge:
             self.state.result = None
             self.state.condition.notify_all()
 
-        operation_timeout = max(
-            30.0,
-            self.settings.avito_page_timeout
-            + self.settings.avito_temp_number_wait_max
-            + (self.settings.avito_phone_retry_max * max_clicks)
-            + 30.0,
-        )
+        operation_timeout = _extension_operation_timeout(self.settings, max_clicks)
         deadline: float | None = time.monotonic() + operation_timeout
         stop_seen_at: float | None = None
         manual_started_at: float | None = None
@@ -461,6 +477,7 @@ class ChromeExtensionBrowser:
             artifact.write_bytes(png)
             return self.ocr.read_viewport_png(png)
         if status == "page_not_ready":
+            self._log_readiness_diagnostics(payload)
             raise PageNotReadyError(
                 str(
                     payload.get(
@@ -468,6 +485,11 @@ class ChromeExtensionBrowser:
                         "Страница объявления не успела полностью отобразиться",
                     )
                 )
+            )
+        if status == "invalid_listing":
+            self._log_readiness_diagnostics(payload)
+            raise InvalidListingError(
+                str(payload.get("reason", "Ссылка не ведёт на доступное объявление Avito"))
             )
         if status == "inactive":
             raise InactiveListingError(str(payload.get("reason", "объявление недоступно")))
@@ -497,6 +519,28 @@ class ChromeExtensionBrowser:
         raise BrowserOperationError(
             str(payload.get("reason", f"Неизвестный ответ расширения: {status}"))
         )
+
+    @staticmethod
+    def _log_readiness_diagnostics(payload: dict[str, Any]) -> None:
+        diagnostics = payload.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return
+        allowed = {
+            key: diagnostics[key]
+            for key in (
+                "navigationAttempt",
+                "state",
+                "expectedId",
+                "actualId",
+                "tabStatus",
+                "readyState",
+                "probeConnected",
+                "elapsedMs",
+            )
+            if key in diagnostics
+        }
+        if allowed:
+            LOGGER.warning("Chrome readiness diagnostics: %s", allowed)
 
     def _handle_status(self, event: ExtensionEvent, url: str) -> None:
         if event.status == "manual_required" and not self._manual_notified:

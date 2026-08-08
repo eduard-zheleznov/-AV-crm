@@ -30,8 +30,13 @@ const INACTIVE_PATTERNS = [
 const PHONE_BUTTON_RE = /(?:показать\s+(?:номер(?:\s+телефона)?|телефон)|позвонить)/i;
 const PHONE_RE = /(?:\+7|8)[\s(.-]*\d{3}[\s).-]*\d{3}[\s.-]*\d{2}[\s.-]*\d{2}/g;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+const READINESS = globalThis.AVITO_CRM_READINESS;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "avito_crm_readiness_probe") {
+    sendResponse(readinessProbe(message.expectedUrl));
+    return false;
+  }
   if (message?.type !== "avito_crm_reveal_once") {
     return false;
   }
@@ -297,22 +302,47 @@ async function waitForPhoneButton(timeoutMs) {
 }
 
 async function waitForTargetReady(expectedUrl, timeoutMs) {
-  const waitMs = Math.max(3000, Math.min(15000, Number(timeoutMs) || 10000));
-  const deadline = Date.now() + waitMs;
+  const deadline = Date.now() + Math.max(3000, Number(timeoutMs) || 10000);
+  let stableSamples = 0;
   while (Date.now() < deadline) {
-    if (manualReason()) {
+    const state = READINESS.classifyProbe(readinessProbe(expectedUrl), expectedUrl);
+    if (state === "manual_required") {
       return true;
     }
-    if (
-      sameListingPath(location.href, expectedUrl) &&
-      document.readyState === "complete" &&
-      hasRenderedListingSurface()
-    ) {
-      return true;
+    if (state === "actionable" || state === "rendered") {
+      stableSamples += 1;
+      if (stableSamples >= 2) {
+        return true;
+      }
+    } else {
+      stableSamples = 0;
     }
     await delay(250);
   }
   return false;
+}
+
+function readinessProbe(expectedUrl) {
+  const manual = Boolean(manualReason());
+  const inactive = Boolean(inactiveReason());
+  const phone = Boolean(findPhone());
+  const phoneButton = Boolean(findPhoneButton());
+  const bodyText = (document.body?.innerText || "").trim();
+  const listingShell =
+    bodyText.length > 200 &&
+    Array.from(document.querySelectorAll("h1")).some((heading) => isVisible(heading));
+  return {
+    actualUrl: location.href,
+    expectedId: READINESS.listingId(expectedUrl),
+    actualId: READINESS.listingId(location.href),
+    readyState: document.readyState,
+    manual,
+    inactive,
+    phone,
+    phoneButton,
+    actionable: inactive || phone || phoneButton,
+    rendered: inactive || phone || phoneButton || listingShell
+  };
 }
 
 function hasRenderedListingSurface() {

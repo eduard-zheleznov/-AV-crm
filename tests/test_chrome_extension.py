@@ -20,6 +20,7 @@ from avito_crm.chrome_extension import (
 )
 from avito_crm.errors import (
     BrowserOperationError,
+    InvalidListingError,
     OperatorStopRequested,
     PageNotReadyError,
     PhoneNotFoundError,
@@ -182,6 +183,39 @@ def test_manifest_matches_the_required_extension_version():
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     assert manifest["version"] == EXPECTED_EXTENSION_VERSION
+
+
+def test_bridge_command_declares_bounded_navigation_budget(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.last_seen = chrome_extension_module.time.monotonic()
+    bridge.state.extension_version = EXPECTED_EXTENSION_VERSION
+    bridge.server = object()  # type: ignore[assignment]
+    captured: dict[str, object] = {}
+
+    def receive() -> None:
+        with bridge.state.condition:
+            while bridge.state.command is None:
+                bridge.state.condition.wait(timeout=1)
+            captured.update(bridge.state.command)
+            bridge.state.result = ExtensionEvent(
+                "result", "page_not_ready", {"reason": "not ready"}
+            )
+            bridge.state.condition.notify_all()
+
+    thread = threading.Thread(target=receive)
+    thread.start()
+    try:
+        bridge.execute(
+            url="https://www.avito.ru/moskva/test_123456",
+            row_id="2",
+            max_clicks=1,
+        )
+    finally:
+        thread.join(timeout=5)
+        bridge.server = None
+
+    assert captured["navigationAttempts"] == 2
+    assert captured["navigationRetryDelayMs"] == 1500
 
 
 class _FakeNotifier:
@@ -417,6 +451,20 @@ def test_extension_browser_maps_an_unloaded_page_to_a_safe_retry(settings):
     )
 
     with browser, pytest.raises(PageNotReadyError, match="не успела"):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_extension_browser_maps_a_wrong_listing_to_invalid_input(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "invalid_listing",
+            {"reason": "Avito открыл другое объявление"},
+        )
+    )
+
+    with browser, pytest.raises(InvalidListingError, match="другое объявление"):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
 
