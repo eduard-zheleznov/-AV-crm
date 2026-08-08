@@ -1,7 +1,8 @@
-importScripts("config.local.js", "readiness-core.js");
+importScripts("config.local.js", "readiness-core.js", "tab-capture-core.js");
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
 const READINESS = globalThis.AVITO_CRM_READINESS;
+const TAB_CAPTURE = globalThis.AVITO_CRM_TAB_CAPTURE;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
@@ -18,6 +19,7 @@ let currentCommandId = null;
 
 const NAVIGATION_ATTEMPTS = 2;
 const NAVIGATION_RETRY_DELAY_MS = 1500;
+const TAB_CAPTURE_TIMEOUT_MS = 5000;
 
 class PageNotReadyError extends Error {
   constructor(message, diagnostics = {}) {
@@ -127,11 +129,13 @@ async function executeCommand(command) {
       if (result.status === "screenshot") {
         await focusTab(tab.id);
         await delay(300);
+        const capture = await captureManagedAvitoTab(tab, command.url, result.crop);
         await postEvent({
           id: command.id,
           type: "result",
-          status: "screen_capture",
-          crop: result.crop || null
+          status: "tab_capture",
+          screenshot: capture.screenshot,
+          capture: capture.metadata
         });
         return;
       }
@@ -160,6 +164,58 @@ async function executeCommand(command) {
     }).catch(() => undefined);
   } finally {
     currentCommandId = null;
+  }
+}
+
+async function captureManagedAvitoTab(tab, expectedUrl, crop) {
+  const current = await chrome.tabs.get(tab.id);
+  if (
+    current.windowId !== tab.windowId ||
+    !READINESS.listingId(current.url || "") ||
+    !READINESS.sameListing(current.url || "", expectedUrl)
+  ) {
+    throw new Error("Снимок отменён: управляемая вкладка покинула объявление Avito");
+  }
+
+  const activeBefore = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+  if (activeBefore.length !== 1 || activeBefore[0].id !== tab.id) {
+    throw new Error("Снимок отменён: вкладка Avito перестала быть активной");
+  }
+
+  const metadata = TAB_CAPTURE.normalizeMetadata(crop);
+  const screenshot = TAB_CAPTURE.validatePngDataUrl(
+    await withTimeout(
+      chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" }),
+      TAB_CAPTURE_TIMEOUT_MS,
+      "Chrome не сделал снимок вкладки за 5 секунд"
+    )
+  );
+
+  const activeAfter = await chrome.tabs.query({ active: true, windowId: tab.windowId });
+  const finalTab = await chrome.tabs.get(tab.id);
+  if (
+    activeAfter.length !== 1 ||
+    activeAfter[0].id !== tab.id ||
+    !READINESS.sameListing(finalTab.url || "", expectedUrl)
+  ) {
+    throw new Error("Снимок отклонён: активная вкладка изменилась во время захвата");
+  }
+  return { screenshot, metadata };
+}
+
+async function withTimeout(promise, timeoutMs, message) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
   }
 }
 

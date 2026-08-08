@@ -393,7 +393,19 @@ function screenRegion(element) {
     height: rect.height,
     screenWidth: window.screen.width,
     screenHeight: window.screen.height,
-    kind: "control"
+    kind: "control",
+    viewport: {
+      cssWidth: window.innerWidth,
+      cssHeight: window.innerHeight,
+      devicePixelRatio: window.devicePixelRatio || 1
+    },
+    region: {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+      kind: "control"
+    }
   };
 }
 
@@ -441,6 +453,7 @@ function captureRegion(fallbackElement, fallbackRegion) {
     : selected.rect.height > 180
       ? "panel"
       : "control";
+  region.region.kind = region.kind;
   return region;
 }
 

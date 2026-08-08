@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import io
 import json
@@ -15,12 +16,13 @@ import webbrowser
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+
+from PIL import Image
 
 from avito_crm.config import Settings
 from avito_crm.errors import (
@@ -41,7 +43,9 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.7.1"
+MAX_TAB_CAPTURE_PNG_BYTES = 8 * 1024 * 1024
+MAX_TAB_CAPTURE_PIXELS = 64_000_000
+EXPECTED_EXTENSION_VERSION = "1.0.7.2"
 NAVIGATION_ATTEMPTS = 2
 NAVIGATION_RETRY_DELAY_SECONDS = 1.5
 
@@ -460,22 +464,19 @@ class ChromeExtensionBrowser:
             if not phone:
                 raise PhoneNotFoundError("Расширение вернуло некорректный номер")
             return PhoneResult(phone, str(payload.get("source", "chrome-extension-dom")))
-        if status in {"screenshot", "screen_capture"}:
-            if status == "screen_capture" and not isinstance(payload.get("crop"), dict):
-                raise PhoneNotFoundError(
-                    "Chrome открыл номер, но не смог безопасно определить его область; "
-                    "широкий снимок намеренно не распознаётся"
-                )
-            if status == "screen_capture":
-                return self._read_screen_capture(
-                    payload["crop"],
-                    canonical_url,
-                )
+        if status == "tab_capture":
             png = _decode_screenshot(str(payload.get("screenshot", "")))
-            artifact = self._artifact_path(canonical_url, "extension-viewport")
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_bytes(png)
-            return self.ocr.read_viewport_png(png)
+            capture = payload.get("capture")
+            if not isinstance(capture, dict):
+                raise BrowserOperationError(
+                    "Расширение не передало проверяемые координаты номера внутри вкладки"
+                )
+            return self._read_tab_capture(png, capture)
+        if status in {"screenshot", "screen_capture"}:
+            raise BrowserOperationError(
+                "Расширение вернуло устаревший снимок Windows. Обновите расширение Chrome "
+                f"до версии {EXPECTED_EXTENSION_VERSION}."
+            )
         if status == "page_not_ready":
             self._log_readiness_diagnostics(payload)
             raise PageNotReadyError(
@@ -593,85 +594,40 @@ class ChromeExtensionBrowser:
         )
         self._manual_pending = False
 
-    def _artifact_path(self, url: str, suffix: str) -> Path:
-        digest = hashlib.sha256(url.encode()).hexdigest()[:12]
-        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        return self.settings.screenshot_dir / f"{stamp}-{digest}-{suffix}.png"
+    def _read_tab_capture(self, png: bytes, capture: dict[str, Any]) -> PhoneResult:
+        if _is_nearly_blank_capture(png, viewport=True):
+            raise PageNotReadyError(
+                "Вкладка Avito ещё не отрисовала содержимое; строка будет повторена "
+                "без расходования попытки открытия номера"
+            )
 
-    def _read_screen_capture(self, crop: dict[str, Any], url: str) -> PhoneResult:
-        recognized: dict[str, tuple[int, PhoneResult]] = {}
+        regions, diagnostics = _tab_capture_regions(png, capture)
+        diagnostics["png_sha256"] = hashlib.sha256(png).hexdigest()[:12]
+        LOGGER.info("Chrome tab-capture diagnostics: %s", diagnostics)
+
         errors: list[str] = []
-        blank_full_frames = 0
-
-        def confirm(result: PhoneResult, source: str) -> PhoneResult | None:
-            count, _previous = recognized.get(result.phone, (0, result))
-            recognized[result.phone] = (count + 1, result)
-            if count + 1 < 2:
-                return None
-            result.source = source
+        for label, region_png, psm in regions:
+            try:
+                result = self.ocr.read_png(region_png, psm=psm)
+            except PhoneNotFoundError as exc:
+                errors.append(f"{label}: {exc}")
+                continue
+            result.source = f"ocr-tab-{label}"
             return result
 
-        for attempt in range(1, 4):
-            if attempt > 1:
-                time.sleep(0.8)
+        # Preserve the proven inline/modal viewport crops as an in-memory-only
+        # fallback. The full tab image and the phone crop are never persisted or
+        # included in logs.
+        try:
+            result = self.ocr.read_viewport_png(png)
+        except PhoneNotFoundError as exc:
+            errors.append(f"viewport: {exc}")
+        else:
+            result.source = "ocr-tab-viewport"
+            return result
 
-            # The extension knows the exact on-screen rectangle where Avito
-            # replaced the button with the image-rendered phone. OCR that small
-            # area first: it is both faster and substantially more reliable than
-            # searching the whole desktop.
-            region_png = _capture_interactive_desktop_png(crop)
-            region_artifact = self._artifact_path(url, f"extension-phone-{attempt}")
-            region_artifact.parent.mkdir(parents=True, exist_ok=True)
-            region_artifact.write_bytes(region_png)
-            if not _is_nearly_blank_capture(region_png):
-                try:
-                    region_result = self.ocr.read_png(
-                        region_png,
-                        artifact_path=region_artifact,
-                        psm=7,
-                    )
-                except PhoneNotFoundError as exc:
-                    errors.append(str(exc))
-                else:
-                    confirmed = confirm(
-                        region_result,
-                        "ocr-confirmed-avito-region",
-                    )
-                    if confirmed is not None:
-                        return confirmed
-                    # Confirm the same phone from a fresh frame before accepting
-                    # it. Do not dilute a successful exact-region result with a
-                    # broad desktop scan.
-                    continue
-
-            png = _capture_interactive_desktop_png()
-            artifact = self._artifact_path(url, f"extension-screen-{attempt}")
-            artifact.parent.mkdir(parents=True, exist_ok=True)
-            artifact.write_bytes(png)
-            if _is_nearly_blank_capture(png, viewport=True):
-                blank_full_frames += 1
-                errors.append("страница объявления ещё не отобразилась")
-                continue
-            try:
-                result = self.ocr.read_avito_screen_png(png)
-            except PhoneNotFoundError as exc:
-                errors.append(str(exc))
-                continue
-            confirmed = confirm(result, "ocr-confirmed-avito-screen")
-            if confirmed is not None:
-                return confirmed
-        if recognized:
-            raise PhoneNotFoundError(
-                "OCR увидел номер только на одном из трёх снимков; "
-                "результат отклонён как неподтверждённый"
-            )
-        if blank_full_frames >= 2:
-            raise PageNotReadyError(
-                "Страница объявления не успела отобразиться в обычном Chrome; "
-                "строка будет повторена без расходования попытки открытия номера"
-            )
-        detail = errors[-1] if errors else "номер не попал в проверенные области"
-        raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках экрана: {detail}")
+        detail = errors[-1] if errors else "номер не попал в проверяемую область вкладки"
+        raise PhoneNotFoundError(f"OCR не распознал номер в снимке вкладки Chrome: {detail}")
 
 
 def open_ordinary_chrome() -> None:
@@ -708,49 +664,120 @@ def _decode_screenshot(data_url: str) -> bytes:
         raise BrowserOperationError("Расширение вернуло скриншот в неизвестном формате")
     try:
         png = base64.b64decode(data_url[len(prefix) :], validate=True)
-    except ValueError as exc:
+    except (ValueError, binascii.Error) as exc:
         raise BrowserOperationError("Расширение вернуло повреждённый скриншот") from exc
+    if len(png) > MAX_TAB_CAPTURE_PNG_BYTES:
+        raise BrowserOperationError("Расширение вернуло слишком большой снимок вкладки")
     if not png.startswith(b"\x89PNG\r\n\x1a\n"):
         raise BrowserOperationError("Расширение вернуло не PNG-изображение")
     return png
 
 
-def _capture_interactive_desktop_png(crop: object = None) -> bytes:
-    if os.name != "nt":
-        raise BrowserOperationError("Резервный снимок экрана доступен только в Windows")
+def _tab_capture_regions(
+    png: bytes,
+    capture: dict[str, Any],
+) -> tuple[list[tuple[str, bytes, int]], dict[str, Any]]:
     try:
-        from PIL import ImageGrab
-
-        image = ImageGrab.grab(all_screens=True).convert("RGB")
-        if isinstance(crop, dict):
-            try:
-                screen_width = float(crop["screenWidth"])
-                screen_height = float(crop["screenHeight"])
-                left = float(crop["left"])
-                top = float(crop["top"])
-                width = float(crop["width"])
-                height = float(crop["height"])
-            except (KeyError, TypeError, ValueError):
-                screen_width = screen_height = width = height = 0
-                left = top = 0
-            if screen_width > 0 and screen_height > 0 and width > 10 and height > 10:
-                scale_x = image.width / screen_width
-                scale_y = image.height / screen_height
-                pad_x = max(8.0, width * 0.06)
-                pad_y = max(6.0, height * 0.12)
-                box = (
-                    max(0, round((left - pad_x) * scale_x)),
-                    max(0, round((top - pad_y) * scale_y)),
-                    min(image.width, round((left + width + pad_x) * scale_x)),
-                    min(image.height, round((top + height + pad_y) * scale_y)),
-                )
-                if box[2] - box[0] > 20 and box[3] - box[1] > 20:
-                    image = image.crop(box)
-        buffer = io.BytesIO()
-        image.save(buffer, format="PNG")
-        return buffer.getvalue()
+        image = Image.open(io.BytesIO(png)).convert("RGB")
     except Exception as exc:
-        raise BrowserOperationError(f"Не удалось сделать снимок экрана Windows: {exc}") from exc
+        raise BrowserOperationError(f"Не удалось открыть снимок вкладки Chrome: {exc}") from exc
+
+    if (
+        image.width < 200
+        or image.height < 200
+        or image.width * image.height > MAX_TAB_CAPTURE_PIXELS
+    ):
+        raise BrowserOperationError("Расширение вернуло снимок вкладки недопустимого размера")
+
+    try:
+        if int(capture["schemaVersion"]) != 1:
+            raise ValueError("unsupported schema")
+        viewport = capture["viewport"]
+        region = capture["region"]
+        if not isinstance(viewport, dict) or not isinstance(region, dict):
+            raise TypeError("metadata objects required")
+        css_width = _finite_float(viewport["cssWidth"])
+        css_height = _finite_float(viewport["cssHeight"])
+        declared_dpr = _finite_float(viewport["devicePixelRatio"])
+        left = _finite_float(region["left"])
+        top = _finite_float(region["top"])
+        width = _finite_float(region["width"])
+        height = _finite_float(region["height"])
+        kind = str(region.get("kind", "control"))
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise BrowserOperationError("Расширение вернуло некорректные координаты вкладки") from exc
+
+    if kind not in {"control", "dialog", "panel"}:
+        kind = "control"
+    if not (
+        200 <= css_width <= 10000
+        and 200 <= css_height <= 10000
+        and 0.5 <= declared_dpr <= 8
+        and width > 10
+        and height > 10
+        and width <= css_width * 1.1
+        and height <= css_height * 1.1
+        and left < css_width
+        and top < css_height
+        and left + width > 0
+        and top + height > 0
+    ):
+        raise BrowserOperationError("Расширение вернуло область вне видимой вкладки")
+
+    scale_x = image.width / css_width
+    scale_y = image.height / css_height
+    if not (0.5 <= scale_x <= 8 and 0.5 <= scale_y <= 8):
+        raise BrowserOperationError("Масштаб снимка вкладки вышел за безопасные пределы")
+    if abs(scale_x - scale_y) / max(scale_x, scale_y) > 0.20:
+        raise BrowserOperationError("Снимок вкладки имеет несовместимый масштаб по осям")
+
+    def crop_variant(
+        label: str,
+        pad_x_ratio: float,
+        pad_y_ratio: float,
+        psm: int,
+    ) -> tuple[str, bytes, int]:
+        pad_x = max(8.0, width * pad_x_ratio)
+        pad_y = max(6.0, height * pad_y_ratio)
+        box = (
+            max(0, round((left - pad_x) * scale_x)),
+            max(0, round((top - pad_y) * scale_y)),
+            min(image.width, round((left + width + pad_x) * scale_x)),
+            min(image.height, round((top + height + pad_y) * scale_y)),
+        )
+        if box[2] - box[0] <= 20 or box[3] - box[1] <= 20:
+            raise BrowserOperationError("Область номера слишком мала после масштабирования")
+        buffer = io.BytesIO()
+        image.crop(box).save(buffer, format="PNG")
+        return label, buffer.getvalue(), psm
+
+    if kind == "control":
+        regions = [
+            crop_variant("control", 0.12, 0.35, 7),
+            crop_variant("control-context", 0.45, 1.25, 6),
+        ]
+    else:
+        regions = [crop_variant(kind, 0.04, 0.06, 6)]
+
+    diagnostics = {
+        "schema": 1,
+        "image_px": f"{image.width}x{image.height}",
+        "viewport_css": f"{round(css_width)}x{round(css_height)}",
+        "declared_dpr": round(declared_dpr, 3),
+        "effective_scale": f"{scale_x:.3f}x{scale_y:.3f}",
+        "region_kind": kind,
+        "region_css": f"{round(width)}x{round(height)}",
+    }
+    return regions, diagnostics
+
+
+def _finite_float(value: object) -> float:
+    if isinstance(value, bool):
+        raise ValueError("boolean is not a number")
+    parsed = float(value)
+    if not (-1e9 < parsed < 1e9):
+        raise ValueError("number is not finite")
+    return parsed
 
 
 def _is_nearly_blank_capture(png: bytes, *, viewport: bool = False) -> bool:
