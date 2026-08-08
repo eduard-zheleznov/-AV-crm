@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import socket
 import threading
@@ -10,6 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 import avito_crm.chrome_extension as chrome_extension_module
 from avito_crm.chrome_extension import (
@@ -17,6 +19,8 @@ from avito_crm.chrome_extension import (
     ChromeExtensionBrowser,
     ExtensionBridge,
     ExtensionEvent,
+    _decode_screenshot,
+    _tab_capture_regions,
 )
 from avito_crm.errors import (
     BrowserOperationError,
@@ -272,6 +276,26 @@ class _FakeBridge:
         return self.result
 
 
+def _tab_png(width: int = 2400, height: int = 1350) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (230, 235, 240)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _capture_metadata(*, kind: str = "control") -> dict[str, object]:
+    return {
+        "schemaVersion": 1,
+        "viewport": {"cssWidth": 1200, "cssHeight": 675, "devicePixelRatio": 2},
+        "region": {
+            "left": 600,
+            "top": 250,
+            "width": 300 if kind == "control" else 650,
+            "height": 60 if kind == "control" else 350,
+            "kind": kind,
+        },
+    }
+
+
 def test_extension_browser_normalizes_a_dom_phone(settings):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
@@ -352,48 +376,16 @@ def test_extension_browser_reminds_and_reports_operator_stop(settings):
     assert notifier.events[-1][1]["include_backup"] is True
 
 
-def test_extension_browser_sends_a_viewport_screenshot_to_ocr(settings):
-    png = b"\x89PNG\r\n\x1a\nplaceholder"
+def test_extension_browser_sends_a_tab_capture_to_inline_ocr(settings):
+    png = _tab_png()
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
         ExtensionEvent(
             "result",
-            "screenshot",
-            {"screenshot": "data:image/png;base64," + base64.b64encode(png).decode()},
-        )
-    )
-
-    with browser:
-        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
-
-    assert result.phone == "+79991234567"
-    assert result.source == "fake-ocr"
-
-
-def test_extension_browser_can_capture_the_interactive_windows_desktop(settings, monkeypatch):
-    png = b"\x89PNG\r\n\x1a\nplaceholder"
-    crop = {
-        "left": 100,
-        "top": 200,
-        "width": 300,
-        "height": 80,
-        "screenWidth": 1920,
-        "screenHeight": 1080,
-    }
-    captures = []
-    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(
-        chrome_extension_module,
-        "_capture_interactive_desktop_png",
-        lambda requested_crop=None: captures.append(requested_crop) or png,
-    )
-    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
-    browser.bridge = _FakeBridge(
-        ExtensionEvent(
-            "result",
-            "screen_capture",
+            "tab_capture",
             {
-                "crop": crop,
+                "screenshot": "data:image/png;base64," + base64.b64encode(png).decode(),
+                "capture": _capture_metadata(),
             },
         )
     )
@@ -402,33 +394,30 @@ def test_extension_browser_can_capture_the_interactive_windows_desktop(settings,
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "ocr-confirmed-avito-region"
-    assert captures == [crop, crop]
+    assert result.source == "ocr-tab-control"
 
 
-def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monkeypatch):
-    png = b"\x89PNG\r\n\x1a\nplaceholder"
-    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
-    monkeypatch.setattr(
-        chrome_extension_module,
-        "_capture_interactive_desktop_png",
-        lambda _crop=None: png,
-    )
+def test_tab_capture_maps_css_region_to_high_dpi_png() -> None:
+    regions, diagnostics = _tab_capture_regions(_tab_png(), _capture_metadata())
+
+    assert [label for label, _png, _psm in regions] == ["control", "control-context"]
+    exact = Image.open(io.BytesIO(regions[0][1]))
+    assert 730 <= exact.width <= 750
+    assert 195 <= exact.height <= 205
+    assert diagnostics["effective_scale"] == "2.000x2.000"
+    assert diagnostics["region_kind"] == "control"
+
+
+def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings):
+    png = _tab_png()
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
         ExtensionEvent(
             "result",
-            "screen_capture",
+            "tab_capture",
             {
-                "crop": {
-                    "left": 300,
-                    "top": 150,
-                    "width": 650,
-                    "height": 450,
-                    "screenWidth": 1280,
-                    "screenHeight": 720,
-                    "kind": "dialog",
-                }
+                "screenshot": "data:image/png;base64," + base64.b64encode(png).decode(),
+                "capture": _capture_metadata(kind="dialog"),
             },
         )
     )
@@ -437,7 +426,41 @@ def test_extension_browser_uses_multiline_ocr_for_a_phone_dialog(settings, monke
         result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
     assert result.phone == "+79991234567"
-    assert result.source == "ocr-confirmed-avito-region"
+    assert result.source == "ocr-tab-dialog"
+
+
+def test_tab_capture_diagnostics_never_log_png_or_phone(settings, caplog):
+    png = _tab_png()
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "tab_capture",
+            {
+                "screenshot": "data:image/png;base64," + base64.b64encode(png).decode(),
+                "capture": _capture_metadata(kind="dialog"),
+            },
+        )
+    )
+
+    with caplog.at_level("INFO", logger="avito_crm.chrome_extension"), browser:
+        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    diagnostics = "\n".join(record.getMessage() for record in caplog.records)
+    assert result.phone == "+79991234567"
+    assert "png_sha256" in diagnostics
+    assert "region_kind" in diagnostics
+    assert "data:image/png" not in diagnostics
+    assert base64.b64encode(png).decode() not in diagnostics
+    assert result.phone not in diagnostics
+
+
+def test_decode_screenshot_rejects_payload_over_the_bound(monkeypatch):
+    monkeypatch.setattr(chrome_extension_module, "MAX_TAB_CAPTURE_PNG_BYTES", 8)
+    oversized = base64.b64encode(b"\x89PNG\r\n\x1a\nX").decode()
+
+    with pytest.raises(BrowserOperationError, match="слишком большой"):
+        _decode_screenshot("data:image/png;base64," + oversized)
 
 
 def test_extension_browser_maps_an_unloaded_page_to_a_safe_retry(settings):
@@ -468,11 +491,29 @@ def test_extension_browser_maps_a_wrong_listing_to_invalid_input(settings):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
 
-def test_extension_browser_rejects_an_uncropped_desktop_screenshot(settings):
-    from avito_crm.errors import PhoneNotFoundError
-
+def test_extension_browser_rejects_a_legacy_desktop_screenshot(settings):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(ExtensionEvent("result", "screen_capture", {"crop": None}))
 
-    with pytest.raises(PhoneNotFoundError, match="безопасно определить"), browser:
+    with pytest.raises(BrowserOperationError, match="устаревший снимок Windows"), browser:
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_extension_browser_rejects_tab_capture_without_region_metadata(settings):
+    png = _tab_png()
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "tab_capture",
+            {"screenshot": "data:image/png;base64," + base64.b64encode(png).decode()},
+        )
+    )
+
+    with pytest.raises(BrowserOperationError, match="координаты"), browser:
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_tab_capture_rejects_incompatible_axis_scaling() -> None:
+    with pytest.raises(BrowserOperationError, match="масштаб по осям"):
+        _tab_capture_regions(_tab_png(2400, 900), _capture_metadata())
