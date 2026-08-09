@@ -424,7 +424,7 @@ function captureRegion(fallbackElement, fallbackRegion) {
   let selectedScore = 0;
   const seen = new Set();
   for (const element of document.querySelectorAll(selectors.join(","))) {
-    if (seen.has(element) || !isVisible(element)) {
+    if (seen.has(element) || !isVisibleInViewport(element)) {
       continue;
     }
     seen.add(element);

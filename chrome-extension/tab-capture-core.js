@@ -12,8 +12,26 @@
   const ALLOWED_KINDS = new Set(["control", "dialog", "panel"]);
 
   function finiteNumber(value) {
+    if (value === null || value === undefined || typeof value === "boolean" || value === "") {
+      return null;
+    }
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function viewportFallback(cssWidth, cssHeight, devicePixelRatio, reason) {
+    return {
+      schemaVersion: SCHEMA_VERSION,
+      viewport: { cssWidth, cssHeight, devicePixelRatio },
+      region: {
+        left: 0,
+        top: 0,
+        width: cssWidth,
+        height: cssHeight,
+        kind: "control"
+      },
+      fallback: reason
+    };
   }
 
   function normalizeMetadata(crop) {
@@ -36,20 +54,25 @@
       cssWidth === null ||
       cssHeight === null ||
       devicePixelRatio === null ||
-      left === null ||
-      top === null ||
-      width === null ||
-      height === null ||
       cssWidth < 200 ||
       cssWidth > 10000 ||
       cssHeight < 200 ||
       cssHeight > 10000 ||
       devicePixelRatio < 0.5 ||
-      devicePixelRatio > 8 ||
+      devicePixelRatio > 8
+    ) {
+      throw new Error("Расширение отклонило некорректную область номера");
+    }
+
+    if (
+      left === null ||
+      top === null ||
+      width === null ||
+      height === null ||
       width <= 10 ||
       height <= 10
     ) {
-      throw new Error("Расширение отклонило некорректную область номера");
+      return viewportFallback(cssWidth, cssHeight, devicePixelRatio, "invalid_region");
     }
 
     // Avito may reveal the phone inside a panel whose DOM rectangle is taller
@@ -63,7 +86,7 @@
     const clippedWidth = clippedRight - clippedLeft;
     const clippedHeight = clippedBottom - clippedTop;
     if (clippedWidth <= 10 || clippedHeight <= 10) {
-      throw new Error("Расширение отклонило некорректную область номера");
+      return viewportFallback(cssWidth, cssHeight, devicePixelRatio, "offscreen_region");
     }
 
     return {
