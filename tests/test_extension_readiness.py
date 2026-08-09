@@ -44,7 +44,7 @@ def test_manifest_loads_readiness_around_unchanged_content_at_document_start() -
     script = manifest["content_scripts"][0]
     assert script["js"] == ["readiness-core.js", "content.js"]
     assert script["run_at"] == "document_start"
-    assert manifest["version"] == "1.0.7.2"
+    assert manifest["version"] == "1.0.7.3"
     assert "<all_urls>" in manifest["host_permissions"]
 
 

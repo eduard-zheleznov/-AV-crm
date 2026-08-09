@@ -47,21 +47,35 @@
       devicePixelRatio < 0.5 ||
       devicePixelRatio > 8 ||
       width <= 10 ||
-      height <= 10 ||
-      width > cssWidth * 1.1 ||
-      height > cssHeight * 1.1 ||
-      left >= cssWidth ||
-      top >= cssHeight ||
-      left + width <= 0 ||
-      top + height <= 0
+      height <= 10
     ) {
+      throw new Error("Расширение отклонило некорректную область номера");
+    }
+
+    // Avito may reveal the phone inside a panel whose DOM rectangle is taller
+    // than the visible viewport or starts slightly above it. captureVisibleTab
+    // returns only the viewport, so intersect the candidate with that exact
+    // coordinate space instead of rejecting a valid partially visible panel.
+    const clippedLeft = Math.max(0, Math.min(cssWidth, left));
+    const clippedTop = Math.max(0, Math.min(cssHeight, top));
+    const clippedRight = Math.max(0, Math.min(cssWidth, left + width));
+    const clippedBottom = Math.max(0, Math.min(cssHeight, top + height));
+    const clippedWidth = clippedRight - clippedLeft;
+    const clippedHeight = clippedBottom - clippedTop;
+    if (clippedWidth <= 10 || clippedHeight <= 10) {
       throw new Error("Расширение отклонило некорректную область номера");
     }
 
     return {
       schemaVersion: SCHEMA_VERSION,
       viewport: { cssWidth, cssHeight, devicePixelRatio },
-      region: { left, top, width, height, kind }
+      region: {
+        left: clippedLeft,
+        top: clippedTop,
+        width: clippedWidth,
+        height: clippedHeight,
+        kind
+      }
     };
   }
 

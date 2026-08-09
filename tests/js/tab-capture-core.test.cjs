@@ -12,10 +12,29 @@ assert.deepEqual(metadata, {
   viewport: { cssWidth: 1200, cssHeight: 675, devicePixelRatio: 2 },
   region: { left: 600, top: 250, width: 300, height: 60, kind: "control" }
 });
+
+const clippedPanel = capture.normalizeMetadata({
+  viewport: { cssWidth: 1200, cssHeight: 675, devicePixelRatio: 1 },
+  region: { left: 900, top: -80, width: 500, height: 900, kind: "panel" }
+});
+assert.deepEqual(clippedPanel.region, {
+  left: 900,
+  top: 0,
+  width: 300,
+  height: 675,
+  kind: "panel"
+});
 assert.equal(capture.validatePngDataUrl("data:image/png;base64,iVBORw0KGgo="), "data:image/png;base64,iVBORw0KGgo=");
 assert.throws(
   () => capture.normalizeMetadata({ viewport: { cssWidth: 1200, cssHeight: 675, devicePixelRatio: 2 } }),
   /координаты/
+);
+assert.throws(
+  () => capture.normalizeMetadata({
+    viewport: { cssWidth: 1200, cssHeight: 675, devicePixelRatio: 2 },
+    region: { left: -500, top: 250, width: 300, height: 60, kind: "control" }
+  }),
+  /некорректную область/
 );
 assert.throws(
   () => capture.normalizeMetadata({
