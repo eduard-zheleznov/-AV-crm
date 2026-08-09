@@ -73,6 +73,46 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Число кликов; для первого теста оставьте 1",
     )
+    extension_batch = subparsers.add_parser(
+        "avito-extension-batch-test",
+        help="Проверить 1–500 ссылок в обычном Chrome без CRM и записи в очередь",
+    )
+    extension_batch_source = extension_batch.add_mutually_exclusive_group(required=True)
+    extension_batch_source.add_argument(
+        "--file",
+        type=Path,
+        help="Локальный .txt, .csv или .xlsx со ссылками Avito",
+    )
+    extension_batch_source.add_argument(
+        "--google",
+        action="store_true",
+        help="Только прочитать ссылки из Google-очереди; лист не изменяется",
+    )
+    extension_batch.add_argument("--sheet", help="Лист .xlsx; по умолчанию первый")
+    extension_batch.add_argument(
+        "--status",
+        action="append",
+        help="Статус строки Google; можно повторить (по умолчанию retry_phone)",
+    )
+    extension_batch.add_argument(
+        "--limit",
+        type=int,
+        required=True,
+        help="Число уникальных ссылок для проверки (1–500)",
+    )
+    extension_batch.add_argument(
+        "--max-clicks",
+        type=int,
+        choices=(1, 2),
+        default=2,
+        help="Не более двух попыток открытия номера на ссылку",
+    )
+    extension_batch.add_argument(
+        "--circuit-breaker",
+        type=int,
+        default=10,
+        help="Остановиться после N одинаковых последовательных OCR/Chrome-ошибок (3–50)",
+    )
 
     remote = subparsers.add_parser(
         "remote-control",
@@ -256,6 +296,43 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
             with ChromeExtensionBrowser(settings, ocr) as browser:
                 result = browser.reveal_phone(args.url, "manual-test", max_clicks=args.max_clicks)
         print(f"Номер получен без CRM: {result.phone} ({result.source})")
+        return 0
+    if args.command == "avito-extension-batch-test":
+        if settings.avito_browser_driver != "chrome_extension":
+            raise ConfigurationError("Сначала выполните scripts\\install-chrome-extension.ps1")
+        from avito_crm.extension_batch import (
+            load_batch_urls,
+            load_google_batch_urls,
+            run_extension_batch,
+        )
+
+        if args.google:
+            urls = load_google_batch_urls(
+                settings,
+                limit=args.limit,
+                sheet=args.sheet,
+                statuses=tuple(args.status or ("retry_phone",)),
+            )
+        else:
+            urls = load_batch_urls(args.file, limit=args.limit, sheet=args.sheet)
+        with SingleInstanceLock(settings.data_dir / "worker.lock"):
+            summary = run_extension_batch(
+                settings,
+                urls,
+                max_clicks=args.max_clicks,
+                circuit_breaker=args.circuit_breaker,
+            )
+        print("Batch-тест завершён. CRM и очередь не изменялись.")
+        print(f"  Проверено: {summary.inspected}/{summary.requested}")
+        print(f"  Номеров получено: {summary.succeeded}")
+        print(f"  Ошибок/неактивных: {summary.failed}")
+        print(f"  Результаты: {summary.report_path}")
+        if summary.stopped_reason:
+            print(f"  Остановка: {summary.stopped_reason}")
+            return 3
+        if summary.succeeded == 0:
+            print("  FAIL: ни одного номера не получено; следующий этап запрещён")
+            return 4
         return 0
     if args.command == "remote-control":
         from avito_crm.remote_control import run_remote_control

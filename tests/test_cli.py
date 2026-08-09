@@ -80,6 +80,43 @@ def test_safe_extension_test_command_is_available():
     assert args.max_clicks == 1
 
 
+def test_safe_extension_batch_command_requires_local_file_and_limit():
+    args = build_parser().parse_args(
+        [
+            "avito-extension-batch-test",
+            "--file",
+            "retry-phone.xlsx",
+            "--sheet",
+            "OCR",
+            "--limit",
+            "200",
+        ]
+    )
+
+    assert args.command == "avito-extension-batch-test"
+    assert args.file.name == "retry-phone.xlsx"
+    assert args.sheet == "OCR"
+    assert args.limit == 200
+    assert args.max_clicks == 2
+    assert args.circuit_breaker == 10
+
+    google = build_parser().parse_args(
+        [
+            "avito-extension-batch-test",
+            "--google",
+            "--sheet",
+            "Лист1",
+            "--status",
+            "retry_phone",
+            "--limit",
+            "100",
+        ]
+    )
+    assert google.google is True
+    assert google.file is None
+    assert google.status == ["retry_phone"]
+
+
 def test_avito_profile_starts_even_when_crm_timezone_is_unavailable(tmp_path, monkeypatch):
     monkeypatch.setenv("LPTRACKER_TIMEZONE", "Missing/Timezone")
     opened_profiles = []
