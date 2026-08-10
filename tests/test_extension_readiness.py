@@ -44,7 +44,7 @@ def test_manifest_loads_readiness_around_unchanged_content_at_document_start() -
     script = manifest["content_scripts"][0]
     assert script["js"] == ["readiness-core.js", "content.js"]
     assert script["run_at"] == "document_start"
-    assert manifest["version"] == "1.0.7.4"
+    assert manifest["version"] == "1.0.7.6"
     assert "<all_urls>" in manifest["host_permissions"]
 
 
@@ -62,6 +62,22 @@ def test_readiness_core_accepts_rendered_listing_without_window_load() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "readiness-core: ok" in result.stdout
+
+
+def test_phone_button_selection_prefers_current_viewport_without_losing_fallback() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    result = subprocess.run(
+        [node, str(ROOT / "tests" / "js" / "phone-button-selection.test.cjs")],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "phone-button-selection: ok" in result.stdout
 
 
 def test_tab_capture_core_validates_bounded_metadata_and_png() -> None:

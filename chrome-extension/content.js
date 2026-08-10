@@ -275,6 +275,8 @@ function findPhoneButton() {
   const candidates = document.querySelectorAll(
     '[data-marker*="phone" i], button, a, [role="button"]'
   );
+  let firstVisibleControl = null;
+  const seenControls = new Set();
   for (const element of candidates) {
     const label = `${element.textContent || ""} ${element.getAttribute("aria-label") || ""}`;
     if (
@@ -283,10 +285,22 @@ function findPhoneButton() {
       !element.disabled &&
       element.getAttribute("aria-disabled") !== "true"
     ) {
-      return element.closest('button, a, [role="button"]') || element;
+      const control = element.closest('button, a, [role="button"]') || element;
+      if (seenControls.has(control)) {
+        continue;
+      }
+      seenControls.add(control);
+      if (!firstVisibleControl) {
+        firstVisibleControl = control;
+      }
+      if (isVisibleInViewport(control)) {
+        return control;
+      }
     }
   }
-  return null;
+  // Preserve the established scroll-to-control behavior when the page has no
+  // matching phone control inside the current viewport.
+  return firstVisibleControl;
 }
 
 async function waitForPhoneButton(timeoutMs) {
