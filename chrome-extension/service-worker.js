@@ -128,7 +128,7 @@ async function executeCommand(command) {
       }
       if (result.status === "screenshot") {
         await focusTab(tab.id);
-        await delay(300);
+        await delay(1300);
         const capture = await captureManagedAvitoTab(tab, command.url, result.crop);
         await postEvent({
           id: command.id,

@@ -44,7 +44,7 @@ def test_manifest_loads_readiness_around_unchanged_content_at_document_start() -
     script = manifest["content_scripts"][0]
     assert script["js"] == ["readiness-core.js", "content.js"]
     assert script["run_at"] == "document_start"
-    assert manifest["version"] == "1.0.7.4"
+    assert manifest["version"] == "1.0.7.5"
     assert "<all_urls>" in manifest["host_permissions"]
 
 
@@ -106,6 +106,7 @@ def test_service_worker_finishes_current_command_before_polling_next() -> None:
     assert 'status: "tab_capture"' in execute
     assert 'status: "screen_capture"' not in execute
     assert "captureVisibleTab" in worker
+    assert "await delay(1300);" in execute
     assert "TAB_CAPTURE_TIMEOUT_MS = 5000" in worker
     capture = worker[
         worker.index("async function captureManagedAvitoTab") : worker.index(
