@@ -262,6 +262,16 @@ class _FakeOcr:
         return PhoneResult("+79991234567", "fake-ocr")
 
 
+class _FailingOcr:
+    def read_png(self, png: bytes, artifact_path=None, *, psm: int = 7) -> PhoneResult:
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        raise PhoneNotFoundError(f"diagnostic failure psm={psm}")
+
+    def read_viewport_png(self, png: bytes) -> PhoneResult:
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        raise PhoneNotFoundError("diagnostic viewport failure")
+
+
 class _FakeBridge:
     def __init__(self, result: ExtensionEvent) -> None:
         self.result = result
@@ -378,7 +388,12 @@ def test_extension_browser_reminds_and_reports_operator_stop(settings):
 
 def test_extension_browser_sends_a_tab_capture_to_inline_ocr(settings):
     png = _tab_png()
-    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser = ChromeExtensionBrowser(
+        settings,
+        _FakeOcr(),
+        _FakeNotifier(),
+        save_failed_captures=True,
+    )
     browser.bridge = _FakeBridge(
         ExtensionEvent(
             "result",
@@ -395,6 +410,71 @@ def test_extension_browser_sends_a_tab_capture_to_inline_ocr(settings):
 
     assert result.phone == "+79991234567"
     assert result.source == "ocr-tab-control"
+    assert not (settings.output_dir / "ocr-failed-captures").exists()
+
+
+def test_failed_tab_capture_is_not_persisted_by_default(settings):
+    png = _tab_png()
+    browser = ChromeExtensionBrowser(settings, _FailingOcr(), _FakeNotifier())
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "tab_capture",
+            {
+                "screenshot": "data:image/png;base64," + base64.b64encode(png).decode(),
+                "capture": _capture_metadata(),
+            },
+        )
+    )
+
+    with browser, pytest.raises(PhoneNotFoundError):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert not (settings.output_dir / "ocr-failed-captures").exists()
+
+
+def test_opt_in_persists_exact_failed_tab_capture_and_safe_metadata(settings):
+    png = _tab_png()
+    capture = _capture_metadata()
+    capture["fallback"] = "offscreen_region"
+    browser = ChromeExtensionBrowser(
+        settings,
+        _FailingOcr(),
+        _FakeNotifier(),
+        save_failed_captures=True,
+    )
+    browser.bridge = _FakeBridge(
+        ExtensionEvent(
+            "result",
+            "tab_capture",
+            {
+                "screenshot": "data:image/png;base64," + base64.b64encode(png).decode(),
+                "capture": capture,
+            },
+        )
+    )
+
+    with browser, pytest.raises(PhoneNotFoundError):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    directory = settings.output_dir / "ocr-failed-captures"
+    png_files = list(directory.glob("*.png"))
+    metadata_files = list(directory.glob("*.json"))
+    assert len(png_files) == 1
+    assert len(metadata_files) == 1
+    assert png_files[0].read_bytes() == png
+    metadata_text = metadata_files[0].read_text(encoding="utf-8")
+    metadata = json.loads(metadata_text)
+    assert metadata["reason"] == "ocr_failed"
+    assert metadata["contains_visible_page_data"] is True
+    assert metadata["png_file"] == png_files[0].name
+    assert metadata["png_sha256"] == chrome_extension_module.hashlib.sha256(png).hexdigest()
+    assert metadata["capture"]["capture_fallback"] == "offscreen_region"
+    assert metadata["capture"]["region_origin_css"] == "600,250"
+    assert "https://" not in metadata_text
+    assert "test_123" not in metadata_text
+    assert "+7999" not in metadata_text
+    assert not list(directory.glob("*.tmp"))
 
 
 def test_tab_capture_maps_css_region_to_high_dpi_png() -> None:

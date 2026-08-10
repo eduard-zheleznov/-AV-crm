@@ -15,6 +15,7 @@ import uuid
 import webbrowser
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -418,11 +419,14 @@ class ChromeExtensionBrowser:
         settings: Settings,
         ocr: PhoneOcr,
         notifier: NotificationRouter | None = None,
+        *,
+        save_failed_captures: bool = False,
     ) -> None:
         self.settings = settings
         self.ocr = ocr
         self.notifier = notifier or NotificationRouter(settings)
         self._owns_notifier = notifier is None
+        self.save_failed_captures = save_failed_captures
         self.bridge = ExtensionBridge(settings)
         self._manual_notified = False
         self._manual_pending = False
@@ -626,8 +630,53 @@ class ChromeExtensionBrowser:
             result.source = "ocr-tab-viewport"
             return result
 
+        if self.save_failed_captures:
+            self._save_failed_tab_capture(png, diagnostics)
         detail = errors[-1] if errors else "номер не попал в проверяемую область вкладки"
         raise PhoneNotFoundError(f"OCR не распознал номер в снимке вкладки Chrome: {detail}")
+
+    def _save_failed_tab_capture(self, png: bytes, diagnostics: dict[str, Any]) -> None:
+        digest = hashlib.sha256(png).hexdigest()
+        captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        stem = f"ocr-failed-{stamp}-{digest[:12]}-{uuid.uuid4().hex[:8]}"
+        directory = self.settings.output_dir / "ocr-failed-captures"
+        png_path = directory / f"{stem}.png"
+        metadata_path = directory / f"{stem}.json"
+        png_temp = directory / f".{stem}.png.tmp"
+        metadata_temp = directory / f".{stem}.json.tmp"
+        metadata = {
+            "schema": 1,
+            "reason": "ocr_failed",
+            "captured_at_utc": captured_at,
+            "contains_visible_page_data": True,
+            "png_file": png_path.name,
+            "png_sha256": digest,
+            "capture": diagnostics,
+        }
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            png_temp.write_bytes(png)
+            metadata_temp.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            png_temp.replace(png_path)
+            metadata_temp.replace(metadata_path)
+        except Exception as exc:
+            for temporary in (png_temp, metadata_temp):
+                with suppress(OSError):
+                    temporary.unlink(missing_ok=True)
+            LOGGER.warning(
+                "Не удалось сохранить диагностический OCR-снимок (%s)",
+                exc.__class__.__name__,
+            )
+            return
+        LOGGER.warning(
+            "Диагностический снимок OCR-ошибки сохранён локально: PNG=%s; metadata=%s",
+            png_path,
+            metadata_path,
+        )
 
 
 def open_ordinary_chrome() -> None:
@@ -766,9 +815,20 @@ def _tab_capture_regions(
         "declared_dpr": round(declared_dpr, 3),
         "effective_scale": f"{scale_x:.3f}x{scale_y:.3f}",
         "region_kind": kind,
+        "region_origin_css": f"{round(left)},{round(top)}",
         "region_css": f"{round(width)}x{round(height)}",
+        "capture_fallback": _safe_capture_fallback(capture.get("fallback")),
     }
     return regions, diagnostics
+
+
+def _safe_capture_fallback(value: object) -> str:
+    fallback = str(value or "").strip()
+    if not fallback:
+        return "none"
+    if fallback in {"invalid_region", "offscreen_region"}:
+        return fallback
+    return "unknown"
 
 
 def _finite_float(value: object) -> float:

@@ -73,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=1,
         help="Число кликов; для первого теста оставьте 1",
     )
+    extension_test.add_argument(
+        "--save-failed-captures",
+        action="store_true",
+        help=(
+            "Локально сохранить точный PNG и безопасные координаты только при итоговой "
+            "OCR-ошибке; файл может содержать показанный телефон"
+        ),
+    )
     extension_batch = subparsers.add_parser(
         "avito-extension-batch-test",
         help="Проверить 1–500 ссылок в обычном Chrome без CRM и записи в очередь",
@@ -293,7 +301,11 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         with SingleInstanceLock(settings.data_dir / "worker.lock"):
             ocr = PhoneOcr(settings.tesseract_cmd, settings.ocr_min_agreement)
             ocr.check_available()
-            with ChromeExtensionBrowser(settings, ocr) as browser:
+            with ChromeExtensionBrowser(
+                settings,
+                ocr,
+                save_failed_captures=args.save_failed_captures,
+            ) as browser:
                 result = browser.reveal_phone(args.url, "manual-test", max_clicks=args.max_clicks)
         print(f"Номер получен без CRM: {result.phone} ({result.source})")
         return 0

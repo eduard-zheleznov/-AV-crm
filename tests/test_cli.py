@@ -78,6 +78,16 @@ def test_safe_extension_test_command_is_available():
 
     assert args.command == "avito-extension-test"
     assert args.max_clicks == 1
+    assert args.save_failed_captures is False
+
+    diagnostic = build_parser().parse_args(
+        [
+            "avito-extension-test",
+            "https://www.avito.ru/moskva/test_123",
+            "--save-failed-captures",
+        ]
+    )
+    assert diagnostic.save_failed_captures is True
 
 
 def test_safe_extension_batch_command_requires_local_file_and_limit():
