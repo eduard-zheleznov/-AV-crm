@@ -121,6 +121,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=10,
         help="Остановиться после N одинаковых последовательных OCR/Chrome-ошибок (3–50)",
     )
+    extension_batch.add_argument(
+        "--exclude-tested-reports",
+        action="store_true",
+        help=(
+            "Для Google-источника исключить URL-хэши из всех прежних локальных "
+            "extension-batch JSONL; при нехватке новых ссылок остановиться до Chrome"
+        ),
+    )
 
     remote = subparsers.add_parser(
         "remote-control",
@@ -315,17 +323,33 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
         from avito_crm.extension_batch import (
             load_batch_urls,
             load_google_batch_urls,
+            load_tested_url_hashes,
             run_extension_batch,
         )
 
         if args.google:
+            excluded_hashes = (
+                load_tested_url_hashes(settings.output_dir)
+                if args.exclude_tested_reports
+                else set()
+            )
             urls = load_google_batch_urls(
                 settings,
                 limit=args.limit,
                 sheet=args.sheet,
                 statuses=tuple(args.status or ("retry_phone",)),
+                excluded_url_hashes=excluded_hashes,
             )
+            if args.exclude_tested_reports:
+                print(
+                    f"Исключены ранее тестировавшиеся URL-хэши: {len(excluded_hashes)}; "
+                    f"выбрано новых ссылок: {len(urls)}"
+                )
         else:
+            if args.exclude_tested_reports:
+                raise ConfigurationError(
+                    "--exclude-tested-reports разрешён только вместе с --google"
+                )
             urls = load_batch_urls(args.file, limit=args.limit, sheet=args.sheet)
         with SingleInstanceLock(settings.data_dir / "worker.lock"):
             summary = run_extension_batch(

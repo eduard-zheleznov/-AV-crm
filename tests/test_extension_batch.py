@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
 
-from avito_crm.errors import ConfigurationError, PhoneNotFoundError
+from avito_crm.errors import ConfigurationError, PhoneNotFoundError, SourceError
 from avito_crm.extension_batch import (
     BatchUrl,
     _select_google_batch_rows,
     load_batch_urls,
+    load_tested_url_hashes,
     run_extension_batch,
 )
 from avito_crm.models import PhoneResult
@@ -115,6 +117,48 @@ def test_select_google_batch_rows_is_read_only_and_filters_status():
         "https://www.avito.ru/perm/test_456",
         "https://www.avito.ru/tula/test_789",
     ]
+
+
+def test_select_google_batch_rows_excludes_prior_safe_hashes():
+    first = "https://www.avito.ru/moskva/test_123456789"
+    second = "https://www.avito.ru/moskva/test_223456789"
+    first_hash = hashlib.sha256(first.encode("utf-8")).hexdigest()[:16]
+    selected = _select_google_batch_rows(
+        [["Ссылка", "Статус"], [first, "crm_monitoring"], [second, "crm_monitoring"]],
+        url_column="Ссылка",
+        status_column="Статус",
+        statuses={"crm_monitoring"},
+        limit=1,
+        excluded_url_hashes={first_hash},
+    )
+
+    assert len(selected) == 1
+    assert selected[0].url == second
+    assert selected[0].input_row == 3
+
+
+def test_load_tested_url_hashes_is_strict_and_never_needs_full_urls(tmp_path):
+    report = tmp_path / "extension-batch-one.jsonl"
+    report.write_text(
+        "\n".join(
+            [
+                json.dumps({"record": "start"}),
+                json.dumps({"record": "item", "url_sha256": "0123456789abcdef"}),
+                json.dumps({"record": "item", "url_sha256": "0123456789abcdef"}),
+                json.dumps({"record": "summary"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_tested_url_hashes(tmp_path) == {"0123456789abcdef"}
+    assert "https://" not in report.read_text(encoding="utf-8")
+
+    broken = tmp_path / "extension-batch-two.jsonl"
+    broken.write_text('{"record":"item","url_sha256":"bad"}\n', encoding="utf-8")
+    with pytest.raises(SourceError, match="безопасный URL-хэш"):
+        load_tested_url_hashes(tmp_path)
 
 
 def test_batch_report_contains_no_url_or_phone(settings):

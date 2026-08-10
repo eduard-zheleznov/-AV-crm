@@ -120,11 +120,13 @@ def test_safe_extension_batch_command_requires_local_file_and_limit():
             "retry_phone",
             "--limit",
             "100",
+            "--exclude-tested-reports",
         ]
     )
     assert google.google is True
     assert google.file is None
     assert google.status == ["retry_phone"]
+    assert google.exclude_tested_reports is True
 
 
 def test_avito_profile_starts_even_when_crm_timezone_is_unavailable(tmp_path, monkeypatch):

@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import random
+import re
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -31,8 +32,10 @@ from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url
 
 MAX_BATCH_INPUT_BYTES = 10 * 1024 * 1024
+MAX_BATCH_REPORT_BYTES = 20 * 1024 * 1024
 MAX_BATCH_URLS = 500
 URL_COLUMN_NAMES = {"url", "link", "ссылка", "объявление", "ссылка avito"}
+SAFE_URL_HASH_RE = re.compile(r"[0-9a-f]{16}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +114,7 @@ def load_google_batch_urls(
     limit: int,
     sheet: str | None = None,
     statuses: tuple[str, ...] = ("retry_phone",),
+    excluded_url_hashes: set[str] | None = None,
 ) -> list[BatchUrl]:
     """Read test URLs from Google without constructing a writable queue source."""
     if not 1 <= limit <= MAX_BATCH_URLS:
@@ -143,7 +147,41 @@ def load_google_batch_urls(
         status_column=settings.status_column,
         statuses=normalized_statuses,
         limit=limit,
+        excluded_url_hashes=excluded_url_hashes,
     )
+
+
+def load_tested_url_hashes(output_dir: Path) -> set[str]:
+    """Read safe URL hashes from completed or partial local batch reports."""
+    hashes: set[str] = set()
+    for report in sorted(output_dir.glob("extension-batch-*.jsonl")):
+        if not report.is_file():
+            continue
+        if report.stat().st_size > MAX_BATCH_REPORT_BYTES:
+            raise SourceError(f"Batch-отчёт превышает безопасный предел 20 МБ: {report.name}")
+        try:
+            with report.open("r", encoding="utf-8") as stream:
+                for line_number, line in enumerate(stream, 1):
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    if not isinstance(payload, dict):
+                        raise SourceError(
+                            f"Batch-отчёт содержит запись неверного формата: "
+                            f"{report.name}, строка {line_number}"
+                        )
+                    if payload.get("record") != "item":
+                        continue
+                    url_hash = str(payload.get("url_sha256", "")).strip().casefold()
+                    if not SAFE_URL_HASH_RE.fullmatch(url_hash):
+                        raise SourceError(
+                            f"Batch-отчёт не содержит безопасный URL-хэш: "
+                            f"{report.name}, строка {line_number}"
+                        )
+                    hashes.add(url_hash)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SourceError(f"Не удалось безопасно прочитать batch-отчёт {report.name}") from exc
+    return hashes
 
 
 def run_extension_batch(
@@ -389,6 +427,7 @@ def _select_google_batch_rows(
     status_column: str,
     statuses: set[str],
     limit: int,
+    excluded_url_hashes: set[str] | None = None,
 ) -> list[BatchUrl]:
     if not values:
         raise SourceError("Google Sheet очереди пуст")
@@ -403,6 +442,7 @@ def _select_google_batch_rows(
 
     selected: list[BatchUrl] = []
     seen: set[str] = set()
+    excluded = excluded_url_hashes or set()
     for row_number, row in enumerate(values[1:], 2):
         padded = row + [""] * max(0, len(headers) - len(row))
         if padded[status_index].strip().casefold() not in statuses:
@@ -410,6 +450,9 @@ def _select_google_batch_rows(
         try:
             url = canonical_avito_url(padded[url_index])
         except InvalidListingError:
+            continue
+        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+        if url_hash in excluded:
             continue
         if url in seen:
             continue
