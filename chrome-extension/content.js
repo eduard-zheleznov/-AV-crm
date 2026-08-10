@@ -118,11 +118,24 @@ async function revealOnce(command) {
       if (finalPhone) {
         return { status: "phone", phone: finalPhone, source: "chrome-extension-dom" };
       }
-      return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
+      return postClickCaptureResult(button, phoneRegion);
     }
     await delay(500);
   }
-  return { status: "screenshot", crop: captureRegion(button, phoneRegion) };
+  return postClickCaptureResult(button, phoneRegion);
+}
+
+function postClickCaptureResult(button, phoneRegion) {
+  const crop = captureRegion(button, phoneRegion);
+  const remainingButton = findPhoneButton();
+  if (crop === phoneRegion && remainingButton && isVisibleInViewport(remainingButton)) {
+    return {
+      status: "click_no_effect",
+      reason: "Кнопка показа телефона осталась закрытой после клика",
+      crop
+    };
+  }
+  return { status: "screenshot", crop };
 }
 
 async function waitForManualAction(_timeoutMs) {

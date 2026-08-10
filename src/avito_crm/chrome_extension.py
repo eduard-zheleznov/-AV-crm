@@ -46,7 +46,7 @@ LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
 MAX_TAB_CAPTURE_PNG_BYTES = 8 * 1024 * 1024
 MAX_TAB_CAPTURE_PIXELS = 64_000_000
-EXPECTED_EXTENSION_VERSION = "1.0.7.6"
+EXPECTED_EXTENSION_VERSION = "1.0.7.7"
 NAVIGATION_ATTEMPTS = 2
 NAVIGATION_RETRY_DELAY_SECONDS = 1.5
 
@@ -577,6 +577,11 @@ class ChromeExtensionBrowser:
             LOGGER.info("Обычный Chrome: кнопка показа телефона найдена")
         elif event.status == "clicked":
             LOGGER.info("Обычный Chrome: команда клика отправлена")
+        elif event.status == "retrying_after_click_no_effect":
+            LOGGER.warning(
+                "Обычный Chrome: кнопка не раскрылась; вкладка перезагружается для "
+                "последней попытки"
+            )
 
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:

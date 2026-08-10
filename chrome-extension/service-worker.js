@@ -1,8 +1,14 @@
-importScripts("config.local.js", "readiness-core.js", "tab-capture-core.js");
+importScripts(
+  "config.local.js",
+  "readiness-core.js",
+  "tab-capture-core.js",
+  "reveal-retry-core.js"
+);
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
 const READINESS = globalThis.AVITO_CRM_READINESS;
 const TAB_CAPTURE = globalThis.AVITO_CRM_TAB_CAPTURE;
+const REVEAL_RETRY = globalThis.AVITO_CRM_REVEAL_RETRY;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const BASE_URL = CONFIG ? `http://127.0.0.1:${CONFIG.port}` : "";
 const AUTH_HEADERS = CONFIG
@@ -123,10 +129,18 @@ async function executeCommand(command) {
       }
       await focusTab(tab.id);
       const result = await sendRevealMessage(tab.id, command);
-      if (result.status === "phone_error" && attempt < command.maxClicks) {
+      if (REVEAL_RETRY.shouldRetry(result.status, attempt, command.maxClicks)) {
+        if (result.status === "click_no_effect") {
+          await postEvent({
+            id: command.id,
+            type: "status",
+            status: "retrying_after_click_no_effect",
+            reason: "Кнопка не раскрылась; вкладка будет перезагружена один раз"
+          });
+        }
         continue;
       }
-      if (result.status === "screenshot") {
+      if (REVEAL_RETRY.shouldCapture(result.status)) {
         await focusTab(tab.id);
         await delay(300);
         const capture = await captureManagedAvitoTab(tab, command.url, result.crop);

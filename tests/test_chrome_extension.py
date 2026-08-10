@@ -363,6 +363,21 @@ def test_extension_browser_counts_each_solved_captcha_once(settings):
     assert browser.captchas_solved == 1
 
 
+def test_extension_browser_logs_bounded_reload_without_personal_data(settings, caplog):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    event = ExtensionEvent(
+        "status",
+        "retrying_after_click_no_effect",
+        {"reason": "Кнопка не раскрылась"},
+    )
+
+    with caplog.at_level("WARNING", logger="avito_crm.chrome_extension"):
+        browser._handle_status(event, "https://www.avito.ru/moskva/test_123")
+
+    assert "вкладка перезагружается для последней попытки" in caplog.text
+    assert "test_123" not in caplog.text
+
+
 def test_extension_browser_reminds_and_reports_operator_stop(settings):
     notifier = _RecordingNotifier()
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), notifier)
