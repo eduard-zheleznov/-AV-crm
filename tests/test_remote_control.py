@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -632,6 +633,90 @@ def test_remote_run_reports_time_deferred_status(settings):
 
     assert result["status"] == "ОТЛОЖЕНО ПО ВРЕМЕНИ"
     assert "10:00–19:45" in result["message"]
+
+
+def test_time_deferred_remote_command_waits_and_resumes_same_command(settings):
+    panel = FakePanel(PanelCommand(False, False, 0, "Лист1", False))
+    controller = InstantController(settings, panel)
+    state = CommandState(
+        command_id="cmd-auto-resume",
+        target=0,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-08-16T04:50:00+00:00",
+        history_row=2,
+    )
+
+    class FinishedWorker:
+        @staticmethod
+        def is_alive():
+            return False
+
+    future = datetime.now(UTC) + timedelta(hours=1)
+    controller._state = state
+    controller._worker = FinishedWorker()
+    controller._worker_result = WorkerResult(
+        kind="finished",
+        summary=RunSummary(
+            run_id=state.command_id,
+            requested=0,
+            time_deferred=17,
+            resume_after=future.isoformat(),
+            stopped_reason="Отложено по времени: безопасное окно ещё не открыто",
+        ),
+    )
+
+    controller._collect_worker_result()
+
+    assert controller._state is state
+    assert state.phase == "waiting_time"
+    assert state.resume_not_before == future.isoformat()
+    assert panel.finishes == []
+    controller._continue_existing_state()
+    assert controller._worker is None
+
+    state.resume_not_before = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    controller._continue_existing_state()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    assert controller.remaining_values == [0]
+    assert panel.history_appends == 0
+
+
+def test_time_deferred_without_known_safe_window_stays_terminal(settings):
+    panel = FakePanel(PanelCommand(False, False, 0, "Лист1", False))
+    controller = InstantController(settings, panel)
+    state = CommandState(
+        command_id="cmd-unknown-window",
+        target=0,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-08-16T04:50:00+00:00",
+        history_row=2,
+    )
+
+    class FinishedWorker:
+        @staticmethod
+        def is_alive():
+            return False
+
+    controller._state = state
+    controller._worker = FinishedWorker()
+    controller._worker_result = WorkerResult(
+        kind="finished",
+        summary=RunSummary(
+            run_id=state.command_id,
+            requested=0,
+            stopped_reason="Отложено по времени: безопасное окно неизвестно",
+        ),
+    )
+
+    controller._collect_worker_result()
+
+    assert state.phase == "finalizing"
+    assert state.result["status"] == "ОТЛОЖЕНО ПО ВРЕМЕНИ"
 
 
 def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):

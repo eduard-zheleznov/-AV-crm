@@ -1,11 +1,52 @@
 from dataclasses import replace
+from datetime import UTC, datetime, time
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
 import avito_crm.queue as queue_module
-from avito_crm.models import ItemStatus, QueuePatch
-from avito_crm.queue import QueueColumns, XlsxQueueSource, build_queue_source
+from avito_crm.models import ItemStatus, QueueItem, QueuePatch
+from avito_crm.queue import (
+    GoogleSheetsQueueSource,
+    QueueColumns,
+    XlsxQueueSource,
+    build_queue_source,
+)
+
+
+def test_google_queue_calculates_earliest_next_safe_local_window():
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.timezone_guard_enabled = True
+    source.local_call_start = time(10, 0)
+    source.local_lead_cutoff = time(19, 45)
+    items = [
+        QueueItem("1", "https://www.avito.ru/item_1", values={"__moscow_offset": 1}),
+        QueueItem("2", "https://www.avito.ru/item_2", values={"__moscow_offset": 2}),
+    ]
+
+    resume_at = source.next_local_window_at(
+        items,
+        now=datetime(2026, 8, 16, 4, 59, 52, tzinfo=UTC),
+    )
+
+    assert resume_at is not None
+    assert resume_at.astimezone(UTC) == datetime(2026, 8, 16, 5, 0, tzinfo=UTC)
+
+
+def test_google_queue_moves_after_cutoff_to_next_day_opening():
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.timezone_guard_enabled = True
+    source.local_call_start = time(10, 0)
+    source.local_lead_cutoff = time(19, 45)
+    item = QueueItem("1", "https://www.avito.ru/item_1", values={"__moscow_offset": 0})
+
+    resume_at = source.next_local_window_at(
+        [item],
+        now=datetime(2026, 8, 16, 18, 0, tzinfo=UTC),
+    )
+
+    assert resume_at is not None
+    assert resume_at.astimezone(UTC) == datetime(2026, 8, 17, 7, 0, tzinfo=UTC)
 
 
 def test_xlsx_queue_adds_columns_updates_atomically_and_backs_up(tmp_path, settings):

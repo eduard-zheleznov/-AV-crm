@@ -12,6 +12,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from avito_crm import __version__
 from avito_crm.config import Settings
@@ -144,6 +145,7 @@ class CommandState:
     base_inspected: int = 0
     base_no_answer_synced: int = 0
     base_time_deferred: int = 0
+    resume_not_before: str = ""
     completion_notified: bool = False
     result: dict[str, Any] = field(default_factory=dict)
 
@@ -1281,6 +1283,13 @@ class RemoteController:
                     status="ОЖИДАЕТ",
                     message="На компьютере ещё работает другой запуск; пульт подождёт.",
                 )
+            elif self._state.phase == "waiting_time":
+                self.panel.update_active(
+                    self._state,
+                    self._progress,
+                    status="ОЖИДАЕТ ВРЕМЕНИ",
+                    message=self._waiting_time_message(self._state),
+                )
             else:
                 self.panel.heartbeat()
         else:
@@ -1407,6 +1416,12 @@ class RemoteController:
         if state.stop_requested:
             self._prepare_stopped_result(state)
             return
+        if state.phase == "waiting_time" and not self._resume_is_due(state):
+            return
+        if state.phase == "waiting_time":
+            state.resume_not_before = ""
+            state.phase = "claimed"
+            self._save_state(state)
         if state.phase == "claiming":
             self.panel.claim(state)
             state.phase = "claimed"
@@ -1603,11 +1618,54 @@ class RemoteController:
                 progress=self._progress,
             )
         else:
-            self._state.result = self._classify_summary(
-                self._state, result.summary or RunSummary(self._state.command_id, 0)
-            )
+            summary = result.summary or RunSummary(self._state.command_id, 0)
+            if (
+                not self._state.stop_requested
+                and bool(summary.resume_after)
+                and summary.stopped_reason.casefold().startswith("отложено по времени")
+            ):
+                self._progress = replace(
+                    self._progress,
+                    crm_sync_errors=summary.crm_sync_errors,
+                    time_deferred=summary.time_deferred,
+                )
+                self._state.resume_not_before = summary.resume_after
+                self._state.phase = "waiting_time"
+                with self._worker_guard:
+                    self._phase_message = self._waiting_time_message(self._state)
+                self._save_state(self._state)
+                return
+            self._state.result = self._classify_summary(self._state, summary)
         self._state.phase = "finalizing"
         self._save_state(self._state)
+
+    @staticmethod
+    def _resume_is_due(state: CommandState) -> bool:
+        try:
+            resume_at = datetime.fromisoformat(
+                state.resume_not_before.strip().replace("Z", "+00:00")
+            )
+            if resume_at.tzinfo is None:
+                resume_at = resume_at.replace(tzinfo=UTC)
+        except (AttributeError, ValueError):
+            return True
+        return datetime.now(UTC) >= resume_at.astimezone(UTC)
+
+    @staticmethod
+    def _waiting_time_message(state: CommandState) -> str:
+        try:
+            resume_at = datetime.fromisoformat(
+                state.resume_not_before.strip().replace("Z", "+00:00")
+            )
+            if resume_at.tzinfo is None:
+                resume_at = resume_at.replace(tzinfo=UTC)
+            local = resume_at.astimezone(ZoneInfo("Europe/Moscow"))
+            return (
+                f"Все доступные строки отложены местным временем; "
+                f"автопродолжение в {local:%d.%m %H:%M} МСК."
+            )
+        except (AttributeError, ValueError):
+            return "Все доступные строки отложены; автопродолжение ожидает безопасного окна."
 
     def _handle_stop(self, *, clear_start: bool) -> None:
         self.panel.acknowledge_stop(clear_start=clear_start)

@@ -185,6 +185,9 @@ class Pipeline:
                         self._report_progress(progress, summary, "")
                     if not eligible_items:
                         if mode_eligible and self.live:
+                            resume_at = self.source.next_local_window_at(mode_eligible)
+                            if resume_at is not None:
+                                summary.resume_after = resume_at.astimezone(UTC).isoformat()
                             summary.stopped_reason = (
                                 "Отложено по времени: для всех доступных строк "
                                 "сейчас нет безопасного местного окна 10:00–19:45"

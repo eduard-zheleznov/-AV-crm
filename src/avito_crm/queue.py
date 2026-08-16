@@ -223,6 +223,13 @@ class QueueSource(ABC):
     def local_window_detail(self, item: QueueItem, *, now: datetime | None = None) -> str:
         return "ограничение местного времени для этого источника не задано"
 
+    def next_local_window_at(
+        self, items: list[QueueItem], *, now: datetime | None = None
+    ) -> datetime | None:
+        """Return the earliest safe opening for deferred rows, if one is known."""
+        del items, now
+        return None
+
 
 class XlsxQueueSource(QueueSource):
     def __init__(
@@ -652,6 +659,30 @@ class GoogleSheetsQueueSource(QueueSource):
             f"местное время {local:%H:%M}, разрешено "
             f"{self.local_call_start:%H:%M}–{self.local_lead_cutoff:%H:%M}"
         )
+
+    def next_local_window_at(
+        self, items: list[QueueItem], *, now: datetime | None = None
+    ) -> datetime | None:
+        if not self.timezone_guard_enabled:
+            return now or datetime.now(UTC)
+        moscow = ZoneInfo("Europe/Moscow")
+        current = now or datetime.now(moscow)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=moscow)
+        current_moscow = current.astimezone(moscow)
+        candidates: list[datetime] = []
+        for item in items:
+            raw_offset = item.values.get(_MOSCOW_OFFSET)
+            if raw_offset is None:
+                continue
+            offset = timedelta(hours=_safe_int(raw_offset))
+            local_now = current_moscow + offset
+            local_date = local_now.date()
+            if local_now.timetz().replace(tzinfo=None) >= self.local_call_start:
+                local_date += timedelta(days=1)
+            local_open = datetime.combine(local_date, self.local_call_start, tzinfo=moscow)
+            candidates.append(local_open - offset)
+        return min(candidates) if candidates else None
 
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         from gspread.utils import rowcol_to_a1

@@ -101,6 +101,7 @@ class RunSummary:
     repeat_exhausted: int = 0
     crm_sync_errors: int = 0
     time_deferred: int = 0
+    resume_after: str = ""
     stopped_reason: str = ""
 
 
