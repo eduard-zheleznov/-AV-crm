@@ -206,7 +206,7 @@ class Pipeline:
                     attempted_this_round = False
                     should_stop = False
 
-                    for item in eligible_items:
+                    for item_index, item in enumerate(eligible_items):
                         if self.stop_file.exists():
                             summary.stopped_reason = "Остановлено оператором"
                             should_stop = True
@@ -219,6 +219,34 @@ class Pipeline:
                             summary.stopped_reason = "Достигнут заданный лимит"
                             should_stop = True
                             break
+                        # A long pass can cross the local cutoff after the rows
+                        # were selected. Recheck before canonicalization, queue
+                        # mutation or any browser call: an out-of-window row must
+                        # not navigate to Avito or reveal its temporary number.
+                        if self.live and not self.source.is_local_window_open(item):
+                            time_deferred_rows.add(item.row_id)
+                            summary.time_deferred = len(time_deferred_rows)
+                            self._report_progress(progress, summary, item.row_id)
+
+                            remaining_items = eligible_items[item_index + 1 :]
+                            if not any(
+                                self.source.is_local_window_open(remaining)
+                                for remaining in remaining_items
+                            ):
+                                resume_at = self.source.next_local_window_at(
+                                    [item, *remaining_items]
+                                )
+                                if resume_at is not None:
+                                    summary.resume_after = resume_at.astimezone(UTC).isoformat()
+                                summary.stopped_reason = (
+                                    "Отложено по времени: для всех оставшихся строк "
+                                    "сейчас нет безопасного местного окна 10:00–19:45"
+                                )
+                                LOGGER.info(summary.stopped_reason)
+                                self._report_phase(phase, summary.stopped_reason)
+                                should_stop = True
+                                break
+                            continue
                         repeat_flow = self._is_repeat_flow(item)
                         recreate_flow = self._is_recreate_flow(item)
                         attempted_this_round = True

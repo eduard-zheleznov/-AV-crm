@@ -181,7 +181,29 @@ class WindowClosingQueue(RoundQueue):
 
     def is_local_window_open(self, item, *, now=None):
         self.window_checks += 1
-        return self.window_checks < 3
+        # Initial discovery, eligibility filtering and the pre-row guard are
+        # open. The fourth check happens after reveal, before the CRM write.
+        return self.window_checks < 4
+
+
+class WindowClosingBeforeNavigationQueue(RoundQueue):
+    """One selected row expires before navigation; another timezone stays open."""
+
+    def __init__(self, settings):
+        super().__init__(settings, count=2)
+        self.window_checks: dict[str, int] = {}
+
+    def list_all(self):
+        return self.items
+
+    def is_local_window_open(self, item, *, now=None):
+        checks = self.window_checks.get(item.row_id, 0) + 1
+        self.window_checks[item.row_id] = checks
+        if item.row_id == "2":
+            # The row is open during round selection and closes immediately
+            # before the per-row navigation guard.
+            return checks < 2
+        return True
 
 
 class FakeOcr:
@@ -590,6 +612,41 @@ def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, setting
     assert source.items[0].status == ItemStatus.PENDING
     assert source.items[0].attempts == 0
     assert source.items[0].values[source.columns.phone] == ""
+    assert summary.stopped_reason.startswith("Отложено по времени")
+
+
+def test_expired_row_is_not_navigated_or_mutated_before_later_safe_timezone(
+    tmp_path, settings, monkeypatch
+):
+    source = WindowClosingBeforeNavigationQueue(settings)
+    browser = SequencedBrowser({"3": ["+79997654321"]})
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.AvitoBrowser",
+        lambda *_args, **_kwargs: nullcontext(browser),
+    )
+
+    with StateStore(tmp_path / "pre-reveal-window-state.sqlite3") as state:
+        summary = Pipeline(
+            settings,
+            source,
+            state,
+            source_name="test",
+            mode="capture",
+            live=True,
+        ).run(10)
+
+    # reveal_phone performs both navigation and the button click. The expired
+    # row must never reach it, while a later safe timezone may still proceed.
+    assert browser.calls == ["3"]
+    assert source.items[0].status in ("", ItemStatus.PENDING)
+    assert source.items[0].attempts == 0
+    assert source.items[0].values[source.columns.phone] == ""
+    assert source.items[1].status == ItemStatus.CAPTURED
+    assert summary.inspected == 1
+    assert summary.processed == 1
+    assert summary.captured == 1
+    assert summary.time_deferred == 1
     assert summary.stopped_reason.startswith("Отложено по времени")
 
 
