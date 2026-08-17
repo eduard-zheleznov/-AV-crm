@@ -609,6 +609,8 @@ def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, setting
     assert browser.calls == ["2"]
     assert crm.created == []
     assert summary.created == 0
+    assert summary.captured == 0
+    assert summary.time_deferred == 1
     assert source.items[0].status == ItemStatus.PENDING
     assert source.items[0].attempts == 0
     assert source.items[0].values[source.columns.phone] == ""

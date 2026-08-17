@@ -400,8 +400,13 @@ class Pipeline:
                                 raise RuntimeError("CRM client was not initialized")
                             # Recheck immediately before the irreversible CRM write.
                             # If the reveal crossed 19:45 locally, discard the temporary
-                            # number and reopen it in the next safe window.
+                            # number and reopen it in the next safe window. Such a number
+                            # is not usable by the business flow, so it must not remain in
+                            # the "numbers revealed" KPI either.
                             if not self.source.is_local_window_open(item):
+                                if item.row_id in captured_rows:
+                                    captured_rows.remove(item.row_id)
+                                    summary.captured = max(0, summary.captured - 1)
                                 time_deferred_rows.add(item.row_id)
                                 summary.time_deferred = len(time_deferred_rows)
                                 waiting_status = (
