@@ -173,6 +173,12 @@ class ProgressSnapshot:
     no_answer_synced: int = 0
     crm_sync_errors: int = 0
     time_deferred: int = 0
+    call_sla_checks: int = 0
+    call_sla_required: int = 0
+    call_sla_sample: int = 0
+    call_sla_timely: int = 0
+    call_sla_late: int = 0
+    call_sla_status: str = ""
     row_id: str = ""
 
 
@@ -676,11 +682,7 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A9",
-                    "values": [
-                        [
-                            "Предел ссылок (0 = без ограничения)"
-                        ]
-                    ],
+                    "values": [["Предел ссылок (0 = без ограничения)"]],
                 },
                 {
                     "range": "A11",
@@ -1579,6 +1581,12 @@ class RemoteController:
                 no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
                 crm_sync_errors=summary.crm_sync_errors,
                 time_deferred=state.base_time_deferred + summary.time_deferred,
+                call_sla_checks=summary.call_sla_checks,
+                call_sla_required=summary.call_sla_required,
+                call_sla_sample=summary.call_sla_sample,
+                call_sla_timely=summary.call_sla_timely,
+                call_sla_late=summary.call_sla_late,
+                call_sla_status=summary.call_sla_status,
                 row_id=row_id,
             )
 
@@ -1701,7 +1709,16 @@ class RemoteController:
         self._save_state(state)
 
     def _classify_summary(self, state: CommandState, summary: RunSummary) -> dict[str, Any]:
-        progress = replace(self._progress, crm_sync_errors=summary.crm_sync_errors)
+        progress = replace(
+            self._progress,
+            crm_sync_errors=summary.crm_sync_errors,
+            call_sla_checks=summary.call_sla_checks,
+            call_sla_required=summary.call_sla_required,
+            call_sla_sample=summary.call_sla_sample,
+            call_sla_timely=summary.call_sla_timely,
+            call_sla_late=summary.call_sla_late,
+            call_sla_status=summary.call_sla_status,
+        )
         self._progress = progress
         if state.stop_requested or "останов" in summary.stopped_reason.casefold():
             status = "ОСТАНОВЛЕНО"
@@ -1746,6 +1763,12 @@ class RemoteController:
             "no_answer_synced": progress.no_answer_synced,
             "crm_sync_errors": progress.crm_sync_errors,
             "time_deferred": progress.time_deferred,
+            "call_sla_checks": progress.call_sla_checks,
+            "call_sla_required": progress.call_sla_required,
+            "call_sla_sample": progress.call_sla_sample,
+            "call_sla_timely": progress.call_sla_timely,
+            "call_sla_late": progress.call_sla_late,
+            "call_sla_status": progress.call_sla_status,
             "max_inspected": state.max_inspected,
             "command_id": state.command_id,
         }
@@ -1800,6 +1823,12 @@ class RemoteController:
             no_answer_synced=int(result.get("no_answer_synced", 0) or 0),
             crm_sync_errors=int(result.get("crm_sync_errors", 0) or 0),
             time_deferred=int(result.get("time_deferred", 0) or 0),
+            call_sla_checks=int(result.get("call_sla_checks", 0) or 0),
+            call_sla_required=int(result.get("call_sla_required", 0) or 0),
+            call_sla_sample=int(result.get("call_sla_sample", 0) or 0),
+            call_sla_timely=int(result.get("call_sla_timely", 0) or 0),
+            call_sla_late=int(result.get("call_sla_late", 0) or 0),
+            call_sla_status=str(result.get("call_sla_status", "") or ""),
             stopped_reason=reason,
         )
         try:
@@ -1809,9 +1838,7 @@ class RemoteController:
                 if notifier.enabled:
                     notifier.send_run_completed(
                         summary=summary,
-                        source_name=(
-                            f"google:{settings.google_spreadsheet_id}:{state.worksheet}"
-                        ),
+                        source_name=(f"google:{settings.google_spreadsheet_id}:{state.worksheet}"),
                         mode="full",
                         live=True,
                     )

@@ -481,6 +481,98 @@ def test_crm_rejects_unknown_timezone_only_when_call_delay_is_needed(settings):
         crm.first_call_delay_seconds({"created_at": "25.07.2026 12:00:00"})
 
 
+@pytest.mark.parametrize(
+    ("timely_count", "expected_status"),
+    [(8, "passed"), (7, "failed")],
+)
+def test_first_outgoing_call_sla_uses_eight_of_ten_threshold(
+    settings, monkeypatch, timely_count, expected_status
+):
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    leads = [
+        {
+            "id": 700 + index,
+            "created_at": (now - timedelta(minutes=20 - index)).timestamp(),
+        }
+        for index in range(10)
+    ]
+
+    with httpx.Client() as http, LpTrackerClient(settings, http) as crm:
+        monkeypatch.setattr(crm, "list_recent_leads", lambda *_args, **_kwargs: leads)
+
+        def records(lead_id, **_kwargs):
+            index = int(lead_id) - 700
+            delay = 300 if index < timely_count else 301
+            return [
+                {
+                    "direction": "Исходящий",
+                    "time_src": leads[index]["created_at"] + delay,
+                }
+            ]
+
+        monkeypatch.setattr(crm, "get_lead_call_records", records)
+        result = crm.assess_first_outgoing_call_sla(
+            1,
+            [lead["id"] for lead in leads],
+            now=now,
+        )
+
+    assert result.status == expected_status
+    assert result.sampled == 10
+    assert result.timely == timely_count
+    assert result.late == 10 - timely_count
+
+
+def test_first_outgoing_call_sla_waits_for_full_sample_without_reading_feeds(settings, monkeypatch):
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    leads = [
+        {"id": 700 + index, "created_at": (now - timedelta(minutes=10)).timestamp()}
+        for index in range(9)
+    ]
+
+    with httpx.Client() as http, LpTrackerClient(settings, http) as crm:
+        monkeypatch.setattr(crm, "list_recent_leads", lambda *_args, **_kwargs: leads)
+        monkeypatch.setattr(
+            crm,
+            "get_lead_call_records",
+            lambda *_args, **_kwargs: pytest.fail("feed must not be read for an incomplete sample"),
+        )
+        result = crm.assess_first_outgoing_call_sla(
+            1,
+            [lead["id"] for lead in leads],
+            now=now,
+        )
+
+    assert result.status == "insufficient"
+    assert result.sampled == 9
+    assert result.passed is True
+
+
+def test_first_outgoing_call_sla_ignores_incoming_call(settings, monkeypatch):
+    now = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
+    created_at = now - timedelta(minutes=10)
+    leads = [{"id": 700 + index, "created_at": created_at.timestamp()} for index in range(10)]
+
+    with httpx.Client() as http, LpTrackerClient(settings, http) as crm:
+        monkeypatch.setattr(crm, "list_recent_leads", lambda *_args, **_kwargs: leads)
+        monkeypatch.setattr(
+            crm,
+            "get_lead_call_records",
+            lambda *_args, **_kwargs: [
+                {"direction": "Входящий", "time_src": created_at.timestamp() + 30}
+            ],
+        )
+        result = crm.assess_first_outgoing_call_sla(
+            1,
+            [lead["id"] for lead in leads],
+            now=now,
+        )
+
+    assert result.status == "failed"
+    assert result.timely == 0
+    assert result.late == 10
+
+
 def test_crm_deletes_lead_only_after_successful_api_response(settings):
     requests = []
 
@@ -551,7 +643,7 @@ def test_crm_skips_recent_phone_match_for_different_listing(settings):
                         "id": 700,
                         "name": "Авито — 987654321",
                         "created_at": recent_created_at,
-                    }
+                    },
                 ]
             )
         raise AssertionError(f"unexpected write: {request.method} {request.url.path}")

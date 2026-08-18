@@ -82,9 +82,7 @@ def test_state_store_migrates_robot_handoff_due_date_without_losing_cache(tmp_pa
         cached = state.get_robot_handoff(700)
         columns = {
             row[1]
-            for row in state.connection.execute(
-                "PRAGMA table_info(robot_handoffs)"
-            ).fetchall()
+            for row in state.connection.execute("PRAGMA table_info(robot_handoffs)").fetchall()
         }
 
     assert "stage_due_date" in columns
@@ -126,9 +124,7 @@ def test_state_store_migrates_existing_manual_notification_without_resending(tmp
         new_record_claim = state.claim_robot_handoff_notification(
             700, "new-record", "manual_required"
         )
-        state.release_robot_handoff_notification(
-            700, "new-record", "manual_required"
-        )
+        state.release_robot_handoff_notification(700, "new-record", "manual_required")
         retry_after_failed_delivery = state.claim_robot_handoff_notification(
             700, "new-record", "manual_required"
         )
@@ -154,6 +150,28 @@ def test_state_store_accumulates_a_resumed_run(tmp_path):
     assert run["requested"] == 3
     assert run["created"] == 3
     assert run["captured"] == 3
+
+
+def test_state_store_returns_only_distinct_crm_leads_for_one_run(tmp_path):
+    item = QueueItem(row_id="2", url="https://www.avito.ru/moskva/item_123456789")
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        for index, (run_id, lead_id) in enumerate(
+            (("target", "701"), ("target", "702"), ("other", "999")), start=1
+        ):
+            state.record_item(
+                f"https://www.avito.ru/moskva/item_{123456789 + index}",
+                "test",
+                item,
+                QueuePatch(
+                    status=ItemStatus.CRM_MONITORING,
+                    attempts=1,
+                    crm_lead_id=lead_id,
+                    run_id=run_id,
+                ),
+            )
+        lead_ids = state.crm_lead_ids_for_run("target")
+
+    assert set(lead_ids) == {"701", "702"}
 
 
 def test_single_instance_lock_cleans_up(tmp_path):

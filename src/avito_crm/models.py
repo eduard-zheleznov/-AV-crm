@@ -77,6 +77,26 @@ class CrmWriteResult:
     created: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class FirstCallSlaAssessment:
+    status: str
+    eligible: int
+    sampled: int
+    timely: int
+    late: int
+    sample_size: int
+    min_timely: int
+    max_delay_seconds: float
+
+    @property
+    def sufficient(self) -> bool:
+        return self.sampled >= self.sample_size
+
+    @property
+    def passed(self) -> bool:
+        return self.status != "failed"
+
+
 @dataclass(slots=True)
 class RunSummary:
     run_id: str
@@ -101,6 +121,12 @@ class RunSummary:
     repeat_exhausted: int = 0
     crm_sync_errors: int = 0
     time_deferred: int = 0
+    call_sla_checks: int = 0
+    call_sla_required: int = 0
+    call_sla_sample: int = 0
+    call_sla_timely: int = 0
+    call_sla_late: int = 0
+    call_sla_status: str = ""
     resume_after: str = ""
     stopped_reason: str = ""
 

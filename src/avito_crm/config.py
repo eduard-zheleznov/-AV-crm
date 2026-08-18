@@ -137,6 +137,12 @@ class Settings:
     lptracker_timezone: str
     crm_monitor_max_hours: float
     crm_monitor_batch_size: int
+    first_call_sla_enabled: bool
+    first_call_sla_check_interval_minutes: float
+    first_call_sla_sample_size: int
+    first_call_sla_min_timely: int
+    first_call_sla_max_delay_seconds: float
+    first_call_sla_lookback_hours: float
     duplicate_policy: str
     crm_duplicate_window_days: float
 
@@ -311,6 +317,14 @@ class Settings:
             lptracker_timezone=os.getenv("LPTRACKER_TIMEZONE", "Europe/Moscow").strip(),
             crm_monitor_max_hours=_float("CRM_MONITOR_MAX_HOURS", 24.0),
             crm_monitor_batch_size=_int("CRM_MONITOR_BATCH_SIZE", 20) or 20,
+            first_call_sla_enabled=_bool("FIRST_CALL_SLA_ENABLED", True),
+            first_call_sla_check_interval_minutes=_float(
+                "FIRST_CALL_SLA_CHECK_INTERVAL_MINUTES", 30.0
+            ),
+            first_call_sla_sample_size=int(_int("FIRST_CALL_SLA_SAMPLE_SIZE", 10) or 0),
+            first_call_sla_min_timely=int(_int("FIRST_CALL_SLA_MIN_TIMELY", 8) or 0),
+            first_call_sla_max_delay_seconds=_float("FIRST_CALL_SLA_MAX_DELAY_SECONDS", 300.0),
+            first_call_sla_lookback_hours=_float("FIRST_CALL_SLA_LOOKBACK_HOURS", 24.0),
             duplicate_policy=os.getenv("CRM_DUPLICATE_POLICY", "skip").strip().lower(),
             crm_duplicate_window_days=_float("CRM_DUPLICATE_WINDOW_DAYS", 7.0),
             robot_handoff_enabled=_bool("ROBOT_HANDOFF_ENABLED", False),
@@ -321,8 +335,7 @@ class Settings:
                 value.strip()
                 for value in os.getenv(
                     "ROBOT_HANDOFF_SOURCE_FIELD_VALUES",
-                    "Сбор № лпр (Ав, ремонт кв. под ключ)|"
-                    "Сбор № лпр (Ян, ремонт кв. под ключ)",
+                    "Сбор № лпр (Ав, ремонт кв. под ключ)|Сбор № лпр (Ян, ремонт кв. под ключ)",
                 ).split("|")
                 if value.strip()
             ),
@@ -341,9 +354,7 @@ class Settings:
             robot_handoff_stage_date_field_name=os.getenv(
                 "ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME", "Дата шага"
             ).strip(),
-            robot_handoff_stage_delay_days=int(
-                _int("ROBOT_HANDOFF_STAGE_DELAY_DAYS", 2) or 0
-            ),
+            robot_handoff_stage_delay_days=int(_int("ROBOT_HANDOFF_STAGE_DELAY_DAYS", 2) or 0),
             robot_handoff_poll_seconds=_float("ROBOT_HANDOFF_POLL_SECONDS", 120.0),
             robot_handoff_lookback_hours=_float("ROBOT_HANDOFF_LOOKBACK_HOURS", 72.0),
             robot_handoff_batch_size=int(_int("ROBOT_HANDOFF_BATCH_SIZE", 3) or 0),
@@ -355,9 +366,7 @@ class Settings:
             )
             .strip()
             .rstrip("/"),
-            gemini_max_audio_bytes=int(
-                _int("GEMINI_MAX_AUDIO_BYTES", 14 * 1024 * 1024) or 0
-            ),
+            gemini_max_audio_bytes=int(_int("GEMINI_MAX_AUDIO_BYTES", 14 * 1024 * 1024) or 0),
             google_credentials_file=Path(credentials).expanduser().resolve()
             if credentials
             else None,
@@ -473,9 +482,7 @@ class Settings:
         if not 0.5 <= self.robot_handoff_min_confidence <= 1.0:
             raise ConfigurationError("ROBOT_HANDOFF_MIN_CONFIDENCE: допустимо от 0.5 до 1")
         if not 1 <= self.robot_handoff_stage_delay_days <= 30:
-            raise ConfigurationError(
-                "ROBOT_HANDOFF_STAGE_DELAY_DAYS: допустимо от 1 до 30 дней"
-            )
+            raise ConfigurationError("ROBOT_HANDOFF_STAGE_DELAY_DAYS: допустимо от 1 до 30 дней")
         if not 1024 * 1024 <= self.gemini_max_audio_bytes <= 14 * 1024 * 1024:
             raise ConfigurationError(
                 "GEMINI_MAX_AUDIO_BYTES: допустимо от 1 до 14 МБ для inline-запроса"
@@ -501,9 +508,7 @@ class Settings:
                 "ROBOT_HANDOFF_TARGET_OWNER_NAME": self.robot_handoff_target_owner_name,
                 "ROBOT_HANDOFF_FIELD_NAME": self.robot_handoff_field_name,
                 "ROBOT_HANDOFF_FIELD_VALUE": self.robot_handoff_field_value,
-                "ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME": (
-                    self.robot_handoff_stage_date_field_name
-                ),
+                "ROBOT_HANDOFF_STAGE_DATE_FIELD_NAME": (self.robot_handoff_stage_date_field_name),
                 "GEMINI_API_KEY": self.gemini_api_key,
                 "GEMINI_MODEL": self.gemini_model,
             }
@@ -647,6 +652,16 @@ class Settings:
             raise ConfigurationError("CRM_DUPLICATE_POLICY: допустимо skip или create_lead")
         if self.crm_duplicate_window_days < 0:
             raise ConfigurationError("CRM_DUPLICATE_WINDOW_DAYS не может быть меньше 0")
+        if not 1 <= self.first_call_sla_check_interval_minutes <= 240:
+            raise ConfigurationError("FIRST_CALL_SLA_CHECK_INTERVAL_MINUTES: допустимо от 1 до 240")
+        if not 1 <= self.first_call_sla_sample_size <= 50:
+            raise ConfigurationError("FIRST_CALL_SLA_SAMPLE_SIZE: допустимо от 1 до 50")
+        if not 1 <= self.first_call_sla_min_timely <= self.first_call_sla_sample_size:
+            raise ConfigurationError("FIRST_CALL_SLA_MIN_TIMELY: допустимо от 1 до размера выборки")
+        if not 60 <= self.first_call_sla_max_delay_seconds <= 3600:
+            raise ConfigurationError("FIRST_CALL_SLA_MAX_DELAY_SECONDS: допустимо от 60 до 3600")
+        if not 1 <= self.first_call_sla_lookback_hours <= 24:
+            raise ConfigurationError("FIRST_CALL_SLA_LOOKBACK_HOURS: допустимо от 1 до 24")
         funnel_names = {
             "LPTRACKER_AUTORESPONDER_FUNNEL_NAME": self.lptracker_autoresponder_funnel_name,
             "LPTRACKER_NO_ANSWER_FUNNEL_NAME": self.lptracker_no_answer_funnel_name,

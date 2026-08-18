@@ -85,6 +85,7 @@ class Pipeline:
         unresolved_technical_rows: set[str] = set()
         time_deferred_rows: set[str] = set()
         notifier = NotificationRouter(self.settings)
+        next_call_sla_check_at: datetime | None = None
 
         try:
             with ExitStack() as stack:
@@ -102,6 +103,18 @@ class Pipeline:
                         destination.field_name,
                         self.settings.lptracker_field_value,
                     )
+                    if self._call_sla_guard_active(crm, destination):
+                        if not self._run_first_call_sla_check(
+                            crm,
+                            destination.project_id,
+                            summary,
+                            phase=phase,
+                            progress=progress,
+                        ):
+                            return summary
+                        next_call_sla_check_at = datetime.now(UTC) + timedelta(
+                            minutes=self.settings.first_call_sla_check_interval_minutes
+                        )
                     try:
                         if self._sync_crm_rows(
                             crm,
@@ -219,6 +232,22 @@ class Pipeline:
                             summary.stopped_reason = "Достигнут заданный лимит"
                             should_stop = True
                             break
+                        if (
+                            next_call_sla_check_at is not None
+                            and datetime.now(UTC) >= next_call_sla_check_at
+                        ):
+                            if not self._run_first_call_sla_check(
+                                crm,
+                                destination.project_id,
+                                summary,
+                                phase=phase,
+                                progress=progress,
+                            ):
+                                should_stop = True
+                                break
+                            next_call_sla_check_at = datetime.now(UTC) + timedelta(
+                                minutes=self.settings.first_call_sla_check_interval_minutes
+                            )
                         # A long pass can cross the local cutoff after the rows
                         # were selected. Recheck before canonicalization, queue
                         # mutation or any browser call: an out-of-window row must
@@ -811,6 +840,86 @@ class Pipeline:
             finally:
                 notifier.close()
         return summary
+
+    def _call_sla_guard_active(self, crm: object, destination: object) -> bool:
+        return bool(
+            self.settings.first_call_sla_enabled
+            and self.live
+            and self.mode in {"crm", "full"}
+            and crm is not None
+            and destination is not None
+        )
+
+    def _run_first_call_sla_check(
+        self,
+        crm: LpTrackerClient | None,
+        project_id: int,
+        summary: RunSummary,
+        *,
+        phase: Callable[[str], None] | None,
+        progress: Callable[[RunSummary, str], None] | None,
+    ) -> bool:
+        if crm is None:
+            raise RuntimeError("CRM client was not initialized")
+        summary.call_sla_checks += 1
+        summary.call_sla_required = self.settings.first_call_sla_sample_size
+        # A command is one observation window. A process restart keeps the
+        # command ID and therefore cannot erase its evidence; a deliberately
+        # issued new command is the operator acknowledgement that starts a new
+        # recovery sample.
+        lead_ids = self.state.crm_lead_ids_for_run(summary.run_id)
+        try:
+            result = crm.assess_first_outgoing_call_sla(
+                project_id,
+                lead_ids,
+                sample_size=self.settings.first_call_sla_sample_size,
+                min_timely=self.settings.first_call_sla_min_timely,
+                max_delay_seconds=self.settings.first_call_sla_max_delay_seconds,
+                lookback_hours=self.settings.first_call_sla_lookback_hours,
+            )
+        except Exception as exc:
+            summary.call_sla_status = "error"
+            summary.stopped_reason = (
+                "Остановлено: SLA первого звонка не удалось проверить; "
+                f"новые ссылки не открывались после ошибки ({_safe_error(exc)})"
+            )
+            LOGGER.error(summary.stopped_reason)
+            self._report_phase(phase, summary.stopped_reason)
+            self._report_progress(progress, summary, "")
+            return False
+
+        summary.call_sla_sample = result.sampled
+        summary.call_sla_timely = result.timely
+        summary.call_sla_late = result.late
+        summary.call_sla_status = result.status
+        if not result.sufficient:
+            message = (
+                "SLA первого звонка: зрелых лидов текущей команды "
+                f"{result.sampled}/{result.sample_size}; продолжаем до полной выборки."
+            )
+            LOGGER.info(message)
+            self._report_phase(phase, message)
+            self._report_progress(progress, summary, "")
+            return True
+        if result.passed:
+            message = (
+                "SLA первого звонка пройден: "
+                f"{result.timely}/{result.sampled} лидов прозвонены не позже 5 минут."
+            )
+            LOGGER.info(message)
+            self._report_phase(phase, message)
+            self._report_progress(progress, summary, "")
+            return True
+
+        summary.stopped_reason = (
+            "Остановлено по SLA первого звонка: "
+            f"вовремя {result.timely}/{result.sampled}, требуется не меньше "
+            f"{result.min_timely}/{result.sample_size}; следующая ссылка не открывалась"
+        )
+        LOGGER.error(summary.stopped_reason)
+        self._report_phase(phase, summary.stopped_reason)
+        self._report_progress(progress, summary, "")
+        return False
 
     def _sync_crm_rows(
         self,

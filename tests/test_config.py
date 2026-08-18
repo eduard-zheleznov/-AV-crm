@@ -58,6 +58,24 @@ def test_duplicate_window_cannot_be_negative(settings):
         configured.validate()
 
 
+def test_first_call_sla_defaults_match_approved_operating_rule(settings):
+    assert settings.first_call_sla_check_interval_minutes == 30
+    assert settings.first_call_sla_sample_size == 10
+    assert settings.first_call_sla_min_timely == 8
+    assert settings.first_call_sla_max_delay_seconds == 300
+
+
+def test_first_call_sla_threshold_cannot_exceed_sample(settings):
+    configured = replace(
+        settings,
+        first_call_sla_sample_size=10,
+        first_call_sla_min_timely=11,
+    )
+
+    with pytest.raises(ConfigurationError, match="FIRST_CALL_SLA_MIN_TIMELY"):
+        configured.validate()
+
+
 def test_extension_driver_requires_a_long_local_token(settings):
     configured = replace(
         settings,

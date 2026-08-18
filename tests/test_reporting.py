@@ -69,9 +69,7 @@ def test_compact_report_separates_time_deferred_rows_from_unopened_other():
 
 
 def test_compact_report_says_yes_only_for_full_opened_to_crm_conversion():
-    complete = format_run_report(
-        RunSummary("complete", 4, processed=4, captured=4, created=4)
-    )
+    complete = format_run_report(RunSummary("complete", 4, processed=4, captured=4, created=4))
     partial = format_run_report(
         RunSummary(
             "partial",
@@ -109,3 +107,21 @@ def test_compact_report_only_expands_attention_lines_when_needed():
     assert "Внимание:" not in normal
     assert "Ожидают решения капчи: 1" in attention
     assert "технических ошибок — 1; предупреждений CRM — 2" in attention
+
+
+def test_compact_report_includes_latest_first_call_sla_sample():
+    report = format_run_report(
+        RunSummary(
+            "sla",
+            20,
+            call_sla_checks=2,
+            call_sla_required=10,
+            call_sla_sample=10,
+            call_sla_timely=8,
+            call_sla_late=2,
+            call_sla_status="passed",
+        )
+    )
+
+    assert "SLA первого звонка (не позже 5 минут): 8/10 вовремя" in report
+    assert "с задержкой — 2" in report

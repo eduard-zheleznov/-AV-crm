@@ -14,6 +14,7 @@ from avito_crm.errors import (
 from avito_crm.models import (
     CrmDestination,
     CrmWriteResult,
+    FirstCallSlaAssessment,
     ItemStatus,
     PhoneResult,
     QueueItem,
@@ -472,6 +473,7 @@ class FakeRepeatCrm:
     delete_error = None
     create_detail = ""
     comment_error = None
+    sla_assessment = FirstCallSlaAssessment("insufficient", 0, 0, 0, 0, 10, 8, 300)
 
     def __init__(self, _settings):
         self.created = []
@@ -487,6 +489,9 @@ class FakeRepeatCrm:
 
     def resolve_destination(self):
         return CrmDestination(1, "Progress Pro 2.0", 42, "Тег", "cats", "Сбор")
+
+    def assess_first_outgoing_call_sla(self, *_args, **_kwargs):
+        return self.__class__.sla_assessment
 
     def list_funnel_steps(self, _project_id):
         return [
@@ -542,6 +547,7 @@ def _run_repeat(
     delete_error=None,
     create_detail="",
     comment_error=None,
+    sla_assessment=None,
     phase_messages=None,
 ):
     FakeRepeatCrm.instances.clear()
@@ -551,6 +557,9 @@ def _run_repeat(
     FakeRepeatCrm.delete_error = delete_error
     FakeRepeatCrm.create_detail = create_detail
     FakeRepeatCrm.comment_error = comment_error
+    FakeRepeatCrm.sla_assessment = sla_assessment or FirstCallSlaAssessment(
+        "insufficient", 0, 0, 0, 0, 10, 8, 300
+    )
     monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
     monkeypatch.setattr("avito_crm.pipeline.LpTrackerClient", FakeRepeatCrm)
     monkeypatch.setattr(
@@ -598,6 +607,28 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
     assert summary.created == 1
     assert summary.repeat_created == 1
     assert summary.stage_synced == 1
+
+
+def test_failed_first_call_sla_stops_before_browser_or_new_lead(tmp_path, settings, monkeypatch):
+    source = RepeatQueue(settings)
+    browser = SequencedBrowser({"2": ["+79997654321"]})
+
+    summary, crm = _run_repeat(
+        tmp_path,
+        settings,
+        monkeypatch,
+        source,
+        browser,
+        sla_assessment=FirstCallSlaAssessment("failed", 10, 10, 7, 3, 10, 8, 300),
+    )
+
+    assert browser.calls == []
+    assert crm.created == []
+    assert summary.inspected == 0
+    assert summary.call_sla_timely == 7
+    assert summary.call_sla_late == 3
+    assert summary.stopped_reason.startswith("Остановлено по SLA первого звонка")
+    assert "следующая ссылка не открывалась" in summary.stopped_reason
 
 
 def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, settings, monkeypatch):

@@ -16,6 +16,12 @@ class RunReportMetrics(Protocol):
     errors: int
     crm_sync_errors: int
     time_deferred: int
+    call_sla_checks: int
+    call_sla_required: int
+    call_sla_sample: int
+    call_sla_timely: int
+    call_sla_late: int
+    call_sla_status: str
 
 
 def _count(value: object) -> int:
@@ -52,6 +58,12 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     errors = _count(metrics.errors)
     crm_sync_errors = _count(metrics.crm_sync_errors)
     time_deferred = _count(getattr(metrics, "time_deferred", 0))
+    call_sla_checks = _count(getattr(metrics, "call_sla_checks", 0))
+    call_sla_required = _count(getattr(metrics, "call_sla_required", 0)) or 10
+    call_sla_sample = _count(getattr(metrics, "call_sla_sample", 0))
+    call_sla_timely = _count(getattr(metrics, "call_sla_timely", 0))
+    call_sla_late = _count(getattr(metrics, "call_sla_late", 0))
+    call_sla_status = str(getattr(metrics, "call_sla_status", "") or "").strip()
 
     unopened = max(0, processed - captured)
     classified_unopened = inactive + invalid + unavailable
@@ -108,12 +120,23 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
             f"Отложено по местному времени: {time_deferred} "
             "(в CRM не передавались; будут обработаны в безопасное окно)"
         )
+    if call_sla_checks:
+        if call_sla_status == "insufficient":
+            lines.append(
+                f"SLA первого звонка: данных пока недостаточно — "
+                f"{call_sla_sample}/{call_sla_required} зрелых лидов."
+            )
+        else:
+            lines.append(
+                f"SLA первого звонка (не позже 5 минут): "
+                f"{call_sla_timely}/{call_sla_sample} вовремя; "
+                f"с задержкой — {call_sla_late}."
+            )
     if manual_required:
         lines.append(f"Ожидают решения капчи: {manual_required}")
     if errors or crm_sync_errors:
         lines.append(
-            f"Внимание: технических ошибок — {errors}; "
-            f"предупреждений CRM — {crm_sync_errors}."
+            f"Внимание: технических ошибок — {errors}; предупреждений CRM — {crm_sync_errors}."
         )
     lines.extend(("", f"Итог: {result}"))
     return "\n".join(lines)

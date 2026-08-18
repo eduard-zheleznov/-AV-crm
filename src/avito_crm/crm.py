@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urljoin
@@ -16,7 +16,7 @@ import httpx
 
 from avito_crm.config import Settings
 from avito_crm.errors import ConfigurationError, CrmError
-from avito_crm.models import CrmDestination, CrmWriteResult, ItemStatus
+from avito_crm.models import CrmDestination, CrmWriteResult, FirstCallSlaAssessment, ItemStatus
 from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
@@ -91,9 +91,7 @@ class LpTrackerClient:
             raise ConfigurationError("Имя владельца лида не заполнено")
         staff = self.list_staff()
         matches = [
-            member
-            for member in staff
-            if _normalized_name(str(member.get("name", ""))) == wanted
+            member for member in staff if _normalized_name(str(member.get("name", ""))) == wanted
         ]
         if len(matches) != 1:
             available = ", ".join(
@@ -150,8 +148,7 @@ class LpTrackerClient:
             if not matches:
                 raise ConfigurationError(f"Поле {field_name!r} не найдено. Поля: {available}")
             raise ConfigurationError(
-                f"Найдено несколько полей {field_name!r}; "
-                "укажите ID проекта точнее"
+                f"Найдено несколько полей {field_name!r}; укажите ID проекта точнее"
             )
         field = matches[0]
         field_type = str(field.get("type", ""))
@@ -388,6 +385,93 @@ class LpTrackerClient:
             return None
         return (first_call_at - created_at).total_seconds()
 
+    def assess_first_outgoing_call_sla(
+        self,
+        project_id: int,
+        lead_ids: Iterable[str | int],
+        *,
+        now: datetime | None = None,
+        sample_size: int = 10,
+        min_timely: int = 8,
+        max_delay_seconds: float = 300.0,
+        lookback_hours: float = 24.0,
+    ) -> FirstCallSlaAssessment:
+        """Assess the latest mature leads from one batch without mutating CRM."""
+        if sample_size < 1 or min_timely < 1 or min_timely > sample_size:
+            raise ValueError("Некорректные параметры выборки SLA первого звонка")
+        checked_at = (now or datetime.now(UTC)).astimezone(UTC)
+        wanted_ids = {str(lead_id).strip() for lead_id in lead_ids if str(lead_id).strip()}
+        if not wanted_ids:
+            return FirstCallSlaAssessment(
+                "insufficient", 0, 0, 0, 0, sample_size, min_timely, max_delay_seconds
+            )
+        try:
+            local_timezone = ZoneInfo(self.settings.lptracker_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigurationError(
+                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE={self.settings.lptracker_timezone!r}"
+            ) from exc
+
+        lookback_start = checked_at - timedelta(hours=lookback_hours)
+        mature_before = checked_at - timedelta(seconds=max_delay_seconds)
+        candidates: list[tuple[datetime, dict[str, Any]]] = []
+        for offset in (0, 200):
+            leads = self.list_recent_leads(
+                project_id,
+                updated_from=int(lookback_start.timestamp()),
+                limit=200,
+                offset=offset,
+            )
+            for lead in leads:
+                lead_id = str(lead.get("id", "")).strip()
+                if lead_id not in wanted_ids:
+                    continue
+                created_at = _extract_lead_created_at(lead, local_timezone)
+                if created_at is None or not (lookback_start <= created_at < mature_before):
+                    continue
+                candidates.append((created_at, lead))
+            if len(leads) < 200 or len(candidates) >= sample_size:
+                break
+
+        candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+        selected = candidates[:sample_size]
+        sampled = len(selected)
+        if sampled < sample_size:
+            return FirstCallSlaAssessment(
+                status="insufficient",
+                eligible=len(candidates),
+                sampled=sampled,
+                timely=0,
+                late=0,
+                sample_size=sample_size,
+                min_timely=min_timely,
+                max_delay_seconds=max_delay_seconds,
+            )
+        timely = 0
+        for created_at, lead in selected:
+            records = self.get_lead_call_records(
+                str(lead.get("id", "")).strip(),
+                project_id=project_id,
+                max_pages=2,
+            )
+            first_call_at = _extract_first_outgoing_call_at(records, local_timezone)
+            delay = None if first_call_at is None else (first_call_at - created_at).total_seconds()
+            if delay is not None and 0 <= delay <= max_delay_seconds:
+                timely += 1
+
+        late = sampled - timely
+        status = "passed" if timely >= min_timely else "failed"
+        return FirstCallSlaAssessment(
+            status=status,
+            eligible=len(candidates),
+            sampled=sampled,
+            timely=timely,
+            late=late,
+            sample_size=sample_size,
+            min_timely=min_timely,
+            max_delay_seconds=max_delay_seconds,
+        )
+
     def delete_lead(self, lead_id: str | int) -> None:
         """Delete one lead; a failed or ambiguous API response raises CrmError."""
         normalized_id = str(lead_id).strip()
@@ -412,9 +496,7 @@ class LpTrackerClient:
             if contact_id is None:
                 continue
             for lead in self.contact_leads(contact_id):
-                if _lead_name_matches_listing(
-                    str(lead.get("name", "")), listing_id, repeat=repeat
-                ):
+                if _lead_name_matches_listing(str(lead.get("name", "")), listing_id, repeat=repeat):
                     return lead
         return None
 
@@ -513,9 +595,7 @@ class LpTrackerClient:
                 if newest_lead_at is not None
                 else None
             )
-            duplicate_is_recent = window_days > 0 and (
-                age_days is None or age_days < window_days
-            )
+            duplicate_is_recent = window_days > 0 and (age_days is None or age_days < window_days)
             if duplicate_is_recent:
                 if age_days is None:
                     detail = (
@@ -588,9 +668,7 @@ class LpTrackerClient:
         field_id: int,
     ) -> dict[str, Any] | None:
         for lead in leads:
-            if not _lead_name_matches_listing(
-                str(lead.get("name", "")), listing_id, repeat=repeat
-            ):
+            if not _lead_name_matches_listing(str(lead.get("name", "")), listing_id, repeat=repeat):
                 continue
             custom = lead.get("custom") or []
             # Some LPTracker list responses omit custom fields even though the
@@ -627,8 +705,7 @@ class LpTrackerClient:
             payload = response.json()
         except ValueError as exc:
             raise CrmError(
-                f"История LPTracker вернула не-JSON при авторизации "
-                f"(HTTP {response.status_code})"
+                f"История LPTracker вернула не-JSON при авторизации (HTTP {response.status_code})"
             ) from exc
         result = payload.get("result") if isinstance(payload, dict) else None
         data = result.get("data") if isinstance(result, dict) else None
@@ -675,8 +752,7 @@ class LpTrackerClient:
                 if response.status_code in {429, 500, 502, 503, 504}:
                     if attempt == 3:
                         raise CrmError(
-                            "История LPTracker временно недоступна "
-                            f"(HTTP {response.status_code})"
+                            f"История LPTracker временно недоступна (HTTP {response.status_code})"
                         )
                     time.sleep(min(8.0, 2**attempt))
                     continue
@@ -684,8 +760,7 @@ class LpTrackerClient:
                     payload = response.json()
                 except ValueError as exc:
                     raise CrmError(
-                        "История LPTracker вернула не-JSON "
-                        f"(HTTP {response.status_code})"
+                        f"История LPTracker вернула не-JSON (HTTP {response.status_code})"
                     ) from exc
                 if response.status_code >= 400:
                     raise CrmError(_web_error_message(payload, response.status_code))
@@ -841,9 +916,7 @@ def is_managed_avito_lead(lead: dict[str, Any]) -> bool:
     view = lead.get("view")
     if not isinstance(view, dict) or not str(view.get("campaign", "")).strip():
         return True
-    return _normalized_name(str(view.get("campaign", ""))) == _normalized_name(
-        "Avito CRM Pipeline"
-    )
+    return _normalized_name(str(view.get("campaign", ""))) == _normalized_name("Avito CRM Pipeline")
 
 
 def _lead_name_matches_listing(
@@ -947,6 +1020,29 @@ def _extract_first_call_at(lead: dict[str, Any], local_timezone: ZoneInfo) -> da
         if not isinstance(record, dict):
             continue
         for key in ("time", "created_at", "started_at", "date"):
+            parsed = _parse_crm_datetime(record.get(key), local_timezone)
+            if parsed is not None:
+                call_dates.append(parsed)
+                break
+    return min(call_dates) if call_dates else None
+
+
+def _extract_first_outgoing_call_at(
+    records: Iterable[dict[str, Any]], local_timezone: ZoneInfo
+) -> datetime | None:
+    call_dates: list[datetime] = []
+    for record in records:
+        direction = _normalized_name(
+            str(
+                record.get("direction")
+                or record.get("call_type_text")
+                or record.get("call_type")
+                or ""
+            )
+        )
+        if "исход" not in direction and direction not in {"out", "outgoing", "outbound"}:
+            continue
+        for key in ("time_src", "sort_field", "time", "created_at", "started_at", "date"):
             parsed = _parse_crm_datetime(record.get(key), local_timezone)
             if parsed is not None:
                 call_dates.append(parsed)
