@@ -4,12 +4,24 @@ import logging
 import random
 import time
 from collections.abc import Callable
+from http.client import RemoteDisconnected
 from typing import TypeVar
 
 LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 RETRYABLE_GOOGLE_STATUSES = {429, 500, 502, 503, 504}
+RETRYABLE_TRANSPORT_NAMES = {
+    "ChunkedEncodingError",
+    "ConnectTimeout",
+    "ConnectionError",
+    "MaxRetryError",
+    "NewConnectionError",
+    "ProtocolError",
+    "ProxyError",
+    "ReadTimeout",
+}
+RETRYABLE_TRANSPORT_MODULES = ("requests.", "urllib3.")
 
 
 def google_api_call(
@@ -22,7 +34,7 @@ def google_api_call(
     sleeper: Callable[[float], None] = time.sleep,
     jitter: Callable[[float, float], float] = random.uniform,
 ) -> T:
-    """Run a Google API operation with bounded quota/server-error backoff."""
+    """Run a Google API operation with bounded transient-failure backoff."""
     if attempts < 1:
         raise ValueError("attempts must be at least 1")
 
@@ -31,16 +43,18 @@ def google_api_call(
             return operation()
         except Exception as exc:
             status = _google_status(exc)
-            if status not in RETRYABLE_GOOGLE_STATUSES or attempt + 1 >= attempts:
+            transport_error = _is_retryable_transport_error(exc)
+            retryable = status in RETRYABLE_GOOGLE_STATUSES or transport_error
+            if not retryable or attempt + 1 >= attempts:
                 raise
 
             retry_after = _retry_after_seconds(exc)
             exponential = min(max_delay, base_delay * (2**attempt))
             delay = max(retry_after, exponential + jitter(0.0, min(1.0, exponential * 0.1)))
             LOGGER.warning(
-                "%s: Google API вернул %s; повтор %s/%s через %.1f сек.",
+                "%s: временный сбой Google API (%s); повтор %s/%s через %.1f сек.",
                 label,
-                status,
+                status if status is not None else exc.__class__.__name__,
                 attempt + 2,
                 attempts,
                 delay,
@@ -48,6 +62,42 @@ def google_api_call(
             sleeper(delay)
 
     raise AssertionError("unreachable")
+
+
+def _is_retryable_transport_error(exc: Exception) -> bool:
+    """Recognize connection failures without retrying arbitrary application errors."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    builtin_types = (
+        BrokenPipeError,
+        ConnectionAbortedError,
+        ConnectionError,
+        ConnectionResetError,
+        RemoteDisconnected,
+        TimeoutError,
+    )
+
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+
+        if isinstance(current, builtin_types):
+            return True
+        error_type = type(current)
+        if error_type.__name__ in RETRYABLE_TRANSPORT_NAMES and error_type.__module__.startswith(
+            RETRYABLE_TRANSPORT_MODULES
+        ):
+            return True
+
+        for linked in (current.__cause__, current.__context__):
+            if isinstance(linked, BaseException):
+                pending.append(linked)
+        pending.extend(argument for argument in current.args if isinstance(argument, BaseException))
+
+    return False
 
 
 def _google_status(exc: Exception) -> int | None:

@@ -299,6 +299,28 @@ def test_phone_failures_retry_in_top_to_bottom_rounds_and_can_recover(
     assert summary.errors == 0
 
 
+def test_interrupted_processing_before_phone_reuses_unspent_attempt(
+    tmp_path, settings, monkeypatch
+):
+    source = RoundQueue(settings)
+    item = source.items[0]
+    item.status = ItemStatus.PROCESSING
+    item.attempts = 1
+    item.values[source.columns.status] = ItemStatus.PROCESSING.value
+    item.values[source.columns.phone] = ""
+    item.values[source.columns.crm_lead_id] = ""
+    item.values[source.columns.crm_create_count] = "0"
+    browser = SequencedBrowser({"2": ["+79991234567"]})
+
+    summary = _run_with_browser(tmp_path, settings, monkeypatch, source, browser)
+
+    assert browser.calls == ["2"]
+    assert browser.click_budgets == [2]
+    assert item.status == ItemStatus.CAPTURED
+    assert item.attempts == 1
+    assert summary.captured == 1
+
+
 def test_stop_during_captcha_restores_row_for_the_next_normal_run(tmp_path, settings, monkeypatch):
     source = RoundQueue(settings)
     browser = SequencedBrowser({"2": [OperatorStopRequested("остановлено")]})

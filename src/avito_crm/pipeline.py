@@ -317,17 +317,31 @@ class Pipeline:
 
                         previous_status = item.status
                         previous_attempts = item.attempts
-                        attempts = previous_attempts + 1
                         stored_phone = normalize_phone(
                             str(item.values.get(self.source.columns.phone, "") or "")
                         )
+                        existing_crm_lead_id = str(
+                            item.values.get(self.source.columns.crm_lead_id, "") or ""
+                        )
+                        crm_create_count = self._int_value(
+                            item.values.get(self.source.columns.crm_create_count)
+                        )
+                        if (
+                            self._normalized_text(previous_status) == ItemStatus.PROCESSING.value
+                            and not stored_phone
+                            and not existing_crm_lead_id
+                            and crm_create_count == 0
+                        ):
+                            # A previous command persisted the processing marker but
+                            # stopped before it could reveal or store a phone. Reuse
+                            # that unspent attempt instead of consuming the row's final
+                            # phone budget merely because a source write was interrupted.
+                            previous_attempts = max(0, previous_attempts - 1)
+                        attempts = previous_attempts + 1
                         phone = None if repeat_flow else stored_phone
                         max_clicks = 0
                         repeat_phone_attempts = self._int_value(
                             item.values.get(self.source.columns.repeat_phone_attempts)
-                        )
-                        existing_crm_lead_id = str(
-                            item.values.get(self.source.columns.crm_lead_id, "") or ""
                         )
                         self._finalize(
                             canonical_url,
