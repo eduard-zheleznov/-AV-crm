@@ -573,6 +573,33 @@ def test_first_outgoing_call_sla_ignores_incoming_call(settings, monkeypatch):
     assert result.late == 10
 
 
+def test_first_outgoing_call_sla_accepts_live_to_and_ignores_from(settings, monkeypatch):
+    now = datetime(2026, 8, 21, 18, 0, tzinfo=UTC)
+    created_at = now - timedelta(minutes=10)
+    leads = [{"id": 800 + index, "created_at": created_at.timestamp()} for index in range(10)]
+
+    with httpx.Client() as http, LpTrackerClient(settings, http) as crm:
+        monkeypatch.setattr(crm, "list_recent_leads", lambda *_args, **_kwargs: leads)
+        monkeypatch.setattr(
+            crm,
+            "get_lead_call_records",
+            lambda *_args, **_kwargs: [
+                {"direction": "from", "time_src": created_at.timestamp() + 30},
+                {"direction": "to", "time_src": created_at.timestamp() + 137},
+            ],
+        )
+        result = crm.assess_first_outgoing_call_sla(
+            1,
+            [lead["id"] for lead in leads],
+            now=now,
+        )
+
+    assert result.status == "passed"
+    assert result.sampled == 10
+    assert result.timely == 10
+    assert result.late == 0
+
+
 def test_crm_deletes_lead_only_after_successful_api_response(settings):
     requests = []
 

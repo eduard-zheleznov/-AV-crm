@@ -1040,7 +1040,12 @@ def _extract_first_outgoing_call_at(
                 or ""
             )
         )
-        if "исход" not in direction and direction not in {"out", "outgoing", "outbound"}:
+        if "исход" not in direction and direction not in {
+            "out",
+            "outgoing",
+            "outbound",
+            "to",
+        }:
             continue
         for key in ("time_src", "sort_field", "time", "created_at", "started_at", "date"):
             parsed = _parse_crm_datetime(record.get(key), local_timezone)
