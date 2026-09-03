@@ -38,7 +38,7 @@ def test_manifest_loads_readiness_around_unchanged_content_at_document_start() -
     script = manifest["content_scripts"][0]
     assert script["js"] == ["readiness-core.js", "content.js"]
     assert script["run_at"] == "document_start"
-    assert manifest["version"] == "1.0.7.7"
+    assert manifest["version"] == "1.0.7.8"
     assert "<all_urls>" in manifest["host_permissions"]
 
 
@@ -72,6 +72,22 @@ def test_phone_button_selection_prefers_current_viewport_without_losing_fallback
     )
     assert result.returncode == 0, result.stderr
     assert "phone-button-selection: ok" in result.stdout
+
+
+def test_manual_detection_does_not_turn_a_working_listing_into_captcha() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is unavailable")
+    result = subprocess.run(
+        [node, str(ROOT / "tests" / "js" / "manual-detection.test.cjs")],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "manual-detection: ok" in result.stdout
 
 
 def test_unrevealed_button_retry_requires_unchanged_control_capture() -> None:

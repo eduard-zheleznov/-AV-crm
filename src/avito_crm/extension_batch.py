@@ -98,9 +98,7 @@ def load_batch_urls(path: Path, *, limit: int, sheet: str | None = None) -> list
 
     if invalid:
         preview = ", ".join(str(value) for value in invalid[:5])
-        raise ConfigurationError(
-            "Файл содержит некорректные ссылки Avito в строках: " + preview
-        )
+        raise ConfigurationError("Файл содержит некорректные ссылки Avito в строках: " + preview)
     if len(selected) < limit:
         raise ConfigurationError(
             f"В файле только {len(selected)} уникальных корректных ссылок; запрошено {limit}"
@@ -315,8 +313,7 @@ def run_extension_batch(
                     break
                 if consecutive_technical >= circuit_breaker:
                     summary.stopped_reason = (
-                        "Circuit breaker: "
-                        f"{consecutive_technical} последовательных ошибок Chrome"
+                        f"Circuit breaker: {consecutive_technical} последовательных ошибок Chrome"
                     )
                     break
                 if index + 1 >= len(urls):

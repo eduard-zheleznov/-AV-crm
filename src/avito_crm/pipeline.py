@@ -135,8 +135,9 @@ class Pipeline:
                 self._report_phase(phase, "Подготовка очереди Avito: читаем строки.")
                 initial_items = self.source.list_actionable(include_manual=self.include_manual)
                 initial_row_ids = {item.row_id for item in initial_items}
-                needs_browser = self.mode == "capture" or any(
-                    self._is_repeat_flow(item)
+                needs_browser = any(
+                    self.mode == "capture"
+                    or self._is_repeat_flow(item)
                     or (
                         self.mode == "full"
                         and not normalize_phone(
@@ -164,7 +165,14 @@ class Pipeline:
                         if self.settings.avito_browser_driver == "chrome_extension"
                         else AvitoBrowser
                     )
-                    browser = stack.enter_context(browser_type(self.settings, ocr, notifier))
+                    browser_kwargs = (
+                        {"operation_status_callback": phase}
+                        if browser_type is ChromeExtensionBrowser
+                        else {}
+                    )
+                    browser = stack.enter_context(
+                        browser_type(self.settings, ocr, notifier, **browser_kwargs)
+                    )
                 self._report_phase(phase, "Обрабатываем очередь Avito по одной строке.")
 
                 round_number = 0

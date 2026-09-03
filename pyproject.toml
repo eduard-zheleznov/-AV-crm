@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "avito-crm-pipeline"
-version = "1.12.24.5"
+version = "1.12.24.6"
 description = "Resumable Avito phone extraction and LPTracker CRM ingestion pipeline"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ dependencies = [
 dev = [
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
-  "ruff>=0.9,<1",
+  "ruff==0.15.22",
 ]
 
 [project.scripts]

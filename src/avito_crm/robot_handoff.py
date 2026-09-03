@@ -195,13 +195,9 @@ class GeminiPhoneTranscriber:
             ) from exc
         phone = normalize_phone(str(parsed.get("phone", "") or "")) or ""
         if status != "ok" or phone_count != 1 or not phone:
-            raise ManualReviewRequired(
-                "В разговоре не найден один однозначно продиктованный номер"
-            )
+            raise ManualReviewRequired("В разговоре не найден один однозначно продиктованный номер")
         if confidence < self.settings.robot_handoff_min_confidence:
-            raise ManualReviewRequired(
-                "Уверенность распознавания номера ниже безопасного порога"
-            )
+            raise ManualReviewRequired("Уверенность распознавания номера ниже безопасного порога")
         transcript_phones = extract_phones(transcript)
         if transcript_phones != [phone]:
             raise ManualReviewRequired(
@@ -232,9 +228,7 @@ class GeminiPhoneTranscriber:
                     )
                 declared_length = _safe_int(response.headers.get("content-length"))
                 if declared_length > self.settings.gemini_max_audio_bytes:
-                    raise AppError(
-                        "Запись звонка превышает безопасный размер для распознавания"
-                    )
+                    raise AppError("Запись звонка превышает безопасный размер для распознавания")
                 chunks: list[bytes] = []
                 total = 0
                 for chunk in response.iter_bytes():
@@ -322,9 +316,7 @@ class RobotLeadHandoff:
         steps = self.crm.list_funnel_steps(project_id)
         source_step = _resolve_step(steps, self.settings.robot_handoff_source_funnel_name)
         target_step = _resolve_step(steps, self.settings.robot_handoff_target_funnel_name)
-        target_owner_id = self.crm.resolve_staff_id(
-            self.settings.robot_handoff_target_owner_name
-        )
+        target_owner_id = self.crm.resolve_staff_id(self.settings.robot_handoff_target_owner_name)
         candidates = self._candidates(project_id, lead_id)
         batch_limit = limit or self.settings.robot_handoff_batch_size
         explain_skips = lead_id is not None
@@ -351,20 +343,16 @@ class RobotLeadHandoff:
                     funnel_steps=steps,
                     lead=lead,
                 )
-                source_stage_matches = _normalized(stage_name) == _normalized(
-                    source_step["name"]
-                )
-                target_stage_partial = (
-                    _normalized(stage_name) == _normalized(target_step["name"])
-                    and _has_resumable_partial_state(cached)
-                )
+                source_stage_matches = _normalized(stage_name) == _normalized(source_step["name"])
+                target_stage_partial = _normalized(stage_name) == _normalized(
+                    target_step["name"]
+                ) and _has_resumable_partial_state(cached)
                 if not source_stage_matches and not target_stage_partial:
                     current_stage = stage_name or "не определён"
                     _record_skip(
                         summary,
                         candidate_id,
-                        f"текущий шаг «{current_stage}»; нужен "
-                        f"«{source_step['name']}»",
+                        f"текущий шаг «{current_stage}»; нужен «{source_step['name']}»",
                         explain=explain_skips,
                     )
                     continue
@@ -379,10 +367,9 @@ class RobotLeadHandoff:
                     source_stage_matches = _normalized(stage_name) == _normalized(
                         source_step["name"]
                     )
-                    target_stage_partial = (
-                        _normalized(stage_name) == _normalized(target_step["name"])
-                        and _has_resumable_partial_state(cached)
-                    )
+                    target_stage_partial = _normalized(stage_name) == _normalized(
+                        target_step["name"]
+                    ) and _has_resumable_partial_state(cached)
                     if not source_stage_matches and not target_stage_partial:
                         summary.skipped += 1
                         continue
@@ -415,9 +402,7 @@ class RobotLeadHandoff:
                     web_token = str(getattr(self.crm, "web_token", "") or "").strip()
                     if web_token and callable(configure_web_token):
                         configure_web_token(web_token)
-                    record = _latest_successful_outgoing_record(
-                        {"calls_records": feed_records}
-                    )
+                    record = _latest_successful_outgoing_record({"calls_records": feed_records})
                 if record is None:
                     _record_skip(
                         summary,
@@ -426,9 +411,7 @@ class RobotLeadHandoff:
                         explain=explain_skips,
                     )
                     continue
-                if target_stage_partial and not _is_resumable_partial_handoff(
-                    cached, record
-                ):
+                if target_stage_partial and not _is_resumable_partial_handoff(cached, record):
                     _record_skip(
                         summary,
                         candidate_id,
@@ -436,9 +419,7 @@ class RobotLeadHandoff:
                         explain=explain_skips,
                     )
                     continue
-                if not has_source_tag and not _is_resumable_partial_handoff(
-                    cached, record
-                ):
+                if not has_source_tag and not _is_resumable_partial_handoff(cached, record):
                     _record_skip(
                         summary,
                         candidate_id,
@@ -468,9 +449,7 @@ class RobotLeadHandoff:
             except ManualReviewRequired as exc:
                 message = _safe_reason(exc)
                 cached = self.state.get_robot_handoff(candidate_id)
-                record_key = _record_key(record) or str(
-                    (cached or {}).get("record_key", "") or ""
-                )
+                record_key = _record_key(record) or str((cached or {}).get("record_key", "") or "")
                 self.state.record_robot_handoff(
                     candidate_id,
                     record_key=record_key,
@@ -512,8 +491,7 @@ class RobotLeadHandoff:
                 )
                 summary.errors += 1
                 summary.details.append(
-                    f"Лид {candidate_id}: временная техническая ошибка — {message}; "
-                    "будет повтор"
+                    f"Лид {candidate_id}: временная техническая ошибка — {message}; будет повтор"
                 )
                 LOGGER.warning(
                     "Техническая ошибка обработки лида %s: %s",
@@ -539,15 +517,14 @@ class RobotLeadHandoff:
                 summary.details.append(f"Лид {candidate_id}: техническая ошибка")
         return summary
 
-    def _candidates(
-        self, project_id: int, lead_id: str | int | None
-    ) -> Iterator[dict[str, Any]]:
+    def _candidates(self, project_id: int, lead_id: str | int | None) -> Iterator[dict[str, Any]]:
         if lead_id is not None:
             yield self.crm.get_lead(str(lead_id).strip())
             return
         updated_from = int(
-            (datetime.now(UTC) - timedelta(hours=self.settings.robot_handoff_lookback_hours))
-            .timestamp()
+            (
+                datetime.now(UTC) - timedelta(hours=self.settings.robot_handoff_lookback_hours)
+            ).timestamp()
         )
         seen: set[str] = set()
         # LPTracker currently caps this endpoint at 100 rows even when a larger
@@ -594,11 +571,7 @@ class RobotLeadHandoff:
         if cached and cached.get("record_key") == record_key:
             phone = normalize_phone(str(cached.get("phone", ""))) or ""
             stage_due_date = str(cached.get("stage_due_date", "") or "").strip()
-            if (
-                not phone
-                and cached.get("status") == "manual_required"
-                and not retry_analysis
-            ):
+            if not phone and cached.get("status") == "manual_required" and not retry_analysis:
                 raise ManualReviewRequired(
                     str(cached.get("error") or "Требуется ручная проверка записи")
                 )
@@ -679,10 +652,7 @@ class RobotLeadHandoff:
                 break
 
         if not finalized:
-            raise CrmError(
-                "LPTracker не подтвердил согласованные владельца, шаг "
-                "и дату шага"
-            )
+            raise CrmError("LPTracker не подтвердил согласованные владельца, шаг и дату шага")
         self.state.record_robot_handoff(
             lead_id,
             record_key=record_key,
@@ -696,8 +666,7 @@ class RobotLeadHandoff:
             timezone = ZoneInfo(self.settings.lptracker_timezone)
         except ZoneInfoNotFoundError as exc:
             raise ConfigurationError(
-                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE: "
-                f"{self.settings.lptracker_timezone!r}"
+                f"Неизвестный часовой пояс LPTRACKER_TIMEZONE: {self.settings.lptracker_timezone!r}"
             ) from exc
         current = self.now_provider() if self.now_provider else datetime.now(timezone)
         if current.tzinfo is None:
@@ -929,15 +898,12 @@ def _custom_field_values(lead: dict[str, Any], field_id: str | int) -> list[obje
         values.extend(
             item.get("value")
             for item in custom
-            if isinstance(item, dict)
-            and str(item.get("id", "")) == str(field_id)
+            if isinstance(item, dict) and str(item.get("id", "")) == str(field_id)
         )
     return values
 
 
-def _is_resumable_partial_handoff(
-    cached: dict[str, Any] | None, record: dict[str, Any]
-) -> bool:
+def _is_resumable_partial_handoff(cached: dict[str, Any] | None, record: dict[str, Any]) -> bool:
     if not cached or cached.get("status") not in {"recognized", "error"}:
         return False
     return bool(
@@ -967,16 +933,13 @@ def _custom_date_has_value(lead: dict[str, Any], destination: CrmDestination) ->
         for key, item in custom.items():
             if str(key) == str(destination.field_id):
                 values.append(item.get("value") if isinstance(item, dict) else item)
-            elif isinstance(item, dict) and str(item.get("id", "")) == str(
-                destination.field_id
-            ):
+            elif isinstance(item, dict) and str(item.get("id", "")) == str(destination.field_id):
                 values.append(item.get("value"))
     elif isinstance(custom, list):
         values.extend(
             item.get("value")
             for item in custom
-            if isinstance(item, dict)
-            and str(item.get("id", "")) == str(destination.field_id)
+            if isinstance(item, dict) and str(item.get("id", "")) == str(destination.field_id)
         )
     return any(_date_time_prefix(value) == expected for value in _flatten_values(values))
 
@@ -1030,9 +993,7 @@ def _audio_mime_type(content_type: str, url: str, audio: bytes) -> str:
     inferred = _AUDIO_MIME_ALIASES.get(inferred, inferred)
     if inferred in _SUPPORTED_AUDIO_MIME_TYPES:
         return inferred
-    raise ManualReviewRequired(
-        "Формат записи звонка не распознан как поддерживаемое аудио"
-    )
+    raise ManualReviewRequired("Формат записи звонка не распознан как поддерживаемое аудио")
 
 
 def _audio_mime_from_signature(audio: bytes) -> str:

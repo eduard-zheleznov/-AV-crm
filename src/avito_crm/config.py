@@ -526,7 +526,7 @@ class Settings:
                 )
         if self.avito_manual_timeout < 0 or 0 < self.avito_manual_timeout < 60:
             raise ConfigurationError(
-                "AVITO_MANUAL_TIMEOUT_SECONDS: 0 означает ждать до решения; "
+                "AVITO_MANUAL_TIMEOUT_SECONDS: 0 означает безопасный предел 12 часов; "
                 "иное значение должно быть не меньше 60 секунд"
             )
         ranges = (

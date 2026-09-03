@@ -795,3 +795,35 @@ def test_remote_panel_shows_long_crm_preflight_instead_of_generic_zero_progress(
     _command_id, _progress, details = panel.active_updates[-1]
     assert details["status"] == "СИНХРОНИЗАЦИЯ CRM"
     assert details["message"] == ("Синхронизация CRM: 17/223; обновлено 16, предупреждений 0.")
+
+
+def test_remote_panel_exposes_manual_avito_wait(settings):
+    panel = FakePanel(PanelCommand(False, False, 100, "Лист1", False))
+    controller = RemoteController(settings, panel)
+    state = CommandState(
+        command_id="cmd-manual",
+        target=100,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="running",
+        started_at="2026-09-03T12:00:00+00:00",
+        history_row=2,
+    )
+
+    class AliveWorker:
+        @staticmethod
+        def is_alive():
+            return True
+
+    controller._state = state
+    controller._worker = AliveWorker()
+    controller._phase_callback(
+        state,
+        "Ожидается ручная проверка Avito в обычном Chrome.",
+    )
+
+    controller.tick()
+
+    _command_id, _progress, details = panel.active_updates[-1]
+    assert details["status"] == "ОЖИДАЕТ РУЧНОЙ ПРОВЕРКИ"
+    assert details["message"] == "Ожидается ручная проверка Avito в обычном Chrome."

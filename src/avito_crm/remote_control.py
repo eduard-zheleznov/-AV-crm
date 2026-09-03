@@ -1270,6 +1270,8 @@ class RemoteController:
                     status = "СИНХРОНИЗАЦИЯ CRM"
                 elif phase_message.startswith("Запускаем Chromium"):
                     status = "ЗАПУСК БРАУЗЕРА"
+                elif phase_message.startswith("Ожидается ручная проверка Avito"):
+                    status = "ОЖИДАЕТ РУЧНОЙ ПРОВЕРКИ"
                 else:
                     status = "РАБОТАЕТ"
                 self.panel.update_active(

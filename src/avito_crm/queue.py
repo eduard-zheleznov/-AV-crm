@@ -24,9 +24,7 @@ from avito_crm.phone import canonical_avito_url
 LOGGER = logging.getLogger(__name__)
 _PLAN_PRIORITY = "__plan_priority"
 _MOSCOW_OFFSET = "__moscow_offset"
-_LEGACY_FALSE_CAPTCHA_ERROR = (
-    "ручная проверка avito не завершена за отведённое время"
-)
+_LEGACY_FALSE_CAPTCHA_ERROR = "ручная проверка avito не завершена за отведённое время"
 
 
 @dataclass(frozen=True, slots=True)

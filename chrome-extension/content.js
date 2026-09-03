@@ -138,7 +138,7 @@ function postClickCaptureResult(button, phoneRegion) {
   return { status: "screenshot", crop };
 }
 
-async function waitForManualAction(_timeoutMs) {
+async function waitForManualAction(timeoutMs) {
   let initialReason = manualReason();
   if (!initialReason) {
     return null;
@@ -151,7 +151,8 @@ async function waitForManualAction(_timeoutMs) {
     return null;
   }
   notifyStatus("manual_required", initialReason);
-  while (true) {
+  const deadline = Date.now() + Math.max(60000, Number(timeoutMs) || 12 * 60 * 60 * 1000);
+  while (Date.now() < deadline) {
     await delay(1000);
     if (!manualReason()) {
       notifyStatus("manual_cleared", initialReason);
@@ -159,6 +160,10 @@ async function waitForManualAction(_timeoutMs) {
       return null;
     }
   }
+  return {
+    status: "manual_timeout",
+    reason: `${initialReason} не завершена за безопасный срок`
+  };
 }
 
 function notifyStatus(status, reason) {
@@ -175,13 +180,22 @@ function manualReason() {
   if (
     currentUrl.includes("captcha") ||
     currentUrl.includes("/challenge") ||
-    STRONG_CHALLENGE_PATTERNS.some((pattern) => content.includes(pattern)) ||
     hasVisibleChallengeSurface()
   ) {
     return "ручная проверка Avito";
   }
   if (isAuthPage(currentUrl) || hasVisibleAuthDialog()) {
     return "авторизация Avito";
+  }
+  if (hasAnyText(TEMP_ERROR_PATTERNS)) {
+    return "";
+  }
+  if (
+    STRONG_CHALLENGE_PATTERNS.some((pattern) => content.includes(pattern)) &&
+    !findPhone() &&
+    !findPhoneButton()
+  ) {
+    return "ручная проверка Avito";
   }
   return "";
 }

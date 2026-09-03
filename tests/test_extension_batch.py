@@ -199,9 +199,7 @@ def test_batch_circuit_breaker_stops_repeated_ocr_failures(settings):
         max_clicks=1,
         circuit_breaker=3,
         ocr=_FakeOcr(),
-        browser_factory=_browser_factory(
-            [PhoneNotFoundError("OCR failed") for _ in range(5)]
-        ),
+        browser_factory=_browser_factory([PhoneNotFoundError("OCR failed") for _ in range(5)]),
         sleep=lambda _seconds: None,
         uniform=lambda low, _high: low,
     )
