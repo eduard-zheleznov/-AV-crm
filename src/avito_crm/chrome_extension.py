@@ -46,9 +46,11 @@ LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
 MAX_TAB_CAPTURE_PNG_BYTES = 8 * 1024 * 1024
 MAX_TAB_CAPTURE_PIXELS = 64_000_000
-EXPECTED_EXTENSION_VERSION = "1.0.7.7"
+EXPECTED_EXTENSION_VERSION = "1.0.7.8"
 NAVIGATION_ATTEMPTS = 2
 NAVIGATION_RETRY_DELAY_SECONDS = 1.5
+EXTENSION_HEARTBEAT_STALE_SECONDS = 15.0
+DEFAULT_MANUAL_WAIT_SECONDS = 12 * 60 * 60
 
 
 def _extension_operation_timeout(settings: Settings, max_clicks: int) -> float:
@@ -68,6 +70,11 @@ def _extension_operation_timeout(settings: Settings, max_clicks: int) -> float:
     )
 
 
+def _manual_wait_timeout(settings: Settings) -> float:
+    """Bound manual pauses even when legacy configuration requested infinity."""
+    return settings.avito_manual_timeout or DEFAULT_MANUAL_WAIT_SECONDS
+
+
 @dataclass(slots=True)
 class ExtensionEvent:
     event_type: str
@@ -84,6 +91,7 @@ class _BridgeState:
         self.result: ExtensionEvent | None = None
         self.last_seen = 0.0
         self.extension_version = ""
+        self.manual_waiting = False
         self.stopped = False
 
 
@@ -161,9 +169,7 @@ class ExtensionBridge:
             "rowId": row_id,
             "maxClicks": max_clicks,
             "pageTimeoutMs": round(self.settings.avito_page_timeout * 1000),
-            # Ordinary Chrome waits until the operator solves the challenge or
-            # presses STOP. A clock timeout would strand the queue row.
-            "manualTimeoutMs": 0,
+            "manualTimeoutMs": round(_manual_wait_timeout(self.settings) * 1000),
             "phoneWaitMs": round(self.settings.avito_temp_number_wait_max * 1000),
             "retryDelayMs": round(self.settings.avito_phone_retry_max * 1000),
             "navigationAttempts": NAVIGATION_ATTEMPTS,
@@ -198,6 +204,7 @@ class ExtensionBridge:
         deadline: float | None = time.monotonic() + operation_timeout
         stop_seen_at: float | None = None
         manual_started_at: float | None = None
+        manual_deadline: float | None = None
         manual_reason = "ручная проверка Avito"
         reminder_seconds = tuple(
             minutes * 60 for minutes in self.settings.telegram_reminder_minutes
@@ -225,6 +232,20 @@ class ExtensionBridge:
                                 )
                         if (
                             manual_started_at is not None
+                            and now - self.state.last_seen
+                            > EXTENSION_HEARTBEAT_STALE_SECONDS
+                        ):
+                            raise PageNotReadyError(
+                                "Связь с расширением Chrome потеряна во время ручной "
+                                "проверки; строка безопасно возвращена в очередь"
+                            )
+                        if manual_deadline is not None and now >= manual_deadline:
+                            raise ManualActionRequired(
+                                "Ручная проверка Avito не завершена за 12 часов; "
+                                "строка сохранена для проверки оператором"
+                            )
+                        if (
+                            manual_started_at is not None
                             and reminder_index < len(reminder_seconds)
                             and now - manual_started_at >= reminder_seconds[reminder_index]
                         ):
@@ -250,9 +271,11 @@ class ExtensionBridge:
                         manual_started_at = time.monotonic()
                         manual_reason = str(event.payload.get("reason", manual_reason))
                         reminder_index = 0
+                        manual_deadline = time.monotonic() + _manual_wait_timeout(self.settings)
                         deadline = None
                     elif event.status == "manual_cleared":
                         manual_started_at = None
+                        manual_deadline = None
                         deadline = time.monotonic() + operation_timeout
                     if status_callback is not None:
                         status_callback(event)
@@ -263,6 +286,7 @@ class ExtensionBridge:
                     self.state.dispatched = False
                     self.state.events.clear()
                     self.state.result = None
+                    self.state.manual_waiting = False
                     self.state.condition.notify_all()
 
     def _poll(
@@ -276,6 +300,27 @@ class ExtensionBridge:
             self.state.last_seen = time.monotonic()
             self.state.extension_version = extension_version.strip()
             self.state.condition.notify_all()
+            if (
+                self.state.command is not None
+                and self.state.dispatched
+                and self.state.manual_waiting
+            ):
+                # The polling loop cannot request another command while its
+                # content-script promise is still running. Seeing a new poll here
+                # therefore means Chrome/service-worker restarted and lost that
+                # promise. Fail the row safely instead of waiting forever.
+                self.state.manual_waiting = False
+                self.state.result = ExtensionEvent(
+                    "result",
+                    "page_not_ready",
+                    {
+                        "reason": (
+                            "Chrome перезапустился во время ручной проверки; "
+                            "строка безопасно возвращена в очередь"
+                        )
+                    },
+                )
+                self.state.condition.notify_all()
             while not self.state.stopped:
                 if self.state.command is not None and not self.state.dispatched:
                     self.state.dispatched = True
@@ -298,8 +343,13 @@ class ExtensionBridge:
             if not self.state.command or command_id != self.state.command.get("id"):
                 raise ValueError("Событие не относится к активной команде")
             if event_type == "result":
+                self.state.manual_waiting = False
                 self.state.result = event
             else:
+                if status == "manual_required":
+                    self.state.manual_waiting = True
+                elif status == "manual_cleared":
+                    self.state.manual_waiting = False
                 self.state.events.append(event)
             self.state.condition.notify_all()
 
@@ -310,6 +360,11 @@ class ExtensionBridge:
     def _command_status(self, command_id: str) -> str:
         with self.state.condition:
             active_id = str((self.state.command or {}).get("id", ""))
+            # Only the exact active command is a liveness heartbeat. A delayed
+            # request from an older tab must not conceal a disconnected worker.
+            if active_id and command_id == active_id:
+                self.state.last_seen = time.monotonic()
+                self.state.condition.notify_all()
             if self.state.stopped or (self.settings.data_dir / "STOP").exists():
                 return "cancelled"
             if not command_id or command_id != active_id:
@@ -421,12 +476,14 @@ class ChromeExtensionBrowser:
         notifier: NotificationRouter | None = None,
         *,
         save_failed_captures: bool = False,
+        operation_status_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.settings = settings
         self.ocr = ocr
         self.notifier = notifier or NotificationRouter(settings)
         self._owns_notifier = notifier is None
         self.save_failed_captures = save_failed_captures
+        self.operation_status_callback = operation_status_callback
         self.bridge = ExtensionBridge(settings)
         self._manual_notified = False
         self._manual_pending = False
@@ -461,6 +518,11 @@ class ChromeExtensionBrowser:
         except OperatorStopRequested:
             self._notify_captcha_stopped(canonical_url)
             raise
+        except PageNotReadyError:
+            self._report_operation_status(
+                "Технический шаг Chrome завершён; строка безопасно возвращена в очередь."
+            )
+            raise
         status = event.status
         payload = event.payload
         if status == "phone":
@@ -483,6 +545,9 @@ class ChromeExtensionBrowser:
             )
         if status == "page_not_ready":
             self._log_readiness_diagnostics(payload)
+            self._report_operation_status(
+                "Технический шаг Chrome завершён; строка безопасно возвращена в очередь."
+            )
             raise PageNotReadyError(
                 str(
                     payload.get(
@@ -507,12 +572,13 @@ class ChromeExtensionBrowser:
                 str(payload.get("reason", "Ручная проверка Avito не завершена"))
             )
         if status == "manual_timeout":
-            # Current extension waits until the operator solves the challenge or
-            # presses STOP. A timeout can only come from a stale content script;
-            # never turn it into a false CAPTCHA state that blocks the whole run.
-            raise PhoneNotFoundError(
-                "Устаревший сценарий Chrome завершил ожидание; строка возвращена "
-                "в очередь без статуса капчи"
+            raise ManualActionRequired(
+                str(
+                    payload.get(
+                        "reason",
+                        "Ручная проверка Avito не завершена за безопасный срок",
+                    )
+                )
             )
         if status == "cancelled":
             self._notify_captcha_stopped(canonical_url)
@@ -552,6 +618,9 @@ class ChromeExtensionBrowser:
             self._manual_notified = True
             self._manual_pending = True
             LOGGER.warning("Обычный Chrome ждёт ручного решения капчи; страница не перезагружается")
+            self._report_operation_status(
+                "Ожидается ручная проверка Avito в обычном Chrome."
+            )
             self._notify_safely(
                 "send_captcha_detected",
                 reason=str(event.payload.get("reason", "ручную проверку")),
@@ -563,6 +632,9 @@ class ChromeExtensionBrowser:
                 self.captchas_solved += 1
                 self._manual_pending = False
             LOGGER.info("Ручная проверка в обычном Chrome завершена; продолжаем текущую строку")
+            self._report_operation_status(
+                "Ручная проверка Avito завершена; продолжаем текущую строку."
+            )
         elif event.status == "manual_reminder" and self._manual_pending:
             escalate = bool(event.payload.get("escalate", False))
             self._manual_backup_alerted = self._manual_backup_alerted or escalate
@@ -582,6 +654,10 @@ class ChromeExtensionBrowser:
                 "Обычный Chrome: кнопка не раскрылась; вкладка перезагружается для "
                 "последней попытки"
             )
+
+    def _report_operation_status(self, message: str) -> None:
+        if self.operation_status_callback is not None:
+            self.operation_status_callback(message)
 
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:

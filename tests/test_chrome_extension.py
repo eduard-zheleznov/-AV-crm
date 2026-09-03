@@ -15,6 +15,7 @@ from PIL import Image
 
 import avito_crm.chrome_extension as chrome_extension_module
 from avito_crm.chrome_extension import (
+    DEFAULT_MANUAL_WAIT_SECONDS,
     EXPECTED_EXTENSION_VERSION,
     ChromeExtensionBrowser,
     ExtensionBridge,
@@ -25,6 +26,7 @@ from avito_crm.chrome_extension import (
 from avito_crm.errors import (
     BrowserOperationError,
     InvalidListingError,
+    ManualActionRequired,
     OperatorStopRequested,
     PageNotReadyError,
     PhoneNotFoundError,
@@ -107,7 +109,7 @@ def test_bridge_delivers_one_command_and_correlates_the_result(settings):
             assert status == 200
             assert command is not None
             assert command["type"] == "reveal_phone"
-            assert command["manualTimeoutMs"] == 0
+            assert command["manualTimeoutMs"] == 2000
             _request(
                 port,
                 token,
@@ -162,6 +164,81 @@ def test_bridge_exposes_stop_to_the_waiting_extension(settings):
     (settings.data_dir / "STOP").write_text("stop", encoding="utf-8")
 
     assert bridge._command_status("waiting-command") == "cancelled"
+
+
+def test_command_status_refreshes_extension_liveness(settings, monkeypatch):
+    bridge = ExtensionBridge(settings)
+    bridge.state.command = {"id": "waiting-command"}
+    bridge.state.last_seen = 10.0
+    monkeypatch.setattr(chrome_extension_module.time, "monotonic", lambda: 25.0)
+
+    assert bridge._command_status("waiting-command") == "active"
+    assert bridge.state.last_seen == 25.0
+
+
+def test_stale_command_status_does_not_refresh_extension_liveness(settings, monkeypatch):
+    bridge = ExtensionBridge(settings)
+    bridge.state.command = {"id": "active-command"}
+    bridge.state.last_seen = 10.0
+    monkeypatch.setattr(chrome_extension_module.time, "monotonic", lambda: 25.0)
+
+    assert bridge._command_status("old-command") == "inactive"
+    assert bridge.state.last_seen == 10.0
+
+
+def test_bridge_fails_manual_wait_safely_after_extension_disconnect(settings, monkeypatch):
+    configured = replace(
+        settings,
+        avito_extension_connect_timeout=1,
+        avito_page_timeout=1,
+    )
+    bridge = ExtensionBridge(configured)
+    bridge.server = object()  # type: ignore[assignment]
+    bridge.state.last_seen = chrome_extension_module.time.monotonic()
+    bridge.state.extension_version = EXPECTED_EXTENSION_VERSION
+    monkeypatch.setattr(chrome_extension_module, "EXTENSION_HEARTBEAT_STALE_SECONDS", 0.01)
+
+    def require_manual_action() -> None:
+        with bridge.state.condition:
+            while bridge.state.command is None:
+                bridge.state.condition.wait(timeout=1)
+            command_id = str(bridge.state.command["id"])
+        bridge._receive_event(
+            {
+                "id": command_id,
+                "type": "status",
+                "status": "manual_required",
+                "reason": "ручная проверка",
+            }
+        )
+
+    thread = threading.Thread(target=require_manual_action)
+    thread.start()
+    try:
+        with pytest.raises(PageNotReadyError, match="Связь с расширением Chrome потеряна"):
+            bridge.execute(
+                url="https://www.avito.ru/moskva/test_123",
+                row_id="2",
+                max_clicks=1,
+            )
+    finally:
+        thread.join(timeout=2)
+        bridge.server = None
+
+    assert bridge.state.command is None
+    assert bridge.state.manual_waiting is False
+
+
+def test_new_extension_poll_aborts_an_orphaned_manual_wait(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.command = {"id": "orphaned-command"}
+    bridge.state.dispatched = True
+    bridge.state.manual_waiting = True
+
+    assert bridge._poll(timeout=0, extension_version=EXPECTED_EXTENSION_VERSION) is None
+    assert bridge.state.result is not None
+    assert bridge.state.result.status == "page_not_ready"
+    assert "перезапустился" in str(bridge.state.result.payload["reason"])
 
 
 def test_bridge_rejects_a_stale_extension_before_dispatch(settings):
@@ -337,7 +414,7 @@ def test_extension_browser_maps_stop_to_a_non_failure_signal(settings):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
 
-def test_extension_browser_never_maps_a_legacy_timeout_to_captcha(settings):
+def test_extension_browser_maps_a_bounded_manual_timeout_to_operator_review(settings):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _FakeBridge(
         ExtensionEvent(
@@ -347,8 +424,38 @@ def test_extension_browser_never_maps_a_legacy_timeout_to_captcha(settings):
         )
     )
 
-    with browser, pytest.raises(PhoneNotFoundError, match="без статуса капчи"):
+    with browser, pytest.raises(ManualActionRequired, match="не завершена"):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+
+def test_zero_manual_timeout_uses_the_safe_twelve_hour_bound(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.last_seen = chrome_extension_module.time.monotonic()
+    bridge.state.extension_version = EXPECTED_EXTENSION_VERSION
+    bridge.server = object()  # type: ignore[assignment]
+    captured: dict[str, object] = {}
+
+    def receive() -> None:
+        with bridge.state.condition:
+            while bridge.state.command is None:
+                bridge.state.condition.wait(timeout=1)
+            captured.update(bridge.state.command)
+            bridge.state.result = ExtensionEvent("result", "cancelled", {})
+            bridge.state.condition.notify_all()
+
+    thread = threading.Thread(target=receive)
+    thread.start()
+    try:
+        bridge.execute(
+            url="https://www.avito.ru/moskva/test_123",
+            row_id="2",
+            max_clicks=1,
+        )
+    finally:
+        thread.join(timeout=2)
+        bridge.server = None
+
+    assert captured["manualTimeoutMs"] == DEFAULT_MANUAL_WAIT_SECONDS * 1000
 
 
 def test_extension_browser_counts_each_solved_captcha_once(settings):
@@ -361,6 +468,50 @@ def test_extension_browser_counts_each_solved_captcha_once(settings):
     browser._handle_status(cleared, "https://www.avito.ru/moskva/test_123")
 
     assert browser.captchas_solved == 1
+
+
+def test_extension_browser_reports_manual_wait_to_the_remote_phase(settings):
+    phases: list[str] = []
+    browser = ChromeExtensionBrowser(
+        settings,
+        _FakeOcr(),
+        _FakeNotifier(),
+        operation_status_callback=phases.append,
+    )
+
+    browser._handle_status(
+        ExtensionEvent("status", "manual_required", {"reason": "ручную проверку"}),
+        "https://www.avito.ru/moskva/test_123",
+    )
+    browser._handle_status(
+        ExtensionEvent("status", "manual_cleared", {}),
+        "https://www.avito.ru/moskva/test_123",
+    )
+
+    assert phases == [
+        "Ожидается ручная проверка Avito в обычном Chrome.",
+        "Ручная проверка Avito завершена; продолжаем текущую строку.",
+    ]
+
+
+def test_extension_browser_clears_manual_phase_after_safe_page_retry(settings):
+    phases: list[str] = []
+    browser = ChromeExtensionBrowser(
+        settings,
+        _FakeOcr(),
+        _FakeNotifier(),
+        operation_status_callback=phases.append,
+    )
+    browser.bridge = _FakeBridge(
+        ExtensionEvent("result", "page_not_ready", {"reason": "Chrome restarted"})
+    )
+
+    with browser, pytest.raises(PageNotReadyError, match="Chrome restarted"):
+        browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert phases == [
+        "Технический шаг Chrome завершён; строка безопасно возвращена в очередь."
+    ]
 
 
 def test_extension_browser_logs_bounded_reload_without_personal_data(settings, caplog):

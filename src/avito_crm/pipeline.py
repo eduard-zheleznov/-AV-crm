@@ -164,7 +164,14 @@ class Pipeline:
                         if self.settings.avito_browser_driver == "chrome_extension"
                         else AvitoBrowser
                     )
-                    browser = stack.enter_context(browser_type(self.settings, ocr, notifier))
+                    browser_kwargs = (
+                        {"operation_status_callback": phase}
+                        if browser_type is ChromeExtensionBrowser
+                        else {}
+                    )
+                    browser = stack.enter_context(
+                        browser_type(self.settings, ocr, notifier, **browser_kwargs)
+                    )
                 self._report_phase(phase, "Обрабатываем очередь Avito по одной строке.")
 
                 round_number = 0
