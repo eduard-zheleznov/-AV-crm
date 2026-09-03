@@ -232,8 +232,7 @@ class ExtensionBridge:
                                 )
                         if (
                             manual_started_at is not None
-                            and now - self.state.last_seen
-                            > EXTENSION_HEARTBEAT_STALE_SECONDS
+                            and now - self.state.last_seen > EXTENSION_HEARTBEAT_STALE_SECONDS
                         ):
                             raise PageNotReadyError(
                                 "Связь с расширением Chrome потеряна во время ручной "
@@ -618,9 +617,7 @@ class ChromeExtensionBrowser:
             self._manual_notified = True
             self._manual_pending = True
             LOGGER.warning("Обычный Chrome ждёт ручного решения капчи; страница не перезагружается")
-            self._report_operation_status(
-                "Ожидается ручная проверка Avito в обычном Chrome."
-            )
+            self._report_operation_status("Ожидается ручная проверка Avito в обычном Chrome.")
             self._notify_safely(
                 "send_captcha_detected",
                 reason=str(event.payload.get("reason", "ручную проверку")),

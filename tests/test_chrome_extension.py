@@ -509,9 +509,7 @@ def test_extension_browser_clears_manual_phase_after_safe_page_retry(settings):
     with browser, pytest.raises(PageNotReadyError, match="Chrome restarted"):
         browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
 
-    assert phases == [
-        "Технический шаг Chrome завершён; строка безопасно возвращена в очередь."
-    ]
+    assert phases == ["Технический шаг Chrome завершён; строка безопасно возвращена в очередь."]
 
 
 def test_extension_browser_logs_bounded_reload_without_personal_data(settings, caplog):

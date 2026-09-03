@@ -1210,9 +1210,7 @@ class DesktopApp:
         limit = parse_limit(self.limit_var.get())
         gemini_key = self.gemini_key_var.get().strip()
         if self.robot_handoff_enabled_var.get() and not gemini_key:
-            raise ValueError(
-                "Для обработки шага «Лид с робота» укажите ключ распознавания"
-            )
+            raise ValueError("Для обработки шага «Лид с робота» укажите ключ распознавания")
         notification_updates = self._notification_env_values()
         update_env_values(
             self.env_path,
@@ -1222,9 +1220,7 @@ class DesktopApp:
                 "GOOGLE_WORKSHEET": worksheet,
                 "GUI_DEFAULT_LIMIT": str(limit),
                 "GEMINI_API_KEY": gemini_key,
-                "ROBOT_HANDOFF_ENABLED": _bool_text(
-                    self.robot_handoff_enabled_var.get()
-                ),
+                "ROBOT_HANDOFF_ENABLED": _bool_text(self.robot_handoff_enabled_var.get()),
                 **notification_updates,
             },
         )
