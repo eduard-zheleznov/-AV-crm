@@ -9,7 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$ExpectedAppVersion = "1.12.43"
+$ExpectedAppVersion = "1.12.43.1"
 $ExpectedExtensionVersion = "1.0.19"
 
 function Test-Administrator {

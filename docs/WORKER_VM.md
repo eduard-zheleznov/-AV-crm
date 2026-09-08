@@ -79,7 +79,7 @@ Tesseract, Avito CRM и подготавливает extension bridge. Playwrigh
 Ожидаемый финал:
 
 ```text
-WORKER NODE INSTALLED: app=1.12.43; extension=1.0.19; commit=<RELEASE_COMMIT>
+WORKER NODE INSTALLED: app=1.12.43.1; extension=1.0.19; commit=<RELEASE_COMMIT>
 STOP включён; Google-пульт не устанавливался; CRM и очередь не затронуты.
 ```
 

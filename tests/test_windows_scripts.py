@@ -157,7 +157,7 @@ def test_worker_node_installer_is_exact_versioned_and_starts_with_stop():
     assert "[Parameter(Mandatory = $true)]" in script
     assert "[string]$ReleaseCommit" in script
     assert "checkout --detach $ReleaseCommit" in script
-    assert '$ExpectedAppVersion = "1.12.43"' in script
+    assert '$ExpectedAppVersion = "1.12.43.1"' in script
     assert '$ExpectedExtensionVersion = "1.0.19"' in script
     assert "New-Item -ItemType File -Path $StopPath -Force" in script
     assert "& $InstallScript -SkipPlaywright -SkipRemoteControlRefresh" in script

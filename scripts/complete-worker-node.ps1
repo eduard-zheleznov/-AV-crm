@@ -8,7 +8,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$ExpectedAppVersion = "1.12.43"
+$ExpectedAppVersion = "1.12.43.1"
 $ExpectedExtensionVersion = "1.0.19"
 $StopPath = Join-Path $ProjectRoot "data\STOP"
 $WorkerLock = Join-Path $ProjectRoot "data\worker.lock"
