@@ -295,7 +295,7 @@ class DesktopApp:
         profile_row = ttk.Frame(settings_card, style="Card.TFrame")
         profile_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         profile_row.columnconfigure(1, weight=1)
-        ttk.Label(profile_row, text="Профиль Avito", style="Field.TLabel").grid(
+        ttk.Label(profile_row, text="Браузер Avito", style="Field.TLabel").grid(
             row=0, column=0, sticky="w", padx=(0, 12)
         )
         ttk.Label(
@@ -442,12 +442,21 @@ class DesktopApp:
         self.log.tag_configure("warning", foreground="#FEC84B")
         self.log.tag_configure("success", foreground="#6CE9A6")
         self._append_log(
-            "1. При желании откройте профиль Avito и войдите или выйдите.  "
+            "1. При желании откройте браузер Avito и войдите или выйдите.  "
             "2. Укажите таблицу и JSON.  3. Проверьте доступ и запускайте.\n"
         )
 
     def _refresh_avito_profile_status(self) -> None:
         values = read_env_values(self.env_path)
+        driver = values.get("AVITO_BROWSER_DRIVER", "playwright").strip().casefold()
+        extension_incognito = driver == "chrome_extension" and _env_flag(
+            values, "AVITO_EXTENSION_INCOGNITO", True
+        )
+        if extension_incognito:
+            self.avito_profile_var.set("инкогнито; сессия не сохраняется")
+            self.avito_profile_button.configure(text="Открыть инкогнито")
+            return
+        self.avito_profile_button.configure(text="Открыть профиль")
         path = browser_profile_dir(self.project_root, values)
         if browser_profile_is_initialized(path):
             self.avito_profile_var.set("сохранён; вход в аккаунт необязателен")
@@ -1363,6 +1372,12 @@ class DesktopApp:
         self.process = None
         self._set_running(False)
         if return_code == 0:
+            values = read_env_values(self.env_path)
+            extension_incognito = values.get(
+                "AVITO_BROWSER_DRIVER", "playwright"
+            ).strip().casefold() == "chrome_extension" and _env_flag(
+                values, "AVITO_EXTENSION_INCOGNITO", True
+            )
             success_status = {
                 "verify": "Доступ проверен",
                 "live": "Очередь завершена",
@@ -1371,7 +1386,11 @@ class DesktopApp:
                 "email-test": "Email работает",
                 "max-recipients": "Поиск MAX ID завершён",
                 "max-test": "MAX работает",
-                "avito-profile": "Профиль Avito сохранён",
+                "avito-profile": (
+                    "Окно инкогнито открыто"
+                    if extension_incognito
+                    else "Профиль Avito сохранён"
+                ),
             }
             self.status_var.set(success_status.get(kind, "Готово"))
             self._append_log("Готово.\n", "success")

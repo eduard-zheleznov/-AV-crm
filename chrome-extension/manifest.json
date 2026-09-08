@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Avito CRM Local Bridge",
-  "description": "Открывает одну строку очереди в обычном Chrome и передаёт локальному загрузчику уже показанный номер или снимок экрана.",
-  "version": "1.0.18",
+  "description": "Открывает одну строку очереди в Chrome и передаёт локальному загрузчику уже показанный номер или снимок экрана.",
+  "version": "1.0.19",
   "minimum_chrome_version": "109",
+  "incognito": "spanning",
   "permissions": ["alarms", "tabs", "scripting", "debugger"],
   "host_permissions": [
     "https://avito.ru/*",

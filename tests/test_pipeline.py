@@ -851,7 +851,9 @@ def test_extension_driver_uses_ordinary_chrome_browser_adapter(tmp_path, setting
     assert summary.created == 1
     assert browser.calls == ["2"]
     assert (
-        "Подключаем обычный Chrome через локальное расширение и открываем очередь Avito." in phases
+        "Подключаем Chrome в режиме инкогнито через локальное расширение "
+        "и открываем очередь Avito."
+        in phases
     )
 
 

@@ -44,6 +44,22 @@ def test_browser_channel_normalizes_installed_chrome(tmp_path, monkeypatch):
     assert settings.avito_browser_channel == "chrome"
 
 
+def test_extension_incognito_defaults_to_enabled(tmp_path, monkeypatch):
+    monkeypatch.delenv("AVITO_EXTENSION_INCOGNITO", raising=False)
+
+    settings = Settings.load(tmp_path)
+
+    assert settings.avito_extension_incognito is True
+
+
+def test_extension_incognito_can_be_explicitly_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("AVITO_EXTENSION_INCOGNITO", "false")
+
+    settings = Settings.load(tmp_path)
+
+    assert settings.avito_extension_incognito is False
+
+
 def test_browser_channel_rejects_unknown_playwright_channel(settings):
     configured = replace(settings, avito_browser_channel="firefox")
 

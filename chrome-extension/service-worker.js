@@ -2,12 +2,14 @@ importScripts(
   "config.local.js",
   "runtime-core.js",
   "navigation-core.js",
+  "browser-context-core.js",
   "trusted-click.js"
 );
 
 const CONFIG = globalThis.AVITO_CRM_CONFIG;
 const RUNTIME = globalThis.AVITO_CRM_RUNTIME_CORE;
 const NAVIGATION = globalThis.AVITO_CRM_NAVIGATION_CORE;
+const BROWSER_CONTEXT = globalThis.AVITO_CRM_BROWSER_CONTEXT_CORE;
 const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
@@ -158,7 +160,10 @@ async function executeCommand(command) {
           id: command.id,
           type: "result",
           status: "manual_required",
-          reason: "Avito требует ручной проверки в обычном Chrome",
+          reason:
+            command.incognitoRequired !== false
+              ? "Avito требует ручной проверки в окне инкогнито Chrome"
+              : "Avito требует ручной проверки в Chrome",
           diagnostics: prepared.diagnostics
         });
         return;
@@ -300,11 +305,25 @@ async function getManagedTab(command) {
     let tab = null;
     if (recoveryAttempt === 0 && managedTabId !== null) {
       tab = await chrome.tabs.get(managedTabId).catch(() => null);
+      if (tab && !BROWSER_CONTEXT.tabMatchesCommand(tab, command)) {
+        await resetManagedTab(tab.id);
+        tab = null;
+      }
     }
     if (!tab) {
-      const created = await chrome.tabs.create({ url: "about:blank", active: true });
-      managedTabId = created.id;
-      tab = created;
+      const created = await BROWSER_CONTEXT.createManagedTab(chrome, command);
+      if (!created.ok || !created.tab) {
+        throw new BrowserInfrastructureError(
+          BROWSER_CONTEXT.failureMessage(created.code),
+          {
+            browserContext: created.code,
+            incognitoRequired: BROWSER_CONTEXT.requiresIncognito(command),
+            incognitoAccess: created.incognitoAccess ?? null
+          }
+        );
+      }
+      managedTabId = created.tab.id;
+      tab = created.tab;
     }
     const navigation = await navigateTab(
       tab.id,
@@ -321,7 +340,12 @@ async function getManagedTab(command) {
       return {
         tab: navigation.tab,
         classification: navigation.classification,
-        diagnostics: { attempts, recovered: recoveryAttempt > 0 }
+        diagnostics: {
+          attempts,
+          recovered: recoveryAttempt > 0,
+          incognitoRequired: BROWSER_CONTEXT.requiresIncognito(command),
+          incognito: Boolean(navigation.tab?.incognito)
+        }
       };
     }
     if (navigation.classification.status === "listing_mismatch") {

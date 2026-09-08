@@ -142,7 +142,11 @@ class Pipeline:
                 )
                 if needs_browser:
                     browser_label = (
-                        "обычный Chrome через локальное расширение"
+                        (
+                            "Chrome в режиме инкогнито через локальное расширение"
+                            if self.settings.avito_extension_incognito
+                            else "Chrome через локальное расширение"
+                        )
                         if self.settings.avito_browser_driver == "chrome_extension"
                         else "Chromium"
                     )
@@ -166,7 +170,7 @@ class Pipeline:
                     if callable(extension_preflight):
                         self._report_phase(
                             phase,
-                            "Предстартовая проверка обычного Chrome без открытия номера.",
+                            "Предстартовая проверка Chrome/расширения без открытия номера.",
                         )
                         try:
                             extension_preflight(force=True)

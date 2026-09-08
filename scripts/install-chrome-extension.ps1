@@ -41,6 +41,7 @@ $Values = [ordered]@{
     "AVITO_BROWSER_DRIVER" = "chrome_extension"
     "AVITO_EXTENSION_PORT" = [string]$Port
     "AVITO_EXTENSION_TOKEN" = $Token
+    "AVITO_EXTENSION_INCOGNITO" = "true"
 }
 foreach ($Name in $Values.Keys) {
     $Pattern = "(?m)^" + [regex]::Escape($Name) + "=.*$"
@@ -90,9 +91,11 @@ Start-Process explorer.exe -ArgumentList "/e,`"$ExtensionDir`""
 Start-Process $Chrome -ArgumentList "chrome://extensions/"
 
 Write-Host ""
-Write-Host "Локальный мост обычного Chrome подготовлен." -ForegroundColor Green
+Write-Host "Локальный мост Chrome в режиме инкогнито подготовлен." -ForegroundColor Green
 Write-Host "1. В открывшемся Chrome включите 'Режим разработчика'."
 Write-Host "2. Нажмите 'Загрузить распакованное расширение'."
 Write-Host "3. Выберите открытую папку: $ExtensionDir"
-Write-Host "4. Не публикуйте config.local.js: в нём локальный секрет связи."
+Write-Host "4. Откройте карточку расширения и включите 'Разрешить использование в режиме инкогнито'."
+Write-Host "5. Нажмите 'Обновить' и проверьте версию расширения."
+Write-Host "6. Не публикуйте config.local.js: в нём локальный секрет связи."
 Write-Host "Перезагрузка Windows не требуется."

@@ -92,6 +92,24 @@ def test_avito_profile_starts_even_when_crm_timezone_is_unavailable(tmp_path, mo
     assert len(opened_profiles) == 1
 
 
+def test_avito_profile_opens_extension_chrome_in_incognito_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("LPTRACKER_TIMEZONE", "Missing/Timezone")
+    monkeypatch.setenv("AVITO_BROWSER_DRIVER", "chrome_extension")
+    monkeypatch.setenv("AVITO_EXTENSION_TOKEN", "a" * 32)
+    opened_modes: list[bool] = []
+    monkeypatch.setattr(
+        cli,
+        "open_ordinary_chrome",
+        lambda *, incognito: opened_modes.append(incognito),
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--root", str(tmp_path), "avito-profile"])
+
+    assert exit_info.value.code == 0
+    assert opened_modes == [True]
+
+
 def test_remote_control_requires_an_explicit_live_flag_at_runtime():
     setup = build_parser().parse_args(["remote-control", "--setup-only"])
     live = build_parser().parse_args(["remote-control", "--allow-live-crm"])

@@ -74,3 +74,11 @@ def test_vds_settings_import_preserves_the_local_chrome_bridge_and_backs_up_env(
     assert "System.StringComparison]::Ordinal" in script
     assert '"=([^`r`n]*)"' in script
     assert '"=[^`r`n]*"' in script
+
+
+def test_extension_installer_enables_incognito_and_requires_user_permission():
+    path = Path(__file__).parents[1] / "scripts" / "install-chrome-extension.ps1"
+    script = path.read_text(encoding="utf-8-sig")
+
+    assert '"AVITO_EXTENSION_INCOGNITO" = "true"' in script
+    assert "Разрешить использование в режиме инкогнито" in script

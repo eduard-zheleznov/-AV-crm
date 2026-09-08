@@ -13,6 +13,7 @@ import pytest
         "test-runtime-core.cjs",
         "test-content-bootstrap.cjs",
         "test-navigation-core.cjs",
+        "test-browser-context-core.cjs",
         "test-trusted-click.cjs",
     ],
 )

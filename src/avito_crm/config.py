@@ -118,6 +118,7 @@ class Settings:
     avito_browser_driver: str
     avito_extension_port: int
     avito_extension_token: str
+    avito_extension_incognito: bool
     avito_extension_connect_timeout: float
     avito_extension_health_ttl: float
     avito_extension_recovery_backoff: float
@@ -271,6 +272,7 @@ class Settings:
             avito_browser_driver=os.getenv("AVITO_BROWSER_DRIVER", "playwright").strip().casefold(),
             avito_extension_port=_int("AVITO_EXTENSION_PORT", 8765) or 8765,
             avito_extension_token=os.getenv("AVITO_EXTENSION_TOKEN", "").strip(),
+            avito_extension_incognito=_bool("AVITO_EXTENSION_INCOGNITO", True),
             avito_extension_connect_timeout=_float("AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS", 30.0),
             avito_extension_health_ttl=_float("AVITO_EXTENSION_HEALTH_TTL_SECONDS", 30.0),
             avito_extension_recovery_backoff=_float(

@@ -59,11 +59,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("max-recipients", help="Показать ID людей и чатов MAX")
     subparsers.add_parser(
         "avito-profile",
-        help="Открыть постоянный Chromium для необязательного входа или выхода из Avito",
+        help="Открыть тот же режим браузера для ручной проверки Avito",
     )
     extension_test = subparsers.add_parser(
         "avito-extension-test",
-        help="Получить один номер через обычный Chrome без записи в CRM",
+        help="Получить один номер через расширение Chrome без записи в CRM",
     )
     extension_test.add_argument("url", help="Ссылка на объявление Avito")
     extension_test.add_argument(
@@ -241,8 +241,9 @@ def _dispatch(args: argparse.Namespace, settings: Settings) -> int:
     if args.command == "avito-profile":
         with SingleInstanceLock(settings.data_dir / "worker.lock"):
             if settings.avito_browser_driver == "chrome_extension":
-                open_ordinary_chrome()
-                print("Avito открыт в обычном браузере Windows.")
+                open_ordinary_chrome(incognito=settings.avito_extension_incognito)
+                mode = "инкогнито" if settings.avito_extension_incognito else "обычном режиме"
+                print(f"Avito открыт в Chrome в режиме: {mode}.")
             else:
                 open_avito_profile(settings)
                 print("Профиль браузера сохранён. Следующий запуск использует это состояние.")

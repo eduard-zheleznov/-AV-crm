@@ -38,9 +38,11 @@ AVITO_PROFILE_DIR=C:\avito-crm\data\browser-profile-chrome
 Не копируйте в него старый Chromium-профиль и не удаляйте старую папку. Пустой `AVITO_BROWSER_CHANNEL`
 сохраняет Chromium fallback.
 
-При `AVITO_BROWSER_DRIVER=chrome_extension` кнопка **«Открыть профиль»** просто открывает
-Avito в установленном обычном Chrome без отдельного профиля. Перед этим один раз
-загрузите локальное расширение по [CHROME_EXTENSION.md](CHROME_EXTENSION.md).
+При `AVITO_BROWSER_DRIVER=chrome_extension` и `AVITO_EXTENSION_INCOGNITO=true` кнопка
+**«Открыть профиль»** открывает Avito в отдельном окне инкогнито установленного Chrome. Перед этим
+один раз загрузите локальное расширение и включите ему доступ к инкогнито по
+[CHROME_EXTENSION.md](CHROME_EXTENSION.md). Cookies обычного профиля в инкогнито не переносятся, а сессия удаляется после
+закрытия всех окон инкогнито.
 
 Вход в аккаунт Avito не обязателен:
 

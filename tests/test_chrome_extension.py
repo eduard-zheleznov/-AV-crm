@@ -108,6 +108,7 @@ def test_bridge_delivers_one_command_and_correlates_the_result(settings):
             assert status == 200
             assert command is not None
             assert command["type"] == "reveal_phone"
+            assert command["incognitoRequired"] is True
             assert command["manualTimeoutMs"] == 0
             _request(
                 port,
@@ -191,6 +192,7 @@ def test_bridge_runs_a_no_click_health_probe_and_records_the_instance(settings):
             assert command is not None
             assert command["type"] == "health_probe"
             assert command["maxClicks"] == 0
+            assert command["incognitoRequired"] is True
             _request(
                 port,
                 token,
@@ -220,7 +222,7 @@ def test_bridge_runs_a_no_click_health_probe_and_records_the_instance(settings):
 
 
 def test_bridge_rejects_a_stale_extension_before_dispatch(settings):
-    bridge = ExtensionBridge(settings)
+    bridge = ExtensionBridge(replace(settings, avito_extension_port=_free_port()))
     bridge.start()
     try:
         with bridge.state.condition:
@@ -237,13 +239,42 @@ def test_bridge_rejects_a_stale_extension_before_dispatch(settings):
         bridge.close()
 
 
+def test_windows_chrome_starts_with_incognito_before_the_url(tmp_path, monkeypatch):
+    chrome = tmp_path / "Google" / "Chrome" / "Application" / "chrome.exe"
+    chrome.parent.mkdir(parents=True)
+    chrome.touch()
+    launched: list[tuple[list[str], bool]] = []
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+    monkeypatch.delenv("PROGRAMFILES(X86)", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(
+        chrome_extension_module.subprocess,
+        "Popen",
+        lambda command, close_fds: launched.append((command, close_fds)),
+    )
+
+    chrome_extension_module._start_windows_chrome(
+        "https://www.avito.ru/",
+        incognito=True,
+    )
+
+    assert launched == [
+        ([str(chrome), "--incognito", "https://www.avito.ru/"], True)
+    ]
+
+
 def test_manifest_matches_the_required_extension_version():
     manifest_path = Path(__file__).parents[1] / "chrome-extension" / "manifest.json"
+    service_worker_path = Path(__file__).parents[1] / "chrome-extension" / "service-worker.js"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    service_worker = service_worker_path.read_text(encoding="utf-8")
 
     assert manifest["version"] == EXPECTED_EXTENSION_VERSION
+    assert manifest["incognito"] == "spanning"
     assert "debugger" in manifest["permissions"]
     assert "scripting" in manifest["permissions"]
+    assert '"browser-context-core.js"' in service_worker
+    assert "BROWSER_CONTEXT.createManagedTab(chrome, command)" in service_worker
 
 
 def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings):

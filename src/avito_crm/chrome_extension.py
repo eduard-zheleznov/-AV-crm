@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.18"
+EXPECTED_EXTENSION_VERSION = "1.0.19"
 
 
 @dataclass(slots=True)
@@ -68,7 +68,7 @@ class _BridgeState:
 
 
 class ExtensionBridge:
-    """Authenticated localhost long-poll bridge for the ordinary Chrome extension."""
+    """Authenticated localhost long-poll bridge for the installed Chrome extension."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -99,7 +99,7 @@ class ExtensionBridge:
         )
         self.thread.start()
         LOGGER.info(
-            "Локальный мост обычного Chrome слушает 127.0.0.1:%s",
+            "Локальный мост Chrome слушает 127.0.0.1:%s",
             self.settings.avito_extension_port,
         )
 
@@ -179,8 +179,9 @@ class ExtensionBridge:
             "url": url,
             "rowId": row_id,
             "maxClicks": max_clicks,
+            "incognitoRequired": self.settings.avito_extension_incognito,
             "pageTimeoutMs": round(self.settings.avito_page_timeout * 1000),
-            # Ordinary Chrome waits until the operator solves the challenge or
+            # Installed Chrome waits until the operator solves the challenge or
             # presses STOP. A clock timeout would strand the queue row.
             "manualTimeoutMs": 0,
             "phoneWaitMs": round(self.settings.avito_temp_number_wait_max * 1000),
@@ -194,7 +195,8 @@ class ExtensionBridge:
                 if remaining <= 0:
                     raise BrowserInfrastructureError(
                         "Расширение Avito CRM не подключилось к локальному мосту. "
-                        "Откройте обычный Chrome и проверьте, что расширение включено."
+                        "Откройте Chrome и проверьте, что расширение включено и "
+                        "ему разрешён режим инкогнито."
                     )
                 self.state.condition.wait(timeout=min(remaining, 0.5))
             if self.state.extension_version != EXPECTED_EXTENSION_VERSION:
@@ -535,7 +537,7 @@ class ExtensionBridge:
 
 
 class ChromeExtensionBrowser:
-    """Phone browser backed by a user-installed extension in ordinary Chrome."""
+    """Phone browser backed by a user-installed extension in Chrome."""
 
     def __init__(
         self,
@@ -559,7 +561,7 @@ class ChromeExtensionBrowser:
     def __enter__(self) -> ChromeExtensionBrowser:
         self.bridge.start()
         if os.name == "nt" and not self.bridge.wait_for_connection(2):
-            _start_windows_chrome()
+            _start_windows_chrome(incognito=self.settings.avito_extension_incognito)
         return self
 
     def __exit__(self, *_args: object) -> None:
@@ -713,7 +715,7 @@ class ChromeExtensionBrowser:
             if self._manual_pending:
                 self.captchas_solved += 1
                 self._manual_pending = False
-            LOGGER.info("Ручная проверка в обычном Chrome завершена; продолжаем текущую строку")
+            LOGGER.info("Ручная проверка в Chrome завершена; продолжаем текущую строку")
         elif event.status == "manual_reminder" and self._manual_pending:
             escalate = bool(event.payload.get("escalate", False))
             self._manual_backup_alerted = self._manual_backup_alerted or escalate
@@ -827,23 +829,23 @@ class ChromeExtensionBrowser:
             )
         if blank_full_frames >= 2:
             raise PageNotReadyError(
-                "Страница объявления не успела отобразиться в обычном Chrome; "
+                "Страница объявления не успела отобразиться в Chrome; "
                 "строка будет повторена без расходования попытки открытия номера"
             )
         detail = errors[-1] if errors else "номер не попал в проверенные области"
         raise PhoneNotFoundError(f"OCR не распознал номер на трёх снимках экрана: {detail}")
 
 
-def open_ordinary_chrome() -> None:
-    """Open Avito in installed Chrome without automation or a separate profile."""
+def open_ordinary_chrome(*, incognito: bool = False) -> None:
+    """Open Avito in installed Chrome, optionally in an ephemeral incognito session."""
     if os.name == "nt":
-        _start_windows_chrome("https://www.avito.ru/")
+        _start_windows_chrome("https://www.avito.ru/", incognito=incognito)
         return
     if not webbrowser.open("https://www.avito.ru/", new=1, autoraise=True):
         raise BrowserOperationError("Не удалось открыть обычный Google Chrome")
 
 
-def _start_windows_chrome(url: str | None = None) -> None:
+def _start_windows_chrome(url: str | None = None, *, incognito: bool = False) -> None:
     candidates = tuple(
         Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"
         for base in (
@@ -857,6 +859,8 @@ def _start_windows_chrome(url: str | None = None) -> None:
     if chrome is None:
         raise BrowserOperationError("Обычный Google Chrome не найден")
     command = [str(chrome)]
+    if incognito:
+        command.append("--incognito")
     if url:
         command.append(url)
     subprocess.Popen(command, close_fds=True)
@@ -946,6 +950,7 @@ _DIAGNOSTIC_KEYS = frozenset(
         "attempts",
         "auth",
         "bodyLength",
+        "browserContext",
         "classification",
         "content",
         "contentInjectionAttempted",
@@ -958,6 +963,9 @@ _DIAGNOSTIC_KEYS = frozenset(
         "inactive",
         "hasPhone",
         "hasPhoneButton",
+        "incognito",
+        "incognitoAccess",
+        "incognitoRequired",
         "manual",
         "mode",
         "navigation",
