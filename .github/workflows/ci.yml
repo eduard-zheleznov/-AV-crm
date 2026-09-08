@@ -27,6 +27,52 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[dev]'
       - name: Lint
-        run: ruff check src tests && ruff format --check src tests
+        run: ruff check src tests
+      - name: Format changed Python files
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python - <<'PY'
+          import os
+          import subprocess
+
+          base = os.environ["BASE_SHA"]
+          paths = subprocess.check_output(
+              ["git", "diff", "--name-only", "--diff-filter=ACMRT", base, "HEAD", "--", "*.py"],
+              text=True,
+          ).splitlines()
+          if paths:
+              subprocess.run(["ruff", "format", "--check", *paths], check=True)
+          else:
+              print("No changed Python files.")
+          PY
+      - name: Format all Python files
+        if: github.event_name != 'pull_request'
+        run: ruff format --check src tests
       - name: Test
         run: pytest
+
+  powershell-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Parse every Windows PowerShell script
+        shell: powershell
+        run: |
+          $Failed = $false
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $Tokens = $null
+            $Errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$Tokens,
+              [ref]$Errors
+            ) | Out-Null
+            foreach ($ParseError in $Errors) {
+              Write-Error "$($_.Name): $($ParseError.Message)"
+              $Failed = $true
+            }
+          }
+          if ($Failed) { exit 1 }

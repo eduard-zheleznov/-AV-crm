@@ -1,7 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$TransferDir
+    [string]$TransferDir,
+    [string]$NotificationComputerName = $env:COMPUTERNAME
 )
 
 $ErrorActionPreference = "Stop"
@@ -121,6 +122,7 @@ $LocalSettingNames = @(
     "AVITO_PROFILE_DIR",
     "AVITO_EXTENSION_PORT",
     "AVITO_EXTENSION_TOKEN",
+    "AVITO_EXTENSION_INCOGNITO",
     "AVITO_EXTENSION_CONNECT_TIMEOUT_SECONDS",
     "AVITO_SCREENSHOT_DIR",
     "TESSERACT_CMD"
@@ -135,6 +137,7 @@ foreach ($Name in $LocalSettingNames) {
 $MergedText = Set-EnvValue $MergedText "AVITO_BROWSER_DRIVER" "chrome_extension"
 $MergedText = Set-EnvValue $MergedText "AVITO_EXTENSION_TOKEN" $LocalToken
 $MergedText = Set-EnvValue $MergedText "GOOGLE_CREDENTIALS_FILE" $TargetGoogle
+$MergedText = Set-EnvValue $MergedText "NOTIFICATION_COMPUTER_NAME" $NotificationComputerName.Trim()
 # The new computer must never create live leads outside the approved local window.
 $MergedText = Set-EnvValue $MergedText "LOCAL_TIME_GUARD_ENABLED" "true"
 
@@ -164,6 +167,9 @@ if (-not [string]::Equals($WrittenToken, $LocalToken, [System.StringComparison]:
 }
 if ((Get-EnvValue $WrittenText "AVITO_BROWSER_DRIVER") -ne "chrome_extension") {
     throw "Контроль импорта не пройден: не сохранён обычный Chrome"
+}
+if ((Get-EnvValue $WrittenText "AVITO_EXTENSION_INCOGNITO") -ne "true") {
+    throw "Контроль импорта не пройден: не сохранён обязательный режим инкогнито"
 }
 [string]$WrittenGooglePath = Get-EnvValue $WrittenText "GOOGLE_CREDENTIALS_FILE"
 if (
