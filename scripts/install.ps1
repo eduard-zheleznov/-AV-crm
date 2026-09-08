@@ -1,6 +1,8 @@
 ﻿[CmdletBinding()]
 param(
-    [switch]$Dev
+    [switch]$Dev,
+    [switch]$SkipPlaywright,
+    [switch]$SkipRemoteControlRefresh
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,7 +35,12 @@ if ($Dev) {
 } else {
     & $VenvPython -m pip install -e "."
 }
-& $VenvPython -m playwright install chromium
+if (-not $SkipPlaywright) {
+    & $VenvPython -m playwright install chromium
+}
+else {
+    Write-Host "Playwright Chromium не загружается: узел использует обычный Chrome + расширение."
+}
 & $VenvPython -m avito_crm init
 & (Join-Path $PSScriptRoot "create-shortcut.ps1")
 
@@ -65,7 +72,7 @@ if ($Tesseract) {
 
 $RemoteTaskName = "Avito CRM Remote Control"
 $RemoteTask = Get-ScheduledTask -TaskName $RemoteTaskName -ErrorAction SilentlyContinue
-if ($RemoteTask) {
+if ($RemoteTask -and -not $SkipRemoteControlRefresh) {
     Write-Host ""
     Write-Host "Найден установленный удалённый пульт. Безопасно перезапускаем его на новой версии..."
     & (Join-Path $PSScriptRoot "install-remote-control.ps1") -TaskName $RemoteTaskName
@@ -77,8 +84,10 @@ Write-Host "1. Заполните CRM-секреты в .env (не коммит�
 Write-Host "2. Запустите ярлык 'Авито в CRM' на рабочем столе."
 Write-Host "3. Выберите Google JSON, вставьте ссылку таблицы и нажмите 'Проверить доступ'."
 Write-Host "4. В строке 'Капча и уведомления' настройте MAX и резервный Email."
-if ($RemoteTask) {
+if ($RemoteTask -and -not $SkipRemoteControlRefresh) {
     Write-Host "5. Удалённый пульт обновлён и уже перезапущен на новой версии."
+} elseif ($RemoteTask) {
+    Write-Host "5. Удалённый пульт не изменялся и не запускался."
 } else {
     Write-Host "5. Для первого запуска из Google Sheets выполните .\scripts\install-remote-control.ps1"
 }

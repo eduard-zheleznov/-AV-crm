@@ -30,3 +30,26 @@ jobs:
         run: ruff check src tests && ruff format --check src tests
       - name: Test
         run: pytest
+
+  powershell-syntax:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Parse every Windows PowerShell script
+        shell: powershell
+        run: |
+          $Failed = $false
+          Get-ChildItem scripts -Filter *.ps1 | ForEach-Object {
+            $Tokens = $null
+            $Errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$Tokens,
+              [ref]$Errors
+            ) | Out-Null
+            foreach ($ParseError in $Errors) {
+              Write-Error "$($_.Name): $($ParseError.Message)"
+              $Failed = $true
+            }
+          }
+          if ($Failed) { exit 1 }

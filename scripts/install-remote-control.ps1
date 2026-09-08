@@ -2,6 +2,8 @@
 param(
     [string]$TaskName = "Avito CRM Remote Control",
     [switch]$NoStart,
+    [switch]$SkipGoogleSetup,
+    [switch]$Disabled,
     [ValidateRange(30, 1800)]
     [int]$SafeStopTimeoutSeconds = 600
 )
@@ -11,6 +13,10 @@ $ProjectRoot = Split-Path -Parent $PSScriptRoot
 $Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
 $Pythonw = Join-Path $ProjectRoot ".venv\Scripts\pythonw.exe"
 $WorkerLock = Join-Path $ProjectRoot "data\worker.lock"
+
+if ($SkipGoogleSetup -and -not $Disabled) {
+    throw "-SkipGoogleSetup разрешён только вместе с -Disabled."
+}
 
 function Test-ActiveWorkerLock {
     if (-not (Test-Path -LiteralPath $WorkerLock)) {
@@ -57,10 +63,15 @@ if ($Existing) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
 
-Write-Host "Проверяем Google и создаём листы удалённого пульта..."
-& $Python -m avito_crm --root $ProjectRoot remote-control --setup-only
-if ($LASTEXITCODE -ne 0) {
-    throw "Листы пульта не подготовлены. Исправьте ошибку Google выше и повторите."
+if (-not $SkipGoogleSetup) {
+    Write-Host "Проверяем Google и создаём листы удалённого пульта..."
+    & $Python -m avito_crm --root $ProjectRoot remote-control --setup-only
+    if ($LASTEXITCODE -ne 0) {
+        throw "Листы пульта не подготовлены. Исправьте ошибку Google выше и повторите."
+    }
+}
+else {
+    Write-Host "Google не изменяется: задача регистрируется в пассивном режиме."
 }
 
 $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -92,7 +103,10 @@ Register-ScheduledTask `
     -Description "Google Sheets remote control for Avito to LPTracker CRM" `
     -Force | Out-Null
 
-if (-not $NoStart) {
+if ($Disabled) {
+    Disable-ScheduledTask -TaskName $TaskName | Out-Null
+}
+elseif (-not $NoStart) {
     Start-ScheduledTask -TaskName $TaskName
     Start-Sleep -Seconds 2
 }
@@ -104,5 +118,10 @@ Write-Host "Удалённый пульт установлен." -ForegroundColo
 Write-Host "Задача: $TaskName"
 Write-Host "Состояние: $($Task.State)"
 Write-Host "Последний код: $($Info.LastTaskResult)"
-Write-Host "Пульт будет запускаться при входе $CurrentUser в Windows."
-Write-Host "RDP можно отключать, но нельзя выходить из учётной записи Windows."
+if ($Disabled) {
+    Write-Host "Пульт зарегистрирован, но отключён. Команды Google он не читает."
+}
+else {
+    Write-Host "Пульт будет запускаться при входе $CurrentUser в Windows."
+    Write-Host "RDP можно отключать, но нельзя выходить из учётной записи Windows."
+}
