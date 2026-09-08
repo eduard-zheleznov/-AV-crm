@@ -31,7 +31,7 @@ function Invoke-VBox {
     param([Parameter(Mandatory = $true)][string[]]$Arguments)
     & $script:VirtualBoxPath @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "VBoxManage завершился с кодом $LASTEXITCODE: $($Arguments -join ' ')"
+        throw "VBoxManage завершился с кодом ${LASTEXITCODE}: $($Arguments -join ' ')"
     }
 }
 
