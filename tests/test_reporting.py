@@ -72,9 +72,7 @@ def test_compact_report_separates_time_deferred_rows_from_unopened_other():
 
 
 def test_compact_report_says_yes_only_for_full_opened_to_crm_conversion():
-    complete = format_run_report(
-        RunSummary("complete", 4, processed=4, captured=4, created=4)
-    )
+    complete = format_run_report(RunSummary("complete", 4, processed=4, captured=4, created=4))
     partial = format_run_report(
         RunSummary(
             "partial",

@@ -128,8 +128,9 @@ class Pipeline:
                 self._report_phase(phase, "Подготовка очереди Avito: читаем строки.")
                 initial_items = self.source.list_actionable(include_manual=self.include_manual)
                 initial_row_ids = {item.row_id for item in initial_items}
-                needs_browser = self.mode == "capture" or any(
-                    self._is_repeat_flow(item)
+                needs_browser = any(
+                    self.mode == "capture"
+                    or self._is_repeat_flow(item)
                     or (
                         self.mode == "full"
                         and not normalize_phone(
@@ -174,6 +175,10 @@ class Pipeline:
                         )
                         try:
                             extension_preflight(force=True)
+                        except OperatorStopRequested:
+                            summary.stopped_reason = "Остановлено оператором"
+                            self._report_phase(phase, summary.stopped_reason)
+                            return summary
                         except (BrowserOperationError, ManualActionRequired) as exc:
                             summary.stopped_reason = (
                                 "Предстартовая проверка Chrome/расширения не пройдена: "
@@ -275,6 +280,11 @@ class Pipeline:
                         if callable(extension_preflight):
                             try:
                                 extension_preflight()
+                            except OperatorStopRequested:
+                                summary.stopped_reason = "Остановлено оператором"
+                                self._report_phase(phase, summary.stopped_reason)
+                                should_stop = True
+                                break
                             except (BrowserOperationError, ManualActionRequired) as exc:
                                 summary.stopped_reason = (
                                     "Chrome/расширение не восстановились перед следующей "
@@ -442,9 +452,7 @@ class Pipeline:
                                 time_deferred_rows.add(item.row_id)
                                 summary.time_deferred = len(time_deferred_rows)
                                 captured_time_deferred_rows.add(item.row_id)
-                                summary.captured_time_deferred = len(
-                                    captured_time_deferred_rows
-                                )
+                                summary.captured_time_deferred = len(captured_time_deferred_rows)
                                 waiting_status = (
                                     ItemStatus.REPEAT_PENDING if repeat_flow else ItemStatus.PENDING
                                 )

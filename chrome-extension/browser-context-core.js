@@ -44,6 +44,32 @@
     }
   }
 
+  function isReusableBootstrapTab(tab) {
+    if (!tab || !Number.isInteger(tab.id) || !tab.incognito) {
+      return false;
+    }
+    const url = String(tab.pendingUrl || tab.url || "").toLowerCase();
+    return url === "about:blank" || url === "chrome://newtab/";
+  }
+
+  async function findReusableBootstrapTab(chromeApi) {
+    let windows;
+    try {
+      windows = await chromeApi.windows.getAll({ populate: true, windowTypes: ["normal"] });
+    } catch (_error) {
+      return null;
+    }
+    const candidates = [];
+    for (const window of windows || []) {
+      const tabs = Array.isArray(window?.tabs) ? window.tabs : [];
+      if (!window?.incognito || tabs.length !== 1 || !isReusableBootstrapTab(tabs[0])) {
+        continue;
+      }
+      candidates.push(tabs[0]);
+    }
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
   async function createManagedTab(chromeApi, command) {
     if (!requiresIncognito(command)) {
       try {
@@ -68,6 +94,16 @@
       return { ok: false, code: "incognito_not_allowed", incognitoAccess: false };
     }
 
+    const bootstrapTab = await findReusableBootstrapTab(chromeApi);
+    if (bootstrapTab && tabMatchesCommand(bootstrapTab, command)) {
+      return {
+        ok: true,
+        tab: bootstrapTab,
+        incognitoAccess: true,
+        reusedBootstrap: true
+      };
+    }
+
     let createdWindow;
     try {
       createdWindow = await chromeApi.windows.create({
@@ -84,7 +120,7 @@
       await removeWindowSafely(chromeApi, createdWindow?.id);
       return { ok: false, code: "incognito_context_mismatch", incognitoAccess: true };
     }
-    return { ok: true, tab, incognitoAccess: true };
+    return { ok: true, tab, incognitoAccess: true, reusedBootstrap: false };
   }
 
   function failureMessage(code) {
@@ -109,6 +145,8 @@
   const api = {
     createManagedTab,
     failureMessage,
+    findReusableBootstrapTab,
+    isReusableBootstrapTab,
     removeTabSafely,
     resolveCreatedWindowTab,
     requiresIncognito,

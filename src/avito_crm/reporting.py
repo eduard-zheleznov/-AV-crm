@@ -64,9 +64,7 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     errors = _count(metrics.errors)
     crm_sync_errors = _count(metrics.crm_sync_errors)
     time_deferred = _count(getattr(metrics, "time_deferred", 0))
-    captured_time_deferred = _count(
-        getattr(metrics, "captured_time_deferred", 0)
-    )
+    captured_time_deferred = _count(getattr(metrics, "captured_time_deferred", 0))
     recovered = _count(getattr(metrics, "recovered", 0))
     crm_write_failed = _count(getattr(metrics, "crm_write_failed", 0))
 
@@ -74,15 +72,9 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     unopened_remaining = unopened
     inactive_visible, unopened_remaining = _allocate(unopened_remaining, inactive)
     invalid_visible, unopened_remaining = _allocate(unopened_remaining, invalid)
-    unavailable_visible, unopened_remaining = _allocate(
-        unopened_remaining, unavailable
-    )
-    phone_failed_visible, unopened_remaining = _allocate(
-        unopened_remaining, phone_failed
-    )
-    manual_visible, unopened_remaining = _allocate(
-        unopened_remaining, manual_required
-    )
+    unavailable_visible, unopened_remaining = _allocate(unopened_remaining, unavailable)
+    phone_failed_visible, unopened_remaining = _allocate(unopened_remaining, phone_failed)
+    manual_visible, unopened_remaining = _allocate(unopened_remaining, manual_required)
     technical_unopened, unopened_remaining = _allocate(
         unopened_remaining, max(0, errors - crm_write_failed)
     )
@@ -90,18 +82,12 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
 
     not_created = max(0, captured - created)
     not_created_remaining = not_created
-    crm_duplicates, not_created_remaining = _allocate(
-        not_created_remaining, duplicates
-    )
-    recovered_visible, not_created_remaining = _allocate(
-        not_created_remaining, recovered
-    )
+    crm_duplicates, not_created_remaining = _allocate(not_created_remaining, duplicates)
+    recovered_visible, not_created_remaining = _allocate(not_created_remaining, recovered)
     captured_deferred_visible, not_created_remaining = _allocate(
         not_created_remaining, captured_time_deferred
     )
-    crm_failed_visible, not_created_remaining = _allocate(
-        not_created_remaining, crm_write_failed
-    )
+    crm_failed_visible, not_created_remaining = _allocate(not_created_remaining, crm_write_failed)
     unfinished_crm = not_created_remaining
     result = (reason or "Очередь обработана: все доступные попытки завершены").strip()
 
@@ -121,10 +107,7 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
             f"- Неактивные / снятые объявления: {inactive_visible} "
             f"({_percent(inactive_visible, unopened)})"
         ),
-        (
-            f"- Некорректные ссылки: {invalid_visible} "
-            f"({_percent(invalid_visible, unopened)})"
-        ),
+        (f"- Некорректные ссылки: {invalid_visible} ({_percent(invalid_visible, unopened)})"),
         (
             f"- Без кнопки телефона: {unavailable_visible} "
             f"({_percent(unavailable_visible, unopened)})"
@@ -195,8 +178,7 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
         lines.append(f"Ожидают решения капчи: {manual_required}")
     if errors or crm_sync_errors:
         lines.append(
-            f"Внимание: технических ошибок — {errors}; "
-            f"предупреждений CRM — {crm_sync_errors}."
+            f"Внимание: технических ошибок — {errors}; предупреждений CRM — {crm_sync_errors}."
         )
     lines.extend(("", f"Итог: {result}"))
     return "\n".join(lines)

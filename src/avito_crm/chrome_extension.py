@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.19"
+EXPECTED_EXTENSION_VERSION = "1.0.20"
 
 
 @dataclass(slots=True)
@@ -137,12 +137,17 @@ class ExtensionBridge:
                 "command_dispatched": self.state.dispatched,
             }
 
-    def health_probe(self) -> ExtensionEvent:
+    def health_probe(
+        self,
+        *,
+        status_callback: Callable[[ExtensionEvent], None] | None = None,
+    ) -> ExtensionEvent:
         return self._execute(
             command_type="health_probe",
             url="https://www.avito.ru/",
             row_id="startup-canary",
             max_clicks=0,
+            status_callback=status_callback,
         )
 
     def execute(
@@ -553,6 +558,7 @@ class ChromeExtensionBrowser:
         self._manual_notified = False
         self._manual_pending = False
         self._manual_backup_alerted = False
+        self._manual_started_at: float | None = None
         self._needs_active_probe = True
         self._last_probe_at = 0.0
         self._last_extension_instance = ""
@@ -586,11 +592,17 @@ class ChromeExtensionBrowser:
         if not active_probe_required:
             return snapshot
 
-        event = self.bridge.health_probe()
+        self._reset_manual_session()
+        event = self.bridge.health_probe(status_callback=self._handle_preflight_status)
         if event.status == "manual_required":
             self._needs_active_probe = True
             raise ManualActionRequired(
                 str(event.payload.get("reason", "Avito требует ручной проверки"))
+            )
+        if event.status == "cancelled":
+            self._notify_captcha_stopped("https://www.avito.ru/")
+            raise OperatorStopRequested(
+                str(event.payload.get("reason", "Ожидание Chrome остановлено оператором"))
             )
         if event.status != "healthy":
             self._needs_active_probe = True
@@ -614,9 +626,7 @@ class ChromeExtensionBrowser:
             raise ValueError("max_clicks должен быть равен 1 или 2")
         canonical_url = canonical_avito_url(url)
         self.preflight()
-        self._manual_notified = False
-        self._manual_pending = False
-        self._manual_backup_alerted = False
+        self._reset_manual_session()
         try:
             event = self.bridge.execute(
                 url=canonical_url,
@@ -704,7 +714,14 @@ class ChromeExtensionBrowser:
         if event.status == "manual_required" and not self._manual_notified:
             self._manual_notified = True
             self._manual_pending = True
-            LOGGER.warning("Обычный Chrome ждёт ручного решения капчи; страница не перезагружается")
+            self._manual_started_at = time.monotonic()
+            browser_label = (
+                "Chrome в режиме инкогнито" if self.settings.avito_extension_incognito else "Chrome"
+            )
+            LOGGER.warning(
+                "%s ждёт ручной проверки; процесс не завершён",
+                browser_label,
+            )
             self._notify_safely(
                 "send_captcha_detected",
                 reason=str(event.payload.get("reason", "ручную проверку")),
@@ -715,6 +732,18 @@ class ChromeExtensionBrowser:
             if self._manual_pending:
                 self.captchas_solved += 1
                 self._manual_pending = False
+                elapsed = max(
+                    0.0,
+                    time.monotonic() - (self._manual_started_at or time.monotonic()),
+                )
+                self._notify_safely(
+                    "send_captcha_resolved",
+                    url=url,
+                    elapsed_seconds=elapsed,
+                    include_backup=self._manual_backup_alerted,
+                )
+            self._manual_notified = False
+            self._manual_started_at = None
             LOGGER.info("Ручная проверка в Chrome завершена; продолжаем текущую строку")
         elif event.status == "manual_reminder" and self._manual_pending:
             escalate = bool(event.payload.get("escalate", False))
@@ -735,6 +764,15 @@ class ChromeExtensionBrowser:
         elif event.status == "reveal_confirmed":
             LOGGER.info("Обычный Chrome: раскрытие номера подтверждено DOM")
 
+    def _handle_preflight_status(self, event: ExtensionEvent) -> None:
+        self._handle_status(event, "https://www.avito.ru/")
+
+    def _reset_manual_session(self) -> None:
+        self._manual_notified = False
+        self._manual_pending = False
+        self._manual_backup_alerted = False
+        self._manual_started_at = None
+
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:
             return
@@ -754,6 +792,8 @@ class ChromeExtensionBrowser:
             include_backup=self._manual_backup_alerted,
         )
         self._manual_pending = False
+        self._manual_notified = False
+        self._manual_started_at = None
 
     def _artifact_path(self, url: str, suffix: str) -> Path:
         digest = hashlib.sha256(url.encode()).hexdigest()[:12]

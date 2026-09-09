@@ -13,6 +13,7 @@ from avito_crm.notifications import (
     MaxNotifier,
     NotificationRouter,
     TelegramNotifier,
+    _captcha_detected_lines,
     _max_http_error_description,
     _max_ssl_context,
     _run_completion_message,
@@ -31,6 +32,23 @@ def _notification_settings(settings, **overrides):
     }
     values.update(overrides)
     return replace(settings, **values)
+
+
+def test_manual_check_notification_is_an_explicit_pause_not_a_completed_run():
+    text = "\n".join(
+        _captcha_detected_lines(
+            computer_name="LENOVO",
+            reason="доступ Avito ограничен по IP",
+            url="https://www.avito.ru/",
+            wait_seconds=0,
+        )
+    )
+
+    assert "на паузу" in text
+    assert "Продолжить" in text
+    assert "не запускайте очередь заново" in text
+    assert "продолжит работу сама" in text
+    assert "заверш" not in text.casefold()
 
 
 def test_telegram_test_is_sent_to_unique_primary_and_backup_chats(settings):
@@ -551,6 +569,24 @@ def test_crm_sync_warning_does_not_report_a_technical_processing_error():
 
     assert subject == "[Avito CRM] Завершено с предупреждениями"
     assert "технических ошибок — 0; предупреждений CRM — 3" in body
+
+
+def test_browser_preflight_failure_takes_priority_over_old_crm_warnings():
+    summary = RunSummary(
+        run_id="run-browser-preflight",
+        requested=10,
+        errors=0,
+        crm_sync_errors=9,
+        stopped_reason=(
+            "Предстартовая проверка Chrome/расширения не пройдена: renderer не отвечает"
+        ),
+    )
+
+    subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
+
+    assert subject == "[Avito CRM] Завершено с техническими ошибками"
+    assert body.startswith("⚠️ Запуск завершён с техническими ошибками")
+    assert "renderer не отвечает" in body
 
 
 def test_completion_delivery_can_target_backup_without_changing_captcha_routing(

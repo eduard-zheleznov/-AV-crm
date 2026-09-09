@@ -14,6 +14,7 @@ import pytest
         "test-content-bootstrap.cjs",
         "test-navigation-core.cjs",
         "test-browser-context-core.cjs",
+        "test-manual-session-core.cjs",
         "test-trusted-click.cjs",
     ],
 )

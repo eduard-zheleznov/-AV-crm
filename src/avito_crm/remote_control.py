@@ -680,11 +680,7 @@ class GoogleControlPanel:
                 },
                 {
                     "range": "A9",
-                    "values": [
-                        [
-                            "Предел ссылок (0 = без ограничения)"
-                        ]
-                    ],
+                    "values": [["Предел ссылок (0 = без ограничения)"]],
                 },
                 {
                     "range": "A11",
@@ -1759,9 +1755,7 @@ class RemoteController:
             no_answer_synced=int(result.get("no_answer_synced", 0) or 0),
             crm_sync_errors=int(result.get("crm_sync_errors", 0) or 0),
             time_deferred=int(result.get("time_deferred", 0) or 0),
-            captured_time_deferred=int(
-                result.get("captured_time_deferred", 0) or 0
-            ),
+            captured_time_deferred=int(result.get("captured_time_deferred", 0) or 0),
             recovered=int(result.get("recovered", 0) or 0),
             crm_write_failed=int(result.get("crm_write_failed", 0) or 0),
             stopped_reason=reason,
@@ -1773,9 +1767,7 @@ class RemoteController:
                 if notifier.enabled:
                     notifier.send_run_completed(
                         summary=summary,
-                        source_name=(
-                            f"google:{settings.google_spreadsheet_id}:{state.worksheet}"
-                        ),
+                        source_name=(f"google:{settings.google_spreadsheet_id}:{state.worksheet}"),
                         mode="full",
                         live=True,
                     )

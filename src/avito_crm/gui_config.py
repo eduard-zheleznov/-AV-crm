@@ -117,9 +117,7 @@ def save_robot_handoff_preference(
     """Persist the background handoff switch immediately and atomically."""
     key = recognition_key.strip()
     if enabled and not key:
-        raise ValueError(
-            "Для обработки шага «Лид с робота» укажите ключ распознавания"
-        )
+        raise ValueError("Для обработки шага «Лид с робота» укажите ключ распознавания")
     updates = {"ROBOT_HANDOFF_ENABLED": "true" if enabled else "false"}
     if enabled:
         updates["GEMINI_API_KEY"] = key

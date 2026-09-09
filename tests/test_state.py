@@ -82,9 +82,7 @@ def test_state_store_migrates_robot_handoff_due_date_without_losing_cache(tmp_pa
         cached = state.get_robot_handoff(700)
         columns = {
             row[1]
-            for row in state.connection.execute(
-                "PRAGMA table_info(robot_handoffs)"
-            ).fetchall()
+            for row in state.connection.execute("PRAGMA table_info(robot_handoffs)").fetchall()
         }
 
     assert "stage_due_date" in columns
@@ -126,9 +124,7 @@ def test_state_store_migrates_existing_manual_notification_without_resending(tmp
         new_record_claim = state.claim_robot_handoff_notification(
             700, "new-record", "manual_required"
         )
-        state.release_robot_handoff_notification(
-            700, "new-record", "manual_required"
-        )
+        state.release_robot_handoff_notification(700, "new-record", "manual_required")
         retry_after_failed_delivery = state.claim_robot_handoff_notification(
             700, "new-record", "manual_required"
         )

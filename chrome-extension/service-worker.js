@@ -3,6 +3,7 @@ importScripts(
   "runtime-core.js",
   "navigation-core.js",
   "browser-context-core.js",
+  "manual-session-core.js",
   "trusted-click.js"
 );
 
@@ -10,6 +11,7 @@ const CONFIG = globalThis.AVITO_CRM_CONFIG;
 const RUNTIME = globalThis.AVITO_CRM_RUNTIME_CORE;
 const NAVIGATION = globalThis.AVITO_CRM_NAVIGATION_CORE;
 const BROWSER_CONTEXT = globalThis.AVITO_CRM_BROWSER_CONTEXT_CORE;
+const MANUAL_SESSION = globalThis.AVITO_CRM_MANUAL_SESSION_CORE;
 const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
@@ -66,12 +68,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type !== "avito_crm_status" || !currentCommandId) {
     return false;
   }
-  postEvent({
-    id: currentCommandId,
-    type: "status",
-    status: message.status,
-    reason: message.reason || ""
-  })
+  const statusCommandId = currentCommandId;
+  const senderTabId = sender?.tab?.id;
+  const bringManualTabForward =
+    message.status === "manual_required" && senderTabId === managedTabId
+      ? focusTab(senderTabId)
+      : Promise.resolve();
+  bringManualTabForward
+    .catch(() => undefined)
+    .then(() =>
+      postEvent({
+        id: statusCommandId,
+        type: "status",
+        status: message.status,
+        reason: message.reason || ""
+      })
+    )
     .then(() => sendResponse({ ok: true }))
     .catch(() => sendResponse({ ok: false }));
   return true;
@@ -153,26 +165,30 @@ async function executeCommand(command) {
   currentCommandId = command.id;
   currentCommand = command;
   try {
-    const prepared = await getManagedTab(command);
+    let prepared = await getManagedTab(command);
     if (command.type === "health_probe") {
-      if (prepared.classification.status === "manual_required") {
-        await postEvent({
-          id: command.id,
-          type: "result",
-          status: "manual_required",
-          reason:
-            command.incognitoRequired !== false
-              ? "Avito требует ручной проверки в окне инкогнито Chrome"
-              : "Avito требует ручной проверки в Chrome",
-          diagnostics: prepared.diagnostics
-        });
+      const recovery = await MANUAL_SESSION.recoverHealthProbe(prepared, {
+        focus: focusTab,
+        wait: (tabId) => sendManualWaitMessage(tabId, command),
+        recheck: () => getManagedTab(command)
+      });
+      if (!recovery.completed) {
+        const result = recovery.result || {
+          status: "browser_infra",
+          reason: "Chrome не подтвердил завершение ручной проверки"
+        };
+        await postEvent({ id: command.id, type: "result", ...result });
         return;
       }
+      prepared = recovery.prepared;
       await postEvent({
         id: command.id,
         type: "result",
         status: "healthy",
-        diagnostics: prepared.diagnostics
+        diagnostics: {
+          ...prepared.diagnostics,
+          manualWaits: recovery.manualWaits
+        }
       });
       return;
     }
@@ -301,6 +317,7 @@ function validateBrowserClick(message, senderTabId, tab) {
 async function getManagedTab(command) {
   const mode = command.type === "health_probe" ? "health" : "listing";
   const attempts = [];
+  let reusedBootstrap = false;
   for (let recoveryAttempt = 0; recoveryAttempt <= 1; recoveryAttempt += 1) {
     let tab = null;
     if (recoveryAttempt === 0 && managedTabId !== null) {
@@ -324,6 +341,7 @@ async function getManagedTab(command) {
       }
       managedTabId = created.tab.id;
       tab = created.tab;
+      reusedBootstrap = Boolean(created.reusedBootstrap);
     }
     const navigation = await navigateTab(
       tab.id,
@@ -344,7 +362,8 @@ async function getManagedTab(command) {
           attempts,
           recovered: recoveryAttempt > 0,
           incognitoRequired: BROWSER_CONTEXT.requiresIncognito(command),
-          incognito: Boolean(navigation.tab?.incognito)
+          incognito: Boolean(navigation.tab?.incognito),
+          reusedBootstrap
         }
       };
     }
@@ -386,6 +405,14 @@ function navigationError(navigation, expectedUrl) {
 }
 
 async function sendRevealMessage(tabId, command) {
+  return await sendContentCommand(tabId, command, "avito_crm_reveal_once");
+}
+
+async function sendManualWaitMessage(tabId, command) {
+  return await sendContentCommand(tabId, command, "avito_crm_wait_for_manual");
+}
+
+async function sendContentCommand(tabId, command, type) {
   let lastError = null;
   const deadline = Date.now() + command.pageTimeoutMs + 5000;
   const cancellationController = new AbortController();
@@ -395,7 +422,7 @@ async function sendRevealMessage(tabId, command) {
       try {
         return await Promise.race([
           chrome.tabs.sendMessage(tabId, {
-            type: "avito_crm_reveal_once",
+            type,
             commandId: command.id,
             expectedUrl: command.url,
             expectedContentVersion: EXTENSION_VERSION,

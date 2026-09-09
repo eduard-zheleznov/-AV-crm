@@ -551,7 +551,7 @@ def test_crm_skips_recent_phone_match_for_different_listing(settings):
                         "id": 700,
                         "name": "Авито — 987654321",
                         "created_at": recent_created_at,
-                    }
+                    },
                 ]
             )
         raise AssertionError(f"unexpected write: {request.method} {request.url.path}")

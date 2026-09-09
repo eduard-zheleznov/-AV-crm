@@ -91,9 +91,7 @@ class LpTrackerClient:
             raise ConfigurationError("Имя владельца лида не заполнено")
         staff = self.list_staff()
         matches = [
-            member
-            for member in staff
-            if _normalized_name(str(member.get("name", ""))) == wanted
+            member for member in staff if _normalized_name(str(member.get("name", ""))) == wanted
         ]
         if len(matches) != 1:
             available = ", ".join(
@@ -150,8 +148,7 @@ class LpTrackerClient:
             if not matches:
                 raise ConfigurationError(f"Поле {field_name!r} не найдено. Поля: {available}")
             raise ConfigurationError(
-                f"Найдено несколько полей {field_name!r}; "
-                "укажите ID проекта точнее"
+                f"Найдено несколько полей {field_name!r}; укажите ID проекта точнее"
             )
         field = matches[0]
         field_type = str(field.get("type", ""))
@@ -412,9 +409,7 @@ class LpTrackerClient:
             if contact_id is None:
                 continue
             for lead in self.contact_leads(contact_id):
-                if _lead_name_matches_listing(
-                    str(lead.get("name", "")), listing_id, repeat=repeat
-                ):
+                if _lead_name_matches_listing(str(lead.get("name", "")), listing_id, repeat=repeat):
                     return lead
         return None
 
@@ -513,9 +508,7 @@ class LpTrackerClient:
                 if newest_lead_at is not None
                 else None
             )
-            duplicate_is_recent = window_days > 0 and (
-                age_days is None or age_days < window_days
-            )
+            duplicate_is_recent = window_days > 0 and (age_days is None or age_days < window_days)
             if duplicate_is_recent:
                 if age_days is None:
                     detail = (
@@ -588,9 +581,7 @@ class LpTrackerClient:
         field_id: int,
     ) -> dict[str, Any] | None:
         for lead in leads:
-            if not _lead_name_matches_listing(
-                str(lead.get("name", "")), listing_id, repeat=repeat
-            ):
+            if not _lead_name_matches_listing(str(lead.get("name", "")), listing_id, repeat=repeat):
                 continue
             custom = lead.get("custom") or []
             # Some LPTracker list responses omit custom fields even though the
@@ -627,8 +618,7 @@ class LpTrackerClient:
             payload = response.json()
         except ValueError as exc:
             raise CrmError(
-                f"История LPTracker вернула не-JSON при авторизации "
-                f"(HTTP {response.status_code})"
+                f"История LPTracker вернула не-JSON при авторизации (HTTP {response.status_code})"
             ) from exc
         result = payload.get("result") if isinstance(payload, dict) else None
         data = result.get("data") if isinstance(result, dict) else None
@@ -675,8 +665,7 @@ class LpTrackerClient:
                 if response.status_code in {429, 500, 502, 503, 504}:
                     if attempt == 3:
                         raise CrmError(
-                            "История LPTracker временно недоступна "
-                            f"(HTTP {response.status_code})"
+                            f"История LPTracker временно недоступна (HTTP {response.status_code})"
                         )
                     time.sleep(min(8.0, 2**attempt))
                     continue
@@ -684,8 +673,7 @@ class LpTrackerClient:
                     payload = response.json()
                 except ValueError as exc:
                     raise CrmError(
-                        "История LPTracker вернула не-JSON "
-                        f"(HTTP {response.status_code})"
+                        f"История LPTracker вернула не-JSON (HTTP {response.status_code})"
                     ) from exc
                 if response.status_code >= 400:
                     raise CrmError(_web_error_message(payload, response.status_code))
@@ -841,9 +829,7 @@ def is_managed_avito_lead(lead: dict[str, Any]) -> bool:
     view = lead.get("view")
     if not isinstance(view, dict) or not str(view.get("campaign", "")).strip():
         return True
-    return _normalized_name(str(view.get("campaign", ""))) == _normalized_name(
-        "Avito CRM Pipeline"
-    )
+    return _normalized_name(str(view.get("campaign", ""))) == _normalized_name("Avito CRM Pipeline")
 
 
 def _lead_name_matches_listing(

@@ -116,7 +116,12 @@ def test_remote_worker_can_suppress_its_partial_completion_notification(
     assert delivered == []
 
 
-def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings):
+def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings, monkeypatch):
+    class UnexpectedOcr:
+        def __init__(self, *_args):
+            raise AssertionError("OCR must not start when no row is locally eligible")
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", UnexpectedOcr)
     source = ClosedLocalWindowQueue(settings)
     phases = []
     with StateStore(tmp_path / "state.sqlite3") as state:
@@ -327,6 +332,48 @@ def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, setting
     assert summary.stopped_reason.startswith("Предстартовая проверка")
 
 
+def test_extension_startup_canary_operator_stop_is_not_a_technical_error(
+    tmp_path, settings, monkeypatch
+):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+    )
+    source = RoundQueue(configured)
+
+    class StoppedCanaryBrowser:
+        captchas_solved = 0
+
+        def preflight(self, *, force=False):
+            assert force is True
+            raise OperatorStopRequested("остановлено оператором")
+
+        def reveal_phone(self, *_args, **_kwargs):
+            raise AssertionError("Строка не должна открываться после STOP")
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.ChromeExtensionBrowser",
+        lambda *_args, **_kwargs: nullcontext(StoppedCanaryBrowser()),
+    )
+
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            configured,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(10)
+
+    assert summary.stopped_reason == "Остановлено оператором"
+    assert summary.errors == 0
+    assert summary.inspected == 0
+    assert source.patches == []
+
+
 def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
     tmp_path, settings, monkeypatch
 ):
@@ -349,9 +396,7 @@ def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
     assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
 
 
-def test_ineffective_click_stops_after_consecutive_failure_limit(
-    tmp_path, settings, monkeypatch
-):
+def test_ineffective_click_stops_after_consecutive_failure_limit(tmp_path, settings, monkeypatch):
     settings = replace(settings, max_consecutive_failures=2)
     source = RoundQueue(settings, count=3)
     browser = SequencedBrowser(
@@ -717,9 +762,7 @@ def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, setting
     assert summary.stopped_reason.startswith("Отложено по времени")
 
 
-def test_expired_row_does_not_stop_a_later_safe_timezone(
-    tmp_path, settings, monkeypatch
-):
+def test_expired_row_does_not_stop_a_later_safe_timezone(tmp_path, settings, monkeypatch):
     source = MixedWindowQueue(settings)
     browser = SequencedBrowser({"3": ["+79997654321"]})
     monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
@@ -852,8 +895,7 @@ def test_extension_driver_uses_ordinary_chrome_browser_adapter(tmp_path, setting
     assert browser.calls == ["2"]
     assert (
         "Подключаем Chrome в режиме инкогнито через локальное расширение "
-        "и открываем очередь Avito."
-        in phases
+        "и открываем очередь Avito." in phases
     )
 
 
