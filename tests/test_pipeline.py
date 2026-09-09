@@ -391,9 +391,7 @@ def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
     assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
 
 
-def test_ineffective_click_stops_after_consecutive_failure_limit(
-    tmp_path, settings, monkeypatch
-):
+def test_ineffective_click_stops_after_consecutive_failure_limit(tmp_path, settings, monkeypatch):
     settings = replace(settings, max_consecutive_failures=2)
     source = RoundQueue(settings, count=3)
     browser = SequencedBrowser(
@@ -759,9 +757,7 @@ def test_local_time_is_rechecked_after_reveal_before_crm_write(tmp_path, setting
     assert summary.stopped_reason.startswith("Отложено по времени")
 
 
-def test_expired_row_does_not_stop_a_later_safe_timezone(
-    tmp_path, settings, monkeypatch
-):
+def test_expired_row_does_not_stop_a_later_safe_timezone(tmp_path, settings, monkeypatch):
     source = MixedWindowQueue(settings)
     browser = SequencedBrowser({"3": ["+79997654321"]})
     monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
@@ -894,8 +890,7 @@ def test_extension_driver_uses_ordinary_chrome_browser_adapter(tmp_path, setting
     assert browser.calls == ["2"]
     assert (
         "Подключаем Chrome в режиме инкогнито через локальное расширение "
-        "и открываем очередь Avito."
-        in phases
+        "и открываем очередь Avito." in phases
     )
 
 

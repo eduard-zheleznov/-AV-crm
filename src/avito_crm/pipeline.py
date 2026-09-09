@@ -451,9 +451,7 @@ class Pipeline:
                                 time_deferred_rows.add(item.row_id)
                                 summary.time_deferred = len(time_deferred_rows)
                                 captured_time_deferred_rows.add(item.row_id)
-                                summary.captured_time_deferred = len(
-                                    captured_time_deferred_rows
-                                )
+                                summary.captured_time_deferred = len(captured_time_deferred_rows)
                                 waiting_status = (
                                     ItemStatus.REPEAT_PENDING if repeat_flow else ItemStatus.PENDING
                                 )

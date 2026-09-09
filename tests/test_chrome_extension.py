@@ -259,9 +259,7 @@ def test_windows_chrome_starts_with_incognito_before_the_url(tmp_path, monkeypat
         incognito=True,
     )
 
-    assert launched == [
-        ([str(chrome), "--incognito", "https://www.avito.ru/"], True)
-    ]
+    assert launched == [([str(chrome), "--incognito", "https://www.avito.ru/"], True)]
 
 
 def test_manifest_matches_the_required_extension_version():
@@ -454,8 +452,7 @@ def test_extension_browser_preflight_notifies_wait_and_resumes_after_manual_chec
                     "manual_required",
                     {
                         "reason": (
-                            "доступ Avito ограничен по IP; нажмите «Продолжить» "
-                            "и пройдите проверку"
+                            "доступ Avito ограничен по IP; нажмите «Продолжить» и пройдите проверку"
                         )
                     },
                 )
@@ -738,9 +735,9 @@ def test_content_script_does_not_report_dispatch_as_reveal_success():
     assert "button === previousButton" in content
     assert 'probe.readyState === "complete"' not in content
 
-    trusted_click = (
-        Path(__file__).parents[1] / "chrome-extension" / "trusted-click.js"
-    ).read_text(encoding="utf-8")
+    trusted_click = (Path(__file__).parents[1] / "chrome-extension" / "trusted-click.js").read_text(
+        encoding="utf-8"
+    )
     assert '"Runtime.evaluate"' in trusted_click
     assert "userGesture: true" in trusted_click
     assert "button.click()" in trusted_click

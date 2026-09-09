@@ -258,9 +258,7 @@ class StagePrefilterCrm(FakeCrm):
         lead["id"] = int(lead_id)
         return lead
 
-    def get_lead_stage_name(
-        self, _lead_id: str | int, *, lead: dict, **_kwargs: object
-    ) -> str:
+    def get_lead_stage_name(self, _lead_id: str | int, *, lead: dict, **_kwargs: object) -> str:
         direct = super().get_lead_stage_name(_lead_id, lead=lead)
         if direct:
             return direct
@@ -359,9 +357,7 @@ def test_handoff_replaces_phone_then_tag_then_owner_then_funnel(settings):
     assert summary.manual_required == 0
     assert saved["status"] == "completed"
     assert saved["stage_due_date"] == "03.08.2026 15:00"
-    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == (
-        "03.08.2026 15:00"
-    )
+    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == ("03.08.2026 15:00")
     assert transcriber.calls == 1
 
 
@@ -386,9 +382,7 @@ def test_handoff_restores_stage_date_after_owner_change_clears_it(settings):
     assert summary.completed == 1
     assert crm.events == ["phone", "custom", "owner", "funnel", "date"]
     assert crm.lead["owner_id"] == 26239
-    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == (
-        "03.08.2026 15:00"
-    )
+    assert {item["id"]: item["value"] for item in crm.lead["custom"]}[100] == ("03.08.2026 15:00")
 
 
 def test_handoff_uses_lead_card_feed_when_direct_lead_omits_recording(settings):
@@ -570,13 +564,9 @@ def test_target_tag_without_local_partial_state_does_not_bypass_trigger(settings
 def test_handoff_does_not_mutate_ambiguous_multi_phone_lead(settings):
     configured = replace(settings, gemini_api_key="test-only-key")
     lead = _lead()
-    lead["contact"]["details"].append(
-        {"id": 502, "type": "phone", "data": "+79991111111"}
-    )
+    lead["contact"]["details"].append({"id": 502, "type": "phone", "data": "+79991111111"})
     crm = FakeCrm(lead)
-    transcriber = FakeTranscriber(
-        TranscriptionResult("ok", "+79991234567", 0.99, 1, "")
-    )
+    transcriber = FakeTranscriber(TranscriptionResult("ok", "+79991234567", 0.99, 1, ""))
     notices: list[tuple[str, str]] = []
     with StateStore(configured.state_db) as state:
         handler = RobotLeadHandoff(
@@ -820,9 +810,7 @@ def test_manual_notification_does_not_repeat_after_transient_error(settings):
         first = handler.run_once(apply=True, lead_id=700)
         crm.lead["calls_records"][0]["record"] += "?token=second"
         second = handler.run_once(apply=True, lead_id=700, retry_analysis=True)
-        crm.lead["calls_records"][0]["record"] = (
-            "https://records.example.test/call.mp3?token=third"
-        )
+        crm.lead["calls_records"][0]["record"] = "https://records.example.test/call.mp3?token=third"
         third = handler.run_once(apply=True, lead_id=700, retry_analysis=True)
 
     assert first.manual_required == 1
@@ -838,9 +826,7 @@ def test_ambiguous_number_manual_review_is_silent_but_recorded(settings):
 
     class AmbiguousTranscriber:
         def transcribe(self, _url: str) -> TranscriptionResult:
-            raise ManualReviewRequired(
-                "В разговоре не найден один однозначно продиктованный номер"
-            )
+            raise ManualReviewRequired("В разговоре не найден один однозначно продиктованный номер")
 
     notices: list[tuple[str, str]] = []
     with StateStore(configured.state_db) as state:
@@ -855,8 +841,7 @@ def test_ambiguous_number_manual_review_is_silent_but_recorded(settings):
 
     assert summary.manual_required == 1
     assert summary.details == [
-        "Лид 700: ручная проверка — "
-        "В разговоре не найден один однозначно продиктованный номер"
+        "Лид 700: ручная проверка — В разговоре не найден один однозначно продиктованный номер"
     ]
     assert notices == []
 
@@ -919,8 +904,7 @@ def test_gemini_uses_structured_json_and_never_puts_key_in_url(settings):
                                                 "+79991234567",
                                             ],
                                             "transcript": (
-                                                "первый +7 999 123-45-67; "
-                                                "повтор +7 999 123-45-67"
+                                                "первый +7 999 123-45-67; повтор +7 999 123-45-67"
                                             ),
                                         }
                                     )
@@ -976,9 +960,7 @@ def test_gemini_normalizes_lptracker_wav_mime_from_file_signature(settings):
                                                 "+79991234567",
                                                 "+79991234567",
                                             ],
-                                            "transcript": (
-                                                "+7 999 123-45-67; +7 999 123-45-67"
-                                            ),
+                                            "transcript": ("+7 999 123-45-67; +7 999 123-45-67"),
                                         }
                                     )
                                 }
@@ -1071,8 +1053,7 @@ def test_gemini_uses_private_lptracker_feed_token_only_for_recording_host(settin
                                                 "+79991234567",
                                             ],
                                             "transcript": (
-                                                "первый +7 999 123-45-67; "
-                                                "повтор +7 999 123-45-67"
+                                                "первый +7 999 123-45-67; повтор +7 999 123-45-67"
                                             ),
                                         }
                                     )
@@ -1165,9 +1146,7 @@ def test_gemini_recovers_only_after_two_identical_complete_dictations(settings):
                 "phone_count": 1,
                 "confirmation_count": 2,
                 "dictations": ["8 999 123 45 67", "+7 999 123-45-67"],
-                "transcript": (
-                    "первая +7 999 123-45-67; повтор +7 999 123-45-67"
-                ),
+                "transcript": ("первая +7 999 123-45-67; повтор +7 999 123-45-67"),
             }
         return httpx.Response(
             200,
@@ -1227,9 +1206,7 @@ def test_gemini_can_recover_on_second_strict_pass(settings):
         client=httpx.Client(transport=httpx.MockTransport(transport), follow_redirects=False),
     )
 
-    assert transcriber.transcribe("https://records.example.test/call.mp3").phone == (
-        "+79991234567"
-    )
+    assert transcriber.transcribe("https://records.example.test/call.mp3").phone == ("+79991234567")
     assert gemini_calls == 3
 
 

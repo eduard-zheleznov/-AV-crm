@@ -141,8 +141,7 @@ class StateStore:
         }
         if "stage_due_date" not in handoff_columns:
             self.connection.execute(
-                "ALTER TABLE robot_handoffs "
-                "ADD COLUMN stage_due_date TEXT NOT NULL DEFAULT ''"
+                "ALTER TABLE robot_handoffs ADD COLUMN stage_due_date TEXT NOT NULL DEFAULT ''"
             )
         if not notification_table_existed:
             # Rows that were already awaiting manual review before this migration
@@ -305,9 +304,7 @@ class StateStore:
         return dict(row) if row else None
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
-        row = self.connection.execute(
-            "SELECT * FROM runs WHERE run_id = ?", (run_id,)
-        ).fetchone()
+        row = self.connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return dict(row) if row else None
 
     def totals(self) -> dict[str, int]:

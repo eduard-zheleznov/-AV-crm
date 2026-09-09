@@ -716,9 +716,7 @@ class ChromeExtensionBrowser:
             self._manual_pending = True
             self._manual_started_at = time.monotonic()
             browser_label = (
-                "Chrome в режиме инкогнито"
-                if self.settings.avito_extension_incognito
-                else "Chrome"
+                "Chrome в режиме инкогнито" if self.settings.avito_extension_incognito else "Chrome"
             )
             LOGGER.warning(
                 "%s ждёт ручной проверки; процесс не завершён",

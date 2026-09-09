@@ -582,9 +582,7 @@ def test_browser_preflight_failure_takes_priority_over_old_crm_warnings():
         ),
     )
 
-    subject, body = _run_completion_message(
-        summary, "LENOVO", "google:test", "full", True
-    )
+    subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
 
     assert subject == "[Avito CRM] Завершено с техническими ошибками"
     assert body.startswith("⚠️ Запуск завершён с техническими ошибками")
