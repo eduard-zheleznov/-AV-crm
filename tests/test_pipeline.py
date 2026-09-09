@@ -116,7 +116,12 @@ def test_remote_worker_can_suppress_its_partial_completion_notification(
     assert delivered == []
 
 
-def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings):
+def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, settings, monkeypatch):
+    class UnexpectedOcr:
+        def __init__(self, *_args):
+            raise AssertionError("OCR must not start when no row is locally eligible")
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", UnexpectedOcr)
     source = ClosedLocalWindowQueue(settings)
     phases = []
     with StateStore(tmp_path / "state.sqlite3") as state:

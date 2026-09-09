@@ -128,8 +128,9 @@ class Pipeline:
                 self._report_phase(phase, "Подготовка очереди Avito: читаем строки.")
                 initial_items = self.source.list_actionable(include_manual=self.include_manual)
                 initial_row_ids = {item.row_id for item in initial_items}
-                needs_browser = self.mode == "capture" or any(
-                    self._is_repeat_flow(item)
+                needs_browser = any(
+                    self.mode == "capture"
+                    or self._is_repeat_flow(item)
                     or (
                         self.mode == "full"
                         and not normalize_phone(
