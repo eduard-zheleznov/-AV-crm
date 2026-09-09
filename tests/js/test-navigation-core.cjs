@@ -152,7 +152,7 @@ const interactiveRendered = {
   visibleHeadings: 1,
   hasPhone: false,
   hasPhoneButton: true,
-  contentVersion: "1.0.19"
+  contentVersion: "1.0.20"
 };
 let stable = null;
 for (const now of [0, 500, 1000]) {

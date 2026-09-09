@@ -7,7 +7,8 @@ function fakeChrome({
   allowed = true,
   includeWindowTabs = true,
   standardTab = null,
-  windowTab = null
+  windowTab = null,
+  existingWindows = []
 } = {}) {
   const calls = [];
   return {
@@ -33,6 +34,10 @@ function fakeChrome({
         }
       },
       windows: {
+        async getAll(details) {
+          calls.push(["windows-get-all", details]);
+          return existingWindows;
+        },
         async create(details) {
           calls.push(["windows-create", details]);
           return {
@@ -73,11 +78,48 @@ async function main() {
   const incognitoResult = await context.createManagedTab(incognito.api, {});
   assert.equal(incognitoResult.ok, true);
   assert.equal(incognitoResult.tab.incognito, true);
-  assert.deepEqual(incognito.calls[1], [
+  assert.deepEqual(incognito.calls[2], [
     "windows-create",
     { url: "about:blank", focused: true, incognito: true, type: "normal" }
   ]);
   assert.equal(incognito.calls.some(([name]) => name === "tabs-create"), false);
+
+  const bootstrap = fakeChrome({
+    existingWindows: [
+      {
+        id: 10,
+        type: "normal",
+        incognito: true,
+        tabs: [{ id: 55, incognito: true, url: "chrome://newtab/" }]
+      }
+    ]
+  });
+  const bootstrapResult = await context.createManagedTab(bootstrap.api, {});
+  assert.equal(bootstrapResult.ok, true);
+  assert.equal(bootstrapResult.tab.id, 55);
+  assert.equal(bootstrapResult.reusedBootstrap, true);
+  assert.equal(bootstrap.calls.some(([name]) => name === "windows-create"), false);
+
+  const ambiguous = fakeChrome({
+    existingWindows: [
+      {
+        id: 10,
+        type: "normal",
+        incognito: true,
+        tabs: [{ id: 55, incognito: true, url: "chrome://newtab/" }]
+      },
+      {
+        id: 11,
+        type: "normal",
+        incognito: true,
+        tabs: [{ id: 56, incognito: true, url: "about:blank" }]
+      }
+    ]
+  });
+  const ambiguousResult = await context.createManagedTab(ambiguous.api, {});
+  assert.equal(ambiguousResult.ok, true);
+  assert.equal(ambiguousResult.reusedBootstrap, false);
+  assert.equal(ambiguous.calls.some(([name]) => name === "windows-create"), true);
 
   const queried = fakeChrome({ includeWindowTabs: false });
   const queriedResult = await context.createManagedTab(queried.api, {});

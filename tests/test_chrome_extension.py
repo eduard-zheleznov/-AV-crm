@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import socket
 import threading
@@ -274,7 +275,22 @@ def test_manifest_matches_the_required_extension_version():
     assert "debugger" in manifest["permissions"]
     assert "scripting" in manifest["permissions"]
     assert '"browser-context-core.js"' in service_worker
+    assert '"manual-session-core.js"' in service_worker
+    assert "MANUAL_SESSION.recoverHealthProbe" in service_worker
+    assert '"avito_crm_wait_for_manual"' in service_worker
     assert "BROWSER_CONTEXT.createManagedTab(chrome, command)" in service_worker
+
+
+def test_manual_wait_hotfix_does_not_change_the_proven_click_and_ocr_block():
+    content_path = Path(__file__).parents[1] / "chrome-extension" / "content.js"
+    content = content_path.read_text(encoding="utf-8")
+    start = content.index("async function revealWithVerifiedClick")
+    end = content.index("async function waitForManualAction")
+    protected_block = content[start:end].encode()
+
+    assert hashlib.sha256(protected_block).hexdigest() == (
+        "dcbbf07c3f38d446c0760f082107202d5ceec2698d7260f79e625b8a9ec5e9a8"
+    )
 
 
 def test_diagnostic_log_keeps_ids_but_redacts_urls_and_unknown_payload(settings):
@@ -344,6 +360,9 @@ class _RecordingNotifier:
     def send_captcha_stopped(self, **kwargs: object) -> None:
         self.events.append(("stopped", kwargs))
 
+    def send_captcha_resolved(self, **kwargs: object) -> None:
+        self.events.append(("resolved", kwargs))
+
     def close(self) -> None:
         return
 
@@ -379,7 +398,8 @@ class _FakeBridge:
             "extension_instance": "test-extension-instance",
         }
 
-    def health_probe(self) -> ExtensionEvent:
+    def health_probe(self, *, status_callback=None) -> ExtensionEvent:
+        del status_callback
         return ExtensionEvent("result", "healthy", {})
 
     def execute(self, **_kwargs: object) -> ExtensionEvent:
@@ -392,7 +412,8 @@ class _ProbeBridge(_FakeBridge):
         self.probe_result = probe_result
         self.probe_calls = 0
 
-    def health_probe(self) -> ExtensionEvent:
+    def health_probe(self, *, status_callback=None) -> ExtensionEvent:
+        del status_callback
         self.probe_calls += 1
         return self.probe_result
 
@@ -416,6 +437,50 @@ def test_extension_browser_never_treats_captcha_as_healthy(settings):
     )
 
     with browser, pytest.raises(ManualActionRequired, match="ручная проверка"):
+        browser.preflight(force=True)
+
+
+def test_extension_browser_preflight_notifies_wait_and_resumes_after_manual_check(settings):
+    notifier = _RecordingNotifier()
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), notifier)
+
+    class WaitingProbeBridge(_ProbeBridge):
+        def health_probe(self, *, status_callback=None) -> ExtensionEvent:
+            self.probe_calls += 1
+            assert status_callback is not None
+            status_callback(
+                ExtensionEvent(
+                    "status",
+                    "manual_required",
+                    {
+                        "reason": (
+                            "доступ Avito ограничен по IP; нажмите «Продолжить» "
+                            "и пройдите проверку"
+                        )
+                    },
+                )
+            )
+            status_callback(ExtensionEvent("status", "manual_cleared", {}))
+            return ExtensionEvent("result", "healthy", {})
+
+    bridge = WaitingProbeBridge(ExtensionEvent("result", "healthy", {}))
+    browser.bridge = bridge
+
+    with browser:
+        browser.preflight(force=True)
+
+    assert browser.captchas_solved == 1
+    assert [name for name, _kwargs in notifier.events] == ["detected", "resolved"]
+    assert "Продолжить" in str(notifier.events[0][1]["reason"])
+
+
+def test_extension_browser_preflight_maps_operator_stop_without_technical_failure(settings):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+    browser.bridge = _ProbeBridge(
+        ExtensionEvent("result", "cancelled", {"reason": "остановлено оператором"})
+    )
+
+    with browser, pytest.raises(OperatorStopRequested, match="оператором"):
         browser.preflight(force=True)
 
 

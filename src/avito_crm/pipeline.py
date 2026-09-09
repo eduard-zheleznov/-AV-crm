@@ -174,6 +174,10 @@ class Pipeline:
                         )
                         try:
                             extension_preflight(force=True)
+                        except OperatorStopRequested:
+                            summary.stopped_reason = "Остановлено оператором"
+                            self._report_phase(phase, summary.stopped_reason)
+                            return summary
                         except (BrowserOperationError, ManualActionRequired) as exc:
                             summary.stopped_reason = (
                                 "Предстартовая проверка Chrome/расширения не пройдена: "
@@ -275,6 +279,11 @@ class Pipeline:
                         if callable(extension_preflight):
                             try:
                                 extension_preflight()
+                            except OperatorStopRequested:
+                                summary.stopped_reason = "Остановлено оператором"
+                                self._report_phase(phase, summary.stopped_reason)
+                                should_stop = True
+                                break
                             except (BrowserOperationError, ManualActionRequired) as exc:
                                 summary.stopped_reason = (
                                     "Chrome/расширение не восстановились перед следующей "

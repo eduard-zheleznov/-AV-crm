@@ -17,7 +17,7 @@ const context = vm.createContext({
   setTimeout,
   chrome: {
     runtime: {
-      getManifest: () => ({ version: "1.0.19" }),
+      getManifest: () => ({ version: "1.0.20" }),
       onMessage: {
         addListener(listener) {
           listeners.push(listener);
@@ -31,5 +31,7 @@ const context = vm.createContext({
 vm.runInContext(source, context, { filename: "content.js" });
 vm.runInContext(source, context, { filename: "content.js" });
 
-assert.equal(context.AVITO_CRM_CONTENT_SCRIPT_VERSION, "1.0.19");
+assert.equal(context.AVITO_CRM_CONTENT_SCRIPT_VERSION, "1.0.20");
 assert.equal(listeners.length, 1);
+assert.match(source, /avito_crm_wait_for_manual/);
+assert.match(source, /проблема с ip/);

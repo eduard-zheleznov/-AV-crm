@@ -327,6 +327,48 @@ def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, setting
     assert summary.stopped_reason.startswith("Предстартовая проверка")
 
 
+def test_extension_startup_canary_operator_stop_is_not_a_technical_error(
+    tmp_path, settings, monkeypatch
+):
+    configured = replace(
+        settings,
+        avito_browser_driver="chrome_extension",
+        avito_extension_token="a" * 64,
+    )
+    source = RoundQueue(configured)
+
+    class StoppedCanaryBrowser:
+        captchas_solved = 0
+
+        def preflight(self, *, force=False):
+            assert force is True
+            raise OperatorStopRequested("остановлено оператором")
+
+        def reveal_phone(self, *_args, **_kwargs):
+            raise AssertionError("Строка не должна открываться после STOP")
+
+    monkeypatch.setattr("avito_crm.pipeline.PhoneOcr", FakeOcr)
+    monkeypatch.setattr(
+        "avito_crm.pipeline.ChromeExtensionBrowser",
+        lambda *_args, **_kwargs: nullcontext(StoppedCanaryBrowser()),
+    )
+
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        summary = Pipeline(
+            configured,
+            source,
+            state,
+            source_name="test",
+            mode="full",
+            live=False,
+        ).run(10)
+
+    assert summary.stopped_reason == "Остановлено оператором"
+    assert summary.errors == 0
+    assert summary.inspected == 0
+    assert source.patches == []
+
+
 def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
     tmp_path, settings, monkeypatch
 ):

@@ -150,14 +150,11 @@ class TelegramNotifier:
     def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
         return self.send(
             "\n".join(
-                (
-                    "🚫 Avito остановил очередь для ручной проверки.",
-                    f"Компьютер: {self.computer_name}",
-                    f"Причина: {reason}",
-                    f"Ссылка: {url}",
-                    f"Ожидание: до {_format_duration(wait_seconds)}.",
-                    "Откройте удалённый компьютер и завершите проверку в браузере. "
-                    "После этого программа продолжит работу автоматически.",
+                _captcha_detected_lines(
+                    computer_name=self.computer_name,
+                    reason=reason,
+                    url=url,
+                    wait_seconds=wait_seconds,
                 )
             ),
             self.primary_chat_ids,
@@ -424,14 +421,11 @@ class MaxNotifier:
     def send_captcha_detected(self, *, reason: str, url: str, wait_seconds: float) -> int:
         return self.send(
             "\n".join(
-                (
-                    "🚫 Avito остановил очередь для ручной проверки.",
-                    f"Компьютер: {self.computer_name}",
-                    f"Причина: {reason}",
-                    f"Ссылка: {url}",
-                    f"Ожидание: до {_format_duration(wait_seconds)}.",
-                    "Откройте удалённый компьютер и завершите проверку в браузере. "
-                    "После этого программа продолжит работу автоматически.",
+                _captcha_detected_lines(
+                    computer_name=self.computer_name,
+                    reason=reason,
+                    url=url,
+                    wait_seconds=wait_seconds,
                 )
             ),
             self.primary_recipients,
@@ -735,14 +729,12 @@ class EmailNotifier:
         return self.send(
             "[Avito CRM] Требуется решить капчу",
             "\n".join(
-                (
-                    "Avito остановил очередь для ручной проверки.",
-                    f"Компьютер: {self.computer_name}",
-                    f"Причина: {reason}",
-                    f"Ссылка: {url}",
-                    f"Ожидание: до {_format_duration(wait_seconds)}.",
-                    "Откройте удалённый компьютер и завершите проверку в браузере. "
-                    "После этого программа продолжит работу автоматически.",
+                _captcha_detected_lines(
+                    computer_name=self.computer_name,
+                    reason=reason,
+                    url=url,
+                    wait_seconds=wait_seconds,
+                    emoji=False,
                 )
             ),
             self.primary_recipients,
@@ -1010,7 +1002,15 @@ def _run_completion_message(
 ) -> tuple[str, str]:
     reason = (summary.stopped_reason or "Работа завершена").strip()
     reason_lower = reason.casefold()
-    if summary.errors or reason_lower.startswith("ошибка запуска"):
+    technical_stop = any(
+        marker in reason_lower
+        for marker in (
+            "предстартовая проверка chrome/расширения не пройдена",
+            "chrome/расширение не восстановились",
+            "аварийная остановка",
+        )
+    )
+    if summary.errors or reason_lower.startswith("ошибка запуска") or technical_stop:
         headline = "⚠️ Запуск завершён с техническими ошибками"
         subject = "[Avito CRM] Завершено с техническими ошибками"
     elif summary.manual_required:
@@ -1066,6 +1066,29 @@ def _mask_email(address: str) -> str:
 def _mask_max_recipient(target: str) -> str:
     kind, _, raw_id = target.partition(":")
     return f"{kind}:***{raw_id[-4:]}"
+
+
+def _captcha_detected_lines(
+    *,
+    computer_name: str,
+    reason: str,
+    url: str,
+    wait_seconds: float,
+    emoji: bool = True,
+) -> tuple[str, ...]:
+    headline = "Avito поставил очередь на паузу для ручной проверки."
+    if emoji:
+        headline = f"⏸ {headline}"
+    return (
+        headline,
+        f"Компьютер: {computer_name}",
+        f"Причина: {reason}",
+        f"Ссылка: {url}",
+        f"Ожидание: до {_format_duration(wait_seconds)}.",
+        "Откройте выведенное на передний план окно Chrome. Если видите «Доступ ограничен», "
+        "нажмите «Продолжить» и пройдите проверку. Не закрывайте окно и не запускайте "
+        "очередь заново: программа ждёт и продолжит работу сама.",
+    )
 
 
 def _max_error_description(payload: object) -> str:

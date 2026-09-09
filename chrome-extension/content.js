@@ -45,7 +45,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     sendResponse(probePage(message.expectedUrl, message.mode));
     return false;
   }
-  if (message?.type !== "avito_crm_reveal_once") {
+  if (
+    message?.type !== "avito_crm_reveal_once" &&
+    message?.type !== "avito_crm_wait_for_manual"
+  ) {
     return false;
   }
   if (activeRevealCommandId && activeRevealCommandId !== message.commandId) {
@@ -53,7 +56,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return false;
   }
   activeRevealCommandId = message.commandId;
-  revealOnce(message)
+  const operation =
+    message.type === "avito_crm_wait_for_manual"
+      ? waitForManualAction(message.manualTimeoutMs).then(() => ({ status: "manual_cleared" }))
+      : revealOnce(message);
+  operation
     .then((result) => sendResponse(result))
     .catch((error) =>
       sendResponse({
@@ -360,6 +367,12 @@ function pageText() {
 function manualReason() {
   const content = pageText();
   const currentUrl = location.href.toLowerCase();
+  if (
+    content.includes("проблема с ip") ||
+    content.includes("доступ ограничен")
+  ) {
+    return "доступ Avito ограничен по IP; нажмите «Продолжить» и пройдите проверку";
+  }
   if (
     currentUrl.includes("captcha") ||
     currentUrl.includes("/challenge") ||
