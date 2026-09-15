@@ -56,6 +56,16 @@
     return { ok: true, code: "committed_expected_surface" };
   }
 
+  function shouldPreserveManagedTab(tab, expectedUrl, mode, runtime) {
+    return Boolean(
+      tab &&
+        Number.isInteger(tab.id) &&
+        !String(tab.pendingUrl || "") &&
+        !tab.discarded &&
+        isExpectedSurface(String(tab.url || ""), expectedUrl, mode, runtime)
+    );
+  }
+
   function shouldInject(context, runtime) {
     const gate = contentGate(
       context.tab,
@@ -139,6 +149,7 @@
     contentGate,
     injectContentFiles,
     isExpectedSurface,
+    shouldPreserveManagedTab,
     renderedProbeToken,
     shouldInject,
     surfaceClass

@@ -471,6 +471,36 @@ def test_extension_browser_preflight_notifies_wait_and_resumes_after_manual_chec
     assert "Продолжить" in str(notifier.events[0][1]["reason"])
 
 
+def test_extension_browser_retries_a_transient_manual_probe_until_it_is_healthy(
+    settings, monkeypatch
+):
+    notifier = _RecordingNotifier()
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), notifier)
+
+    class RetryProbeBridge(_ProbeBridge):
+        def health_probe(self, *, status_callback=None) -> ExtensionEvent:
+            self.probe_calls += 1
+            if self.probe_calls == 1:
+                return ExtensionEvent(
+                    "result",
+                    "manual_required",
+                    {"reason": "ручная проверка Avito"},
+                )
+            assert status_callback is not None
+            status_callback(ExtensionEvent("status", "manual_cleared", {}))
+            return ExtensionEvent("result", "healthy", {})
+
+    browser.bridge = RetryProbeBridge(ExtensionEvent("result", "healthy", {}))
+    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
+
+    with browser:
+        browser.preflight(force=True)
+
+    assert browser.bridge.probe_calls == 2
+    assert browser.captchas_solved == 1
+    assert [name for name, _kwargs in notifier.events] == ["detected", "resolved"]
+
+
 def test_extension_browser_preflight_maps_operator_stop_without_technical_failure(settings):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _ProbeBridge(

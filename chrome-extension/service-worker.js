@@ -484,12 +484,15 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   const startedAt = Date.now();
   const deadline = startedAt + Math.max(3000, Number(timeoutMs) || 45000);
   const initial = await chrome.tabs.get(tabId);
-  if (
-    forceReload &&
-    NAVIGATION.isExpectedSurface(initial.url || "", expectedUrl, mode, RUNTIME)
-  ) {
+  const preserveManagedTab = NAVIGATION.shouldPreserveManagedTab(
+    initial,
+    expectedUrl,
+    mode,
+    RUNTIME
+  );
+  if (forceReload && preserveManagedTab) {
     await chrome.tabs.reload(tabId);
-  } else {
+  } else if (!preserveManagedTab) {
     await chrome.tabs.update(tabId, { url: expectedUrl, active: true });
   }
   let tab = await chrome.tabs.get(tabId);

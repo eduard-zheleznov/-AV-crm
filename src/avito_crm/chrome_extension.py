@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.20"
+EXPECTED_EXTENSION_VERSION = "1.0.21"
 
 
 @dataclass(slots=True)
@@ -593,27 +593,50 @@ class ChromeExtensionBrowser:
             return snapshot
 
         self._reset_manual_session()
-        event = self.bridge.health_probe(status_callback=self._handle_preflight_status)
-        if event.status == "manual_required":
-            self._needs_active_probe = True
-            raise ManualActionRequired(
-                str(event.payload.get("reason", "Avito требует ручной проверки"))
-            )
-        if event.status == "cancelled":
-            self._notify_captcha_stopped("https://www.avito.ru/")
-            raise OperatorStopRequested(
-                str(event.payload.get("reason", "Ожидание Chrome остановлено оператором"))
-            )
-        if event.status != "healthy":
-            self._needs_active_probe = True
-            raise BrowserInfrastructureError(
-                str(
-                    event.payload.get(
-                        "reason",
-                        "Предстартовая проверка Chrome/расширения не пройдена",
+        retried_manual_probe = False
+        while True:
+            event = self.bridge.health_probe(status_callback=self._handle_preflight_status)
+            if event.status == "manual_required":
+                # Some Chrome versions return this result before the content-script
+                # waiter is attached. Repeating the probe attaches it to the same tab.
+                self._needs_active_probe = True
+                self._handle_preflight_status(
+                    ExtensionEvent(
+                        "status",
+                        "manual_required",
+                        {
+                            "reason": str(
+                                event.payload.get("reason", "Avito требует ручной проверки")
+                            )
+                        },
                     )
                 )
-            )
+                if (self.settings.data_dir / "STOP").exists():
+                    self._notify_captcha_stopped("https://www.avito.ru/")
+                    raise OperatorStopRequested("Ожидание Chrome остановлено оператором")
+                if retried_manual_probe:
+                    raise ManualActionRequired(
+                        str(event.payload.get("reason", "Avito требует ручной проверки"))
+                    )
+                retried_manual_probe = True
+                time.sleep(1.0)
+                continue
+            if event.status == "cancelled":
+                self._notify_captcha_stopped("https://www.avito.ru/")
+                raise OperatorStopRequested(
+                    str(event.payload.get("reason", "Ожидание Chrome остановлено оператором"))
+                )
+            if event.status != "healthy":
+                self._needs_active_probe = True
+                raise BrowserInfrastructureError(
+                    str(
+                        event.payload.get(
+                            "reason",
+                            "Предстартовая проверка Chrome/расширения не пройдена",
+                        )
+                    )
+                )
+            break
 
         snapshot = self.bridge.health_snapshot()
         self._last_probe_at = time.monotonic()

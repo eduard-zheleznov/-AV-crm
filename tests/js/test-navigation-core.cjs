@@ -42,6 +42,33 @@ assert.equal(
   "unexpected_surface"
 );
 assert.equal(
+  navigation.shouldPreserveManagedTab(
+    committedListing,
+    expected,
+    "listing",
+    runtime
+  ),
+  true
+);
+assert.equal(
+  navigation.shouldPreserveManagedTab(
+    { ...committedListing, url: "https://www.avito.ru/challenge", pendingUrl: "" },
+    "https://www.avito.ru/",
+    "health",
+    runtime
+  ),
+  true
+);
+assert.equal(
+  navigation.shouldPreserveManagedTab(
+    { ...committedListing, url: "about:blank" },
+    expected,
+    "listing",
+    runtime
+  ),
+  false
+);
+assert.equal(
   navigation.contentGate(
     { ...committedListing, url: "about:blank", pendingUrl: expected },
     expected,
