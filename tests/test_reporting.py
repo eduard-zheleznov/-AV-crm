@@ -117,7 +117,7 @@ def test_compact_report_reconciles_every_unopened_and_opened_without_lead_row():
     assert "Сколько чего из неоткрытых номеров (9)" in report
     assert "Неактивные / снятые объявления: 3 (33%)" in report
     assert "Номер показан, но OCR не распознал: 2 (22%)" in report
-    assert "Технические ошибки загрузки: 2 (22%)" in report
+    assert "Ссылки, отложенные для безопасного повтора: 2 (22%)" in report
     assert "Не завершены до остановки: 2 (22%)" in report
     assert "Почему из открытых номеров не создан новый лид (6)" in report
     assert "Дубликаты / номер уже есть в CRM: 1 (17%)" in report
@@ -144,4 +144,5 @@ def test_compact_report_only_expands_attention_lines_when_needed():
     assert "Ожидают решения капчи" not in normal
     assert "Внимание:" not in normal
     assert "Ожидают решения капчи: 1" in attention
-    assert "технических ошибок — 1; предупреждений CRM — 2" in attention
+    assert "Повторная проверка: строк — 1" in attention
+    assert "CRM: 2 служебных обновлений не записаны" in attention

@@ -137,7 +137,7 @@ def test_live_run_reports_when_all_rows_are_deferred_by_local_time(tmp_path, set
     assert summary.inspected == 0
     assert summary.time_deferred == 1
     assert summary.stopped_reason.startswith("Отложено по времени")
-    assert "10:00–19:45" in summary.stopped_reason
+    assert "безопасное окно неизвестно" in summary.stopped_reason
     assert phases[-1] == summary.stopped_reason
 
 

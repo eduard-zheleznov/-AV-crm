@@ -12,6 +12,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from avito_crm import __version__
 from avito_crm.config import Settings
@@ -23,6 +24,17 @@ from avito_crm.reporting import format_run_report
 from avito_crm.state import SingleInstanceLock, StateStore, utc_now
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _parse_utc_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or ""))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
 
 CONTROL_MARKER = "AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"
 ANALYTICS_MARKER_V1 = "AVITO CRM — АНАЛИТИКА"
@@ -147,6 +159,8 @@ class CommandState:
     base_captured_time_deferred: int = 0
     base_recovered: int = 0
     base_crm_write_failed: int = 0
+    base_crm_sync_errors: int = 0
+    resume_at: str = ""
     completion_notified: bool = False
     result: dict[str, Any] = field(default_factory=dict)
 
@@ -1283,6 +1297,15 @@ class RemoteController:
                     status="ОЖИДАЕТ",
                     message="На компьютере ещё работает другой запуск; пульт подождёт.",
                 )
+            elif self._state.phase == "waiting_time_window":
+                with self._worker_guard:
+                    message = self._phase_message
+                self.panel.update_active(
+                    self._state,
+                    self._progress,
+                    status="ОЖИДАЕТ ВРЕМЯ",
+                    message=message or "Ожидаем ближайшее безопасное местное время.",
+                )
             else:
                 self.panel.heartbeat()
         else:
@@ -1409,6 +1432,19 @@ class RemoteController:
         if state.stop_requested:
             self._prepare_stopped_result(state)
             return
+        resuming_time_window = state.phase == "waiting_time_window"
+        if resuming_time_window:
+            resume_at = _parse_utc_timestamp(state.resume_at)
+            if resume_at and datetime.now(UTC) < resume_at:
+                with self._worker_guard:
+                    self._phase_message = (
+                        "Ожидаем безопасное местное время; автопродолжение "
+                        f"не ранее {resume_at.astimezone(ZoneInfo('Europe/Moscow')):%H:%M} МСК."
+                    )
+                return
+            state.phase = "claimed"
+            state.resume_at = ""
+            self._save_state(state)
         if state.phase == "claiming":
             self.panel.claim(state)
             state.phase = "claimed"
@@ -1416,10 +1452,33 @@ class RemoteController:
         if state.history_row < 2:
             state.history_row = self.panel.append_history(state)
             self._save_state(state)
-        recovered = replace(
-            self.panel.count_command(state.worksheet, state.command_id),
-            captchas_solved=self._recovered_captchas_solved(state.command_id),
-        )
+        if resuming_time_window:
+            recovered = ProgressSnapshot(
+                created=state.base_created,
+                captured=state.base_captured,
+                duplicates=state.base_duplicates,
+                errors=state.base_errors,
+                invalid=state.base_invalid,
+                inactive=state.base_inactive,
+                unavailable=state.base_unavailable,
+                phone_failed=state.base_phone_failed,
+                retries=state.base_retries,
+                manual_required=state.base_manual_required,
+                captchas_solved=state.base_captchas_solved,
+                processed=state.base_processed,
+                inspected=state.base_inspected,
+                no_answer_synced=state.base_no_answer_synced,
+                crm_sync_errors=state.base_crm_sync_errors,
+                time_deferred=state.base_time_deferred,
+                captured_time_deferred=state.base_captured_time_deferred,
+                recovered=state.base_recovered,
+                crm_write_failed=state.base_crm_write_failed,
+            )
+        else:
+            recovered = replace(
+                self.panel.count_command(state.worksheet, state.command_id),
+                captchas_solved=self._recovered_captchas_solved(state.command_id),
+            )
         state.base_created = recovered.created
         state.base_captured = recovered.captured
         state.base_duplicates = recovered.duplicates
@@ -1438,6 +1497,7 @@ class RemoteController:
         state.base_captured_time_deferred = recovered.captured_time_deferred
         state.base_recovered = recovered.recovered
         state.base_crm_write_failed = recovered.crm_write_failed
+        state.base_crm_sync_errors = recovered.crm_sync_errors
         if state.max_inspected <= 0:
             state.max_inspected = _effective_max_inspected(state.target, 0)
         self._progress = recovered
@@ -1567,7 +1627,7 @@ class RemoteController:
                 processed=state.base_processed + summary.processed,
                 inspected=state.base_inspected + summary.inspected,
                 no_answer_synced=(state.base_no_answer_synced + summary.no_answer_synced),
-                crm_sync_errors=summary.crm_sync_errors,
+                crm_sync_errors=state.base_crm_sync_errors + summary.crm_sync_errors,
                 time_deferred=state.base_time_deferred + summary.time_deferred,
                 captured_time_deferred=(
                     state.base_captured_time_deferred + summary.captured_time_deferred
@@ -1613,9 +1673,16 @@ class RemoteController:
                 progress=self._progress,
             )
         else:
-            self._state.result = self._classify_summary(
-                self._state, result.summary or RunSummary(self._state.command_id, 0)
-            )
+            summary = result.summary or RunSummary(self._state.command_id, 0)
+            if summary.resume_at:
+                self._remember_progress_baseline(self._state)
+                self._state.phase = "waiting_time_window"
+                self._state.resume_at = summary.resume_at
+                with self._worker_guard:
+                    self._phase_message = summary.stopped_reason
+                self._save_state(self._state)
+                return
+            self._state.result = self._classify_summary(self._state, summary)
         self._state.phase = "finalizing"
         self._save_state(self._state)
 
@@ -1669,6 +1736,32 @@ class RemoteController:
             status = "ЗАВЕРШЕНО"
         message = format_run_report(progress, reason=summary.stopped_reason)
         return self._result_dict(state, status=status, message=message, progress=progress)
+
+    def _remember_progress_baseline(self, state: CommandState) -> None:
+        """Persist progress before a time pause so a controller restart cannot lose it."""
+        progress = self._progress
+        for name in (
+            "created",
+            "captured",
+            "duplicates",
+            "errors",
+            "invalid",
+            "inactive",
+            "unavailable",
+            "phone_failed",
+            "retries",
+            "manual_required",
+            "captchas_solved",
+            "processed",
+            "inspected",
+            "no_answer_synced",
+            "time_deferred",
+            "captured_time_deferred",
+            "recovered",
+            "crm_write_failed",
+            "crm_sync_errors",
+        ):
+            setattr(state, f"base_{name}", getattr(progress, name))
 
     @staticmethod
     def _result_dict(

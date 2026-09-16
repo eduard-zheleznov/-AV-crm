@@ -593,7 +593,6 @@ class ChromeExtensionBrowser:
             return snapshot
 
         self._reset_manual_session()
-        retried_manual_probe = False
         while True:
             event = self.bridge.health_probe(status_callback=self._handle_preflight_status)
             if event.status == "manual_required":
@@ -614,12 +613,9 @@ class ChromeExtensionBrowser:
                 if (self.settings.data_dir / "STOP").exists():
                     self._notify_captcha_stopped("https://www.avito.ru/")
                     raise OperatorStopRequested("Ожидание Chrome остановлено оператором")
-                if retried_manual_probe:
-                    raise ManualActionRequired(
-                        str(event.payload.get("reason", "Avito требует ручной проверки"))
-                    )
-                retried_manual_probe = True
-                time.sleep(1.0)
+                # A manual check pauses the command; it is not a failed run.
+                # Keep waiting until Avito accepts the human action or STOP is set.
+                time.sleep(2.0)
                 continue
             if event.status == "cancelled":
                 self._notify_captcha_stopped("https://www.avito.ru/")

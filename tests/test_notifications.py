@@ -568,7 +568,7 @@ def test_crm_sync_warning_does_not_report_a_technical_processing_error():
     )
 
     assert subject == "[Avito CRM] Завершено с предупреждениями"
-    assert "технических ошибок — 0; предупреждений CRM — 3" in body
+    assert "CRM: 3 служебных обновлений не записаны" in body
 
 
 def test_browser_preflight_failure_takes_priority_over_old_crm_warnings():

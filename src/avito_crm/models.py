@@ -105,6 +105,7 @@ class RunSummary:
     recovered: int = 0
     crm_write_failed: int = 0
     stopped_reason: str = ""
+    resume_at: str = ""
 
 
 @dataclass(slots=True)

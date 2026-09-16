@@ -121,7 +121,7 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
             f"({_percent(manual_visible, unopened)})"
         ),
         (
-            f"- Технические ошибки загрузки: {technical_unopened} "
+            f"- Ссылки, отложенные для безопасного повтора: {technical_unopened} "
             f"({_percent(technical_unopened, unopened)})"
         ),
         (
@@ -172,13 +172,19 @@ def format_run_report(metrics: RunReportMetrics, *, reason: str = "") -> str:
     if time_deferred:
         lines.append(
             f"Отложено по местному времени: {time_deferred} "
-            "(в CRM не передавались; будут обработаны в безопасное окно)"
+            "(в CRM не передавались; при активном пульте продолжатся автоматически)"
         )
     if manual_required:
         lines.append(f"Ожидают решения капчи: {manual_required}")
-    if errors or crm_sync_errors:
+    if errors:
         lines.append(
-            f"Внимание: технических ошибок — {errors}; предупреждений CRM — {crm_sync_errors}."
+            f"Повторная проверка: строк — {errors}; они не завершились штатно; "
+            "это не обязательно сбой компьютера."
+        )
+    if crm_sync_errors:
+        lines.append(
+            f"CRM: {crm_sync_errors} служебных обновлений не записаны; "
+            "созданные лиды не отменяются."
         )
     lines.extend(("", f"Итог: {result}"))
     return "\n".join(lines)

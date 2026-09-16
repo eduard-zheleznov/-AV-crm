@@ -221,6 +221,12 @@ class QueueSource(ABC):
     def local_window_detail(self, item: QueueItem, *, now: datetime | None = None) -> str:
         return "ограничение местного времени для этого источника не задано"
 
+    def next_local_window_open_at(
+        self, items: list[QueueItem], *, now: datetime | None = None
+    ) -> datetime | None:
+        """Earliest safe resume time, or ``None`` when the source cannot know it."""
+        return None
+
 
 class XlsxQueueSource(QueueSource):
     def __init__(
@@ -650,6 +656,34 @@ class GoogleSheetsQueueSource(QueueSource):
             f"местное время {local:%H:%M}, разрешено "
             f"{self.local_call_start:%H:%M}–{self.local_lead_cutoff:%H:%M}"
         )
+
+    def next_local_window_open_at(
+        self, items: list[QueueItem], *, now: datetime | None = None
+    ) -> datetime | None:
+        if not self.timezone_guard_enabled:
+            return now or datetime.now(ZoneInfo("Europe/Moscow"))
+        moscow = ZoneInfo("Europe/Moscow")
+        current = now or datetime.now(moscow)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=moscow)
+        current = current.astimezone(moscow)
+        candidates: list[datetime] = []
+        for item in items:
+            raw_offset = item.values.get(_MOSCOW_OFFSET)
+            if raw_offset is None:
+                continue
+            offset = _safe_int(raw_offset)
+            local_now = current + timedelta(hours=offset)
+            local_start = datetime.combine(local_now.date(), self.local_call_start, tzinfo=moscow)
+            local_cutoff = datetime.combine(local_now.date(), self.local_lead_cutoff, tzinfo=moscow)
+            if local_now < local_start:
+                candidate_local = local_start
+            elif local_now <= local_cutoff:
+                candidate_local = local_now
+            else:
+                candidate_local = local_start + timedelta(days=1)
+            candidates.append(candidate_local - timedelta(hours=offset))
+        return min(candidates, default=None)
 
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         from gspread.utils import rowcol_to_a1

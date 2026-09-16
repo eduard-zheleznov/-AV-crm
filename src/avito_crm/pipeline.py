@@ -13,6 +13,7 @@ from avito_crm.chrome_extension import ChromeExtensionBrowser
 from avito_crm.config import Settings
 from avito_crm.crm import LpTrackerClient
 from avito_crm.errors import (
+    BrowserInfrastructureError,
     BrowserOperationError,
     ClickNotEffectiveError,
     InactiveListingError,
@@ -34,6 +35,38 @@ from avito_crm.queue import QueueSource
 from avito_crm.state import StateStore, utc_now
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _browser_preflight_message(exc: Exception, *, initial: bool) -> str:
+    if isinstance(exc, ManualActionRequired):
+        return (
+            "Очередь ожидает ручной проверки Avito в управляемом окне инкогнито. "
+            "Нажмите «Продолжить» и решите проверку; продолжение произойдёт автоматически."
+        )
+    stage = "Предстартовая проверка" if initial else "Проверка перед следующей строкой"
+    if isinstance(exc, BrowserInfrastructureError):
+        return (
+            f"{stage}: Chrome не получил ответ расширения. Это не капча: проверьте, "
+            "что Avito CRM включено и разрешено в инкогнито, затем повторите запуск."
+        )
+    return f"{stage} Chrome/расширения не пройдена: {_safe_error(exc)}"
+
+
+def _defer_until_local_window(
+    summary: RunSummary, source: QueueSource, items: list[QueueItem]
+) -> None:
+    resume_at = source.next_local_window_open_at(items)
+    if resume_at is None:
+        summary.stopped_reason = (
+            "Отложено по времени: безопасное окно неизвестно — проверьте «План загрузки» "
+            "и значение «Δ к МСК»."
+        )
+        return
+    summary.resume_at = resume_at.astimezone(UTC).isoformat()
+    summary.stopped_reason = (
+        "Отложено по времени: для оставшихся строк сейчас нет безопасного местного окна "
+        f"10:00–19:45. Автопродолжение не ранее {resume_at:%H:%M} МСК."
+    )
 
 
 class Pipeline:
@@ -180,10 +213,7 @@ class Pipeline:
                             self._report_phase(phase, summary.stopped_reason)
                             return summary
                         except (BrowserOperationError, ManualActionRequired) as exc:
-                            summary.stopped_reason = (
-                                "Предстартовая проверка Chrome/расширения не пройдена: "
-                                f"{_safe_error(exc)}"
-                            )
+                            summary.stopped_reason = _browser_preflight_message(exc, initial=True)
                             LOGGER.error(summary.stopped_reason)
                             self._report_phase(phase, summary.stopped_reason)
                             return summary
@@ -220,10 +250,7 @@ class Pipeline:
                         self._report_progress(progress, summary, "")
                     if not eligible_items:
                         if mode_eligible and self.live:
-                            summary.stopped_reason = (
-                                "Отложено по времени: для всех доступных строк "
-                                "сейчас нет безопасного местного окна 10:00–19:45"
-                            )
+                            _defer_until_local_window(summary, self.source, mode_eligible)
                             LOGGER.info(summary.stopped_reason)
                             self._report_phase(phase, summary.stopped_reason)
                         break
@@ -263,9 +290,8 @@ class Pipeline:
                                 self.source.is_local_window_open(remaining)
                                 for remaining in eligible_items[item_index + 1 :]
                             ):
-                                summary.stopped_reason = (
-                                    "Отложено по времени: для всех оставшихся строк "
-                                    "сейчас нет безопасного местного окна 10:00–19:45"
+                                _defer_until_local_window(
+                                    summary, self.source, eligible_items[item_index:]
                                 )
                                 LOGGER.info(summary.stopped_reason)
                                 self._report_phase(phase, summary.stopped_reason)
@@ -286,9 +312,8 @@ class Pipeline:
                                 should_stop = True
                                 break
                             except (BrowserOperationError, ManualActionRequired) as exc:
-                                summary.stopped_reason = (
-                                    "Chrome/расширение не восстановились перед следующей "
-                                    f"строкой: {_safe_error(exc)}"
+                                summary.stopped_reason = _browser_preflight_message(
+                                    exc, initial=False
                                 )
                                 LOGGER.error(summary.stopped_reason)
                                 self._report_phase(phase, summary.stopped_reason)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -176,6 +177,21 @@ class InstantController(RemoteController):
             captured=remaining,
             created=remaining,
             stopped_reason="Достигнут заданный лимит",
+        )
+        self._progress_callback(state, summary, "")
+        with self._worker_guard:
+            self._worker_result = WorkerResult(kind="finished", summary=summary)
+
+
+class TimeDeferredController(RemoteController):
+    def _run_worker(self, state, remaining, remaining_inspected):
+        del remaining, remaining_inspected
+        summary = RunSummary(
+            run_id=state.command_id,
+            requested=state.target,
+            time_deferred=1,
+            stopped_reason="Отложено по времени: ждём безопасное окно.",
+            resume_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
         )
         self._progress_callback(state, summary, "")
         with self._worker_guard:
@@ -632,6 +648,31 @@ def test_remote_run_reports_time_deferred_status(settings):
 
     assert result["status"] == "ОТЛОЖЕНО ПО ВРЕМЕНИ"
     assert "10:00–19:45" in result["message"]
+
+
+def test_remote_command_waits_and_keeps_state_for_known_local_resume(settings):
+    panel = FakePanel(PanelCommand(False, False, 1, "Лист1", False))
+    controller = TimeDeferredController(settings, panel)
+    controller._state = CommandState(
+        command_id="cmd-auto-resume",
+        target=1,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="claimed",
+        started_at="2026-08-01T18:19:40+00:00",
+        history_row=2,
+    )
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller._state is not None
+    assert controller._state.phase == "waiting_time_window"
+    assert controller._state.resume_at
+    assert panel.finishes == []
+    assert panel.active_updates[-1][2]["status"] == "ОЖИДАЕТ ВРЕМЯ"
 
 
 def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):

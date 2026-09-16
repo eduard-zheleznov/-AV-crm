@@ -23,7 +23,6 @@ from avito_crm.errors import (
     BrowserInfrastructureError,
     BrowserOperationError,
     ClickNotEffectiveError,
-    ManualActionRequired,
     OperatorStopRequested,
     PageNotReadyError,
     PhoneNotFoundError,
@@ -428,13 +427,18 @@ def test_extension_browser_caches_a_successful_active_probe(settings):
     assert bridge.probe_calls == 1
 
 
-def test_extension_browser_never_treats_captcha_as_healthy(settings):
+def test_extension_browser_waits_for_captcha_until_operator_stops(settings, monkeypatch):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
     browser.bridge = _ProbeBridge(
         ExtensionEvent("result", "manual_required", {"reason": "ручная проверка Avito"})
     )
+    monkeypatch.setattr(
+        chrome_extension_module.time,
+        "sleep",
+        lambda _seconds: (settings.data_dir / "STOP").touch(),
+    )
 
-    with browser, pytest.raises(ManualActionRequired, match="ручная проверка"):
+    with browser, pytest.raises(OperatorStopRequested, match="оператором"):
         browser.preflight(force=True)
 
 
