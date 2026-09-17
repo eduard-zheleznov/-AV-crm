@@ -541,7 +541,7 @@ def test_router_default_delivery_order_is_max_email_telegram(settings):
         router.close()
 
 
-def test_router_suppresses_repeated_technical_alert_until_progress_recovers(settings):
+def test_router_suppresses_only_repeated_empty_queue_notice_until_progress(settings):
     delivered = []
 
     class Backend:
@@ -555,17 +555,15 @@ def test_router_suppresses_repeated_technical_alert_until_progress_recovers(sett
         def close(self):
             return None
 
-    technical = RunSummary(
-        run_id="first", requested=1, errors=1, stopped_reason="Очередь обработана"
-    )
-    repeat = RunSummary(run_id="second", requested=1, errors=1, stopped_reason="Очередь обработана")
+    empty = RunSummary(run_id="first", requested=0, stopped_reason="Очередь обработана")
+    repeat = RunSummary(run_id="second", requested=0, stopped_reason="Очередь обработана")
     recovered = RunSummary(
-        run_id="recovered", requested=1, processed=1, stopped_reason="Очередь обработана"
+        run_id="recovered", requested=0, processed=1, stopped_reason="Очередь обработана"
     )
 
     assert (
         NotificationRouter(settings, backends=[Backend()]).send_run_completed(
-            summary=technical, source_name="google:test", mode="full", live=True
+            summary=empty, source_name="google:test", mode="full", live=True
         )
         == 1
     )
@@ -588,6 +586,37 @@ def test_router_suppresses_repeated_technical_alert_until_progress_recovers(sett
         == 1
     )
     assert delivered == ["first", "recovered", "second"]
+
+
+def test_router_never_suppresses_repeated_technical_alerts(settings):
+    delivered = []
+
+    class Backend:
+        enabled = True
+        channel_name = "Test"
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs["summary"].run_id)
+            return 1
+
+    technical = RunSummary(
+        run_id="first", requested=0, errors=1, stopped_reason="Очередь обработана"
+    )
+    repeat = RunSummary(run_id="second", requested=0, errors=1, stopped_reason="Очередь обработана")
+
+    assert (
+        NotificationRouter(settings, backends=[Backend()]).send_run_completed(
+            summary=technical, source_name="google:test", mode="full", live=True
+        )
+        == 1
+    )
+    assert (
+        NotificationRouter(settings, backends=[Backend()]).send_run_completed(
+            summary=repeat, source_name="google:test", mode="full", live=True
+        )
+        == 1
+    )
+    assert delivered == ["first", "second"]
 
 
 def test_technical_completion_reaches_backup_even_if_routine_backup_is_disabled(settings):

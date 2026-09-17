@@ -21,7 +21,7 @@ from avito_crm.models import RunSummary
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
-TECHNICAL_ALERT_COOLDOWN_SECONDS = 12 * 60 * 60
+EMPTY_QUEUE_ALERT_COOLDOWN_SECONDS = 24 * 60 * 60
 TELEGRAM_MESSAGE_LIMIT = 4096
 MAX_MESSAGE_LIMIT = 4000
 MAX_ROOT_CA_RESOURCE = "certs/russian_trusted_root_ca.pem"
@@ -886,15 +886,14 @@ class EmailNotifier:
         return smtp
 
 
-class CompletionAlertGate:
-    """Persistently suppress repeated identical technical alerts from the pult."""
+class EmptyQueueAlertGate:
+    """Persistently suppress the routine notice that an empty queue was checked."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
 
     def allow(self, summary: RunSummary) -> bool:
-        category = _technical_alert_category(summary)
-        if not category:
+        if not _is_empty_queue_completion(summary):
             if summary.processed or summary.captured or summary.created:
                 self._clear()
             return True
@@ -902,11 +901,11 @@ class CompletionAlertGate:
         now = time.time()
         previous = self._read()
         if (
-            previous.get("category") == category
-            and now - float(previous.get("sent_at", 0) or 0) < TECHNICAL_ALERT_COOLDOWN_SECONDS
+            previous.get("category") == "empty_queue"
+            and now - float(previous.get("sent_at", 0) or 0) < EMPTY_QUEUE_ALERT_COOLDOWN_SECONDS
         ):
             return False
-        self._write({"category": category, "sent_at": now})
+        self._write({"category": "empty_queue", "sent_at": now})
         return True
 
     def _read(self) -> dict[str, object]:
@@ -943,7 +942,7 @@ class NotificationRouter:
             else [MaxNotifier(settings), EmailNotifier(settings), TelegramNotifier(settings)]
         )
         self._unavailable: set[int] = set()
-        self._completion_alerts = CompletionAlertGate(
+        self._empty_queue_alerts = EmptyQueueAlertGate(
             settings.data_dir / "notification-alert-state.json"
         )
 
@@ -1020,8 +1019,8 @@ class NotificationRouter:
 
     def send_run_completed(self, **kwargs: object) -> int:
         summary = kwargs.get("summary")
-        if isinstance(summary, RunSummary) and not self._completion_alerts.allow(summary):
-            LOGGER.info("Повторное техническое уведомление подавлено до изменения состояния")
+        if isinstance(summary, RunSummary) and not self._empty_queue_alerts.allow(summary):
+            LOGGER.info("Повторное уведомление о пустой очереди подавлено на 24 часа")
             return 0
         return self._dispatch("send_run_completed", **kwargs)
 
@@ -1143,6 +1142,29 @@ def _technical_alert_category(summary: RunSummary) -> str:
     if summary.errors:
         return "row_errors"
     return ""
+
+
+def _is_empty_queue_completion(summary: RunSummary) -> bool:
+    """Return true only for a harmless full run that found nothing to process."""
+    reason = str(summary.stopped_reason or "").casefold()
+    return (
+        summary.requested == 0
+        and reason.startswith("очередь обработана")
+        and not any(
+            (
+                summary.processed,
+                summary.captured,
+                summary.created,
+                summary.errors,
+                summary.invalid,
+                summary.inactive,
+                summary.unavailable,
+                summary.phone_failed,
+                summary.manual_required,
+                summary.crm_sync_errors,
+            )
+        )
+    )
 
 
 def _completion_recipients_for_summary(
