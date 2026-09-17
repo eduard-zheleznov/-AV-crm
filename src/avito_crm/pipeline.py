@@ -27,7 +27,14 @@ from avito_crm.errors import (
     PhoneNotFoundError,
     SourceError,
 )
-from avito_crm.models import TERMINAL_STATUSES, ItemStatus, QueueItem, QueuePatch, RunSummary
+from avito_crm.models import (
+    TERMINAL_STATUSES,
+    CrmDestination,
+    ItemStatus,
+    QueueItem,
+    QueuePatch,
+    RunSummary,
+)
 from avito_crm.notifications import NotificationRouter
 from avito_crm.ocr import PhoneOcr
 from avito_crm.phone import canonical_avito_url, mask_phone, normalize_phone
@@ -129,12 +136,14 @@ class Pipeline:
             with ExitStack() as stack:
                 crm: LpTrackerClient | None = None
                 destination = None
+                listing_destination = None
                 browser: AvitoBrowser | ChromeExtensionBrowser | None = None
 
                 if self.mode in {"crm", "full"} and self.live:
                     self._report_phase(phase, "Подготовка CRM: подключаемся к LPTracker.")
                     crm = stack.enter_context(LpTrackerClient(self.settings))
                     destination = crm.resolve_destination()
+                    listing_destination = crm.resolve_listing_destination(destination)
                     LOGGER.info(
                         "CRM готова: проект=%s, поле=%s, значение=%s",
                         destination.project_name,
@@ -146,6 +155,7 @@ class Pipeline:
                             crm,
                             destination.project_id,
                             summary,
+                            listing_destination=listing_destination,
                             phase=phase,
                         ):
                             return summary
@@ -526,6 +536,7 @@ class Pipeline:
                                     phone,
                                     canonical_url,
                                     destination,
+                                    listing_destination=listing_destination,
                                     force_create=repeat_flow or recreate_flow,
                                     funnel_id=recreate_funnel_id or repeat_funnel_id,
                                     repeat=repeat_flow,
@@ -960,6 +971,7 @@ class Pipeline:
         project_id: int,
         summary: RunSummary,
         *,
+        listing_destination: CrmDestination,
         phase: Callable[[str], None] | None = None,
     ) -> bool:
         """Refresh funnel stages and return ``True`` when an operator requested stop."""
@@ -1019,7 +1031,7 @@ class Pipeline:
                 )
                 continue
             try:
-                crm.add_listing_comment(repeat_lead_id, item.url)
+                crm.set_listing_url(repeat_lead_id, listing_destination, item.url)
                 self._update_metadata(
                     item,
                     status=ItemStatus.DONE,
@@ -1030,7 +1042,7 @@ class Pipeline:
             except Exception as exc:
                 summary.crm_sync_errors += 1
                 LOGGER.warning(
-                    "Строка %s: не удалось дописать ссылку в комментарий CRM: %s",
+                    "Строка %s: не удалось записать ссылку Avito в поле CRM: %s",
                     item.row_id,
                     exc,
                 )
@@ -1136,7 +1148,7 @@ class Pipeline:
                 current_error = str(item.values.get(self.source.columns.error, "") or "")
                 if "комментар" in self._normalized_text(current_error):
                     try:
-                        crm.add_listing_comment(lead_id, item.url)
+                        crm.set_listing_url(lead_id, listing_destination, item.url)
                     except Exception as exc:
                         summary.crm_sync_errors += 1
                         self._update_metadata(

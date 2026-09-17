@@ -307,6 +307,13 @@ class StateStore:
         row = self.connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         return dict(row) if row else None
 
+    def items_for_run(self, run_id: str) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM items WHERE run_id=? AND error <> '' ORDER BY row_id ASC",
+            (run_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def totals(self) -> dict[str, int]:
         rows = self.connection.execute(
             "SELECT status, COUNT(*) AS count FROM items GROUP BY status"

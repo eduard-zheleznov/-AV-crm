@@ -11,6 +11,8 @@ from avito_crm.remote_control import (
     ANALYTICS_MARKER,
     ANALYTICS_WORKSHEET,
     CAPTCHA_RETRY_HISTORY_HEADERS,
+    DIAGNOSTICS_HEADERS,
+    DIAGNOSTICS_WORKSHEET,
     HISTORY_HEADERS,
     LEGACY_HISTORY_HEADERS,
     PREVIOUS_HISTORY_HEADERS,
@@ -68,6 +70,9 @@ class MatrixSheet:
 
     def get_all_values(self):
         return [row[:] for row in self.values]
+
+    def append_rows(self, values, **_kwargs):
+        self.values.extend([list(row) for row in values])
 
 
 def _range_bounds(value):
@@ -274,6 +279,31 @@ def test_existing_user_control_sheet_is_never_overwritten(settings):
         panel.ensure_layout()
 
     assert existing.values == [["Мои важные данные"]]
+
+
+def test_diagnostics_sheet_records_actionable_row_errors(settings):
+    spreadsheet = FakeSpreadsheet()
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+    panel.ensure_layout()
+    state = CommandState("cmd-diagnostic", 1, "Лист1", False, "finalizing", "2026-01-01")
+
+    written = panel.append_diagnostics(
+        state,
+        [
+            {
+                "updated_at": "2026-01-01T10:00:00+00:00",
+                "row_id": "12",
+                "canonical_url": "https://www.avito.ru/moskva/item_123456789",
+                "status": "retry_technical",
+                "error": "Chrome did not respond",
+            }
+        ],
+    )
+
+    sheet = spreadsheet.worksheets[DIAGNOSTICS_WORKSHEET]
+    assert written == 1
+    assert tuple(sheet.values[0]) == DIAGNOSTICS_HEADERS
+    assert sheet.values[1][7] == "Отправить данные для техпроверки"
 
 
 def test_setup_creates_migrated_history_and_period_analytics(settings):

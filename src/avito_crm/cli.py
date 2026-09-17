@@ -439,6 +439,7 @@ def _doctor(args: argparse.Namespace, settings: Settings) -> int:
     if args.online_crm:
         with LpTrackerClient(settings) as crm:
             destination = crm.resolve_destination()
+            listing_destination = crm.resolve_listing_destination(destination)
         checks.append(
             (
                 "LPTracker",
@@ -446,6 +447,7 @@ def _doctor(args: argparse.Namespace, settings: Settings) -> int:
                 f"значение={settings.lptracker_field_value}",
             )
         )
+        checks.append(("Ссылка Avito", f"поле={listing_destination.field_name}"))
     print("Проверка окружения:")
     for name, detail in checks:
         print(f"  OK  {name}: {detail}")
@@ -456,10 +458,12 @@ def _doctor(args: argparse.Namespace, settings: Settings) -> int:
 def _crm_check(settings: Settings) -> int:
     with LpTrackerClient(settings) as crm:
         destination = crm.resolve_destination()
+        listing_destination = crm.resolve_listing_destination(destination)
     print("CRM настроена корректно; данные не изменялись:")
     print(f"  Проект: {destination.project_id} — {destination.project_name}")
     print(f"  Поле: {destination.field_id} — {destination.field_name} ({destination.field_type})")
     print(f"  Значение: {settings.lptracker_field_value}")
+    print(f"  Поле ссылки Avito: {listing_destination.field_id} — {listing_destination.field_name}")
     return 0
 
 

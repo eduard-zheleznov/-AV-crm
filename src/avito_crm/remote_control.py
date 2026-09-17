@@ -36,10 +36,32 @@ def _parse_utc_timestamp(value: str) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _diagnostic_action(status: str, detail: str) -> str:
+    normalized = f"{status} {detail}".casefold()
+    if "manual" in normalized or "капч" in normalized:
+        return "Разгадать капчу; затем ничего не запускать"
+    if "browser" in normalized or "chrome" in normalized or "расширен" in normalized:
+        return "Отправить данные для техпроверки"
+    if "inactive" in normalized or "неактив" in normalized:
+        return "Ничего: объявление снято или недоступно"
+    return "Отправить данные для техпроверки"
+
+
 CONTROL_MARKER = "AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"
 ANALYTICS_MARKER_V1 = "AVITO CRM — АНАЛИТИКА"
 ANALYTICS_MARKER = "AVITO CRM — АНАЛИТИКА v2"
 ANALYTICS_WORKSHEET = "Аналитика"
+DIAGNOSTICS_WORKSHEET = "Диагностика"
+DIAGNOSTICS_HEADERS = (
+    "Время",
+    "Команда ID",
+    "Лист очереди",
+    "Строка",
+    "Ссылка Avito",
+    "Статус",
+    "Что произошло",
+    "Что делать",
+)
 LEGACY_HISTORY_HEADERS = (
     "Команда ID",
     "Лимит",
@@ -162,6 +184,7 @@ class CommandState:
     base_crm_sync_errors: int = 0
     resume_at: str = ""
     completion_notified: bool = False
+    diagnostics_recorded: bool = False
     result: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -211,6 +234,7 @@ class GoogleControlPanel:
         self.control: Any | None = None
         self.history: Any | None = None
         self.analytics: Any | None = None
+        self.diagnostics: Any | None = None
         self._analytics_period: int | None = None
 
     @classmethod
@@ -242,6 +266,9 @@ class GoogleControlPanel:
             self.settings.google_history_worksheet, rows=1000, cols=len(HISTORY_HEADERS)
         )
         self.analytics = self._worksheet_or_create(ANALYTICS_WORKSHEET, rows=110, cols=8)
+        self.diagnostics = self._worksheet_or_create(
+            DIAGNOSTICS_WORKSHEET, rows=1000, cols=len(DIAGNOSTICS_HEADERS)
+        )
         try:
             marker = self._cell(self.control.get("A1:F12"), 1, 1)
             if marker != CONTROL_MARKER:
@@ -287,6 +314,14 @@ class GoogleControlPanel:
                 )
             self._format_history()
             self._backfill_history_dates()
+            diagnostic_values = self.diagnostics.get("A1:H1")
+            diagnostic_headers = tuple(diagnostic_values[0]) if diagnostic_values else ()
+            if diagnostic_headers and diagnostic_headers != DIAGNOSTICS_HEADERS:
+                raise SourceError(f"Лист {DIAGNOSTICS_WORKSHEET!r} уже занят другими данными.")
+            if diagnostic_headers != DIAGNOSTICS_HEADERS:
+                self.diagnostics.update(
+                    [list(DIAGNOSTICS_HEADERS)], "A1:H1", value_input_option="RAW"
+                )
             analytics_marker = self._cell(self.analytics.get("A1:H2"), 1, 1)
             if analytics_marker and analytics_marker not in {
                 ANALYTICS_MARKER_V1,
@@ -395,6 +430,31 @@ class GoogleControlPanel:
         self._batch_control(
             {"E8": utc_now(), "E11": _computer_name(self.settings), "E12": __version__}
         )
+
+    def append_diagnostics(self, state: CommandState, items: list[dict[str, Any]]) -> int:
+        if not items:
+            return 0
+        diagnostics = self.diagnostics
+        if diagnostics is None:
+            raise SourceError("Лист «Диагностика» не подготовлен")
+        values = []
+        for item in items:
+            status = str(item.get("status", "") or "")
+            detail = str(item.get("error", "") or "")[:500]
+            values.append(
+                [
+                    str(item.get("updated_at", "") or utc_now()),
+                    state.command_id,
+                    state.worksheet,
+                    str(item.get("row_id", "") or ""),
+                    str(item.get("canonical_url", "") or ""),
+                    status,
+                    detail,
+                    _diagnostic_action(status, detail),
+                ]
+            )
+        diagnostics.append_rows(values, value_input_option="RAW")
+        return len(values)
 
     def append_history(self, state: CommandState) -> int:
         history = self._require_history()
@@ -1420,6 +1480,7 @@ class RemoteController:
             self.settings.google_control_worksheet.casefold(),
             self.settings.google_history_worksheet.casefold(),
             ANALYTICS_WORKSHEET.casefold(),
+            DIAGNOSTICS_WORKSHEET.casefold(),
         }
         if not command.worksheet.strip() or command.worksheet.casefold() in reserved:
             self.panel.reject_start("Укажите отдельный лист очереди, например «Лист1».")
@@ -1801,6 +1862,19 @@ class RemoteController:
     def _finalize_remote(self) -> None:
         if self._state is None:
             return
+        if not self._state.diagnostics_recorded:
+            try:
+                with StateStore(self.settings.state_db) as store:
+                    items = store.items_for_run(self._state.command_id)
+                self.panel.append_diagnostics(self._state, items)
+                self._state.diagnostics_recorded = True
+                self._save_state(self._state)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Не удалось записать диагностику команды %s: %s",
+                    self._state.command_id,
+                    exc,
+                )
         self.panel.finish(self._state)
         self._notify_remote_completion(self._state)
         LOGGER.info(

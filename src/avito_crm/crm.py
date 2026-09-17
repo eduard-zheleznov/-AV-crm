@@ -6,6 +6,7 @@ import threading
 import time
 from collections.abc import Iterable
 from contextlib import suppress
+from dataclasses import replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -183,6 +184,17 @@ class LpTrackerClient:
             field_value=value,
         )
 
+    def resolve_listing_destination(self, destination: CrmDestination) -> CrmDestination:
+        listing = self.resolve_custom_destination(
+            destination.project_id,
+            self.settings.lptracker_listing_field_name,
+            "",
+            project_name=destination.project_name,
+        )
+        if listing.field_id == destination.field_id:
+            raise ConfigurationError("Поле ссылки Avito и поле тега CRM не должны совпадать")
+        return listing
+
     def _select_project(self, projects: list[dict[str, Any]]) -> dict[str, Any]:
         if self.settings.lptracker_project_id:
             matches = [
@@ -335,6 +347,15 @@ class LpTrackerClient:
             json={"custom": {str(destination.field_id): destination.field_value}},
         )
 
+    def set_listing_url(
+        self, lead_id: str | int, listing_destination: CrmDestination, listing_url: str
+    ) -> None:
+        canonical_url = canonical_avito_url(listing_url)
+        self.update_lead_custom(
+            lead_id,
+            replace(listing_destination, field_value=canonical_url),
+        )
+
     def set_lead_funnel(self, lead_id: str | int, funnel_id: int) -> None:
         self._request(
             "PUT",
@@ -438,6 +459,7 @@ class LpTrackerClient:
         listing_url: str,
         destination: CrmDestination,
         *,
+        listing_destination: CrmDestination | None = None,
         force_create: bool = False,
         funnel_id: int | None = None,
         repeat: bool = False,
@@ -480,9 +502,12 @@ class LpTrackerClient:
                 continue
             detail = "Ранее созданный лид для объявления восстановлен"
             try:
-                self.add_listing_comment(existing_lead_id, canonical_url)
+                if listing_destination is not None:
+                    self.set_listing_url(existing_lead_id, listing_destination, canonical_url)
+                else:
+                    self.add_listing_comment(existing_lead_id, canonical_url)
             except CrmError as exc:
-                detail += f"; ссылку в комментарий записать не удалось: {exc}"
+                detail += f"; ссылку Avito записать не удалось: {exc}"
                 LOGGER.warning(
                     "Не удалось восстановить комментарий лида %s: %s",
                     existing_lead_id,
@@ -530,7 +555,14 @@ class LpTrackerClient:
         payload: dict[str, Any] = {
             "name": lead_name,
             "callback": False,
-            "custom": {str(destination.field_id): destination.field_value},
+            "custom": {
+                str(destination.field_id): destination.field_value,
+                **(
+                    {str(listing_destination.field_id): canonical_url}
+                    if listing_destination is not None
+                    else {}
+                ),
+            },
             "view": {"source": "Avito", "campaign": "Avito CRM Pipeline"},
         }
         if funnel_id is not None:
@@ -558,11 +590,12 @@ class LpTrackerClient:
                 f"; совпадение по номеру старше "
                 f"{self.settings.crm_duplicate_window_days:g} дней и не блокирует новое объявление"
             )
-        try:
-            self.add_listing_comment(result["id"], canonical_url)
-        except CrmError as exc:
-            detail = f"Лид создан; ссылку в комментарий записать не удалось: {exc}"
-            LOGGER.warning("Лид %s создан без комментария со ссылкой: %s", result["id"], exc)
+        if listing_destination is None:
+            try:
+                self.add_listing_comment(result["id"], canonical_url)
+            except CrmError as exc:
+                detail = f"Лид создан; ссылку Avito записать не удалось: {exc}"
+                LOGGER.warning("Лид %s создан без ссылки Avito: %s", result["id"], exc)
         returned_contact = result.get("contact_id")
         if not returned_contact and isinstance(result.get("contact"), dict):
             returned_contact = result["contact"].get("id")

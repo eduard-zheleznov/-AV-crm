@@ -35,7 +35,8 @@ def test_crm_resolves_category_and_creates_lead(settings):
                         "type": "cats",
                         "is_multi_select": 1,
                         "categories": [{"name": "Сбор № лпр (Ав, ремонт кв. под ключ)"}],
-                    }
+                    },
+                    {"id": 43, "name": "Продажи (комментарии)", "type": "text"},
                 ]
             )
         if path == "/contact/search":
@@ -43,14 +44,12 @@ def test_crm_resolves_category_and_creates_lead(settings):
             return _success([])
         if path == "/lead":
             body = json.loads(request.content)
-            assert body["custom"] == {"42": ["Сбор № лпр (Ав, ремонт кв. под ключ)"]}
+            assert body["custom"] == {
+                "42": ["Сбор № лпр (Ав, ремонт кв. под ключ)"],
+                "43": "https://www.avito.ru/moskva/item_123456789",
+            }
             assert body["contact"]["details"] == [{"type": "phone", "data": "+79991234567"}]
             return _success({"id": 777, "contact_id": 555})
-        if path == "/lead/777/comment":
-            assert json.loads(request.content) == {
-                "text": "https://www.avito.ru/moskva/item_123456789"
-            }
-            return _success(None)
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
     transport = httpx.MockTransport(handler)
@@ -58,15 +57,18 @@ def test_crm_resolves_category_and_creates_lead(settings):
     with LpTrackerClient(settings, http) as crm:
         crm.rate_limiter = RateLimiter(100_000)
         destination = crm.resolve_destination()
+        listing_destination = crm.resolve_listing_destination(destination)
         result = crm.create_for_phone(
             "+79991234567",
             "https://www.avito.ru/moskva/item_123456789",
             destination,
+            listing_destination=listing_destination,
         )
 
     assert destination.field_id == 42
     assert result.status == ItemStatus.DONE
     assert result.lead_id == "777"
+    assert listing_destination.field_id == 43
     assert len(requests) == 6
 
 
@@ -401,7 +403,7 @@ def test_created_lead_stays_successful_after_comment_retries_are_exhausted(setti
 
     assert result.status == ItemStatus.DONE
     assert result.lead_id == "779"
-    assert "ссылку в комментарий записать не удалось" in result.detail
+    assert "ссылку Avito записать не удалось" in result.detail
     assert "Invalid lead ID" in result.detail
     assert delays == [1.0, 2.0, 4.0]
     assert [request.url.path for request in requests].count("/lead") == 1

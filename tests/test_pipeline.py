@@ -634,6 +634,9 @@ class FakeRepeatCrm:
     def resolve_destination(self):
         return CrmDestination(1, "Progress Pro 2.0", 42, "Тег", "cats", "Сбор")
 
+    def resolve_listing_destination(self, _destination):
+        return CrmDestination(1, "Progress Pro 2.0", 43, "Продажи (комментарии)", "text", "")
+
     def list_funnel_steps(self, _project_id):
         return [
             {"id": 11, "name": "Новый Лид"},
@@ -670,6 +673,11 @@ class FakeRepeatCrm:
         )
 
     def add_listing_comment(self, lead_id, listing_url):
+        if self.__class__.comment_error is not None:
+            raise self.__class__.comment_error
+        self.comments.append((str(lead_id), listing_url))
+
+    def set_listing_url(self, lead_id, _destination, listing_url):
         if self.__class__.comment_error is not None:
             raise self.__class__.comment_error
         self.comments.append((str(lead_id), listing_url))
@@ -734,6 +742,9 @@ def test_autoresponder_creates_exactly_one_forced_repeat_lead(tmp_path, settings
         "funnel_id": 88,
         "repeat": True,
         "moscow_offset": 0,
+        "listing_destination": CrmDestination(
+            1, "Progress Pro 2.0", 43, "Продажи (комментарии)", "text", ""
+        ),
     }
     assert source.item.status == ItemStatus.DONE
     assert source.item.values[source.columns.crm_lead_id] == "111"

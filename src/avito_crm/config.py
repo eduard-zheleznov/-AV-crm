@@ -131,6 +131,7 @@ class Settings:
     lptracker_project_name: str
     lptracker_field_name: str
     lptracker_field_value: str
+    lptracker_listing_field_name: str
     lptracker_service_name: str
     lptracker_autoresponder_funnel_name: str
     lptracker_no_answer_funnel_name: str
@@ -293,6 +294,9 @@ class Settings:
             ).strip(),
             lptracker_field_value=os.getenv(
                 "LPTRACKER_FIELD_VALUE", "Сбор № лпр (Ав, ремонт кв. под ключ)"
+            ).strip(),
+            lptracker_listing_field_name=os.getenv(
+                "LPTRACKER_LISTING_FIELD_NAME", "Продажи (комментарии)"
             ).strip(),
             lptracker_service_name=os.getenv(
                 "LPTRACKER_SERVICE_NAME", "Avito CRM Pipeline"
