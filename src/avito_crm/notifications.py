@@ -1011,8 +1011,8 @@ def _run_completion_message(
         )
     )
     if summary.errors or reason_lower.startswith("ошибка запуска") or technical_stop:
-        headline = "⚠️ Запуск завершён с техническими ошибками"
-        subject = "[Avito CRM] Завершено с техническими ошибками"
+        headline = "⚠️ Требуется техпроверка"
+        subject = "[Avito CRM] Требуется техпроверка"
     elif summary.manual_required:
         headline = "⏸ Запуск завершён: капча не решена"
         subject = "[Avito CRM] Ожидает решения капчи"
@@ -1020,8 +1020,8 @@ def _run_completion_message(
         headline = "⏹ Запуск остановлен оператором"
         subject = "[Avito CRM] Запуск остановлен"
     elif summary.crm_sync_errors:
-        headline = "⚠️ Запуск завершён с предупреждениями синхронизации CRM"
-        subject = "[Avito CRM] Завершено с предупреждениями"
+        headline = "ℹ️ Запуск завершён; есть запись в «Диагностике»"
+        subject = "[Avito CRM] Запуск завершён"
     else:
         headline = "✅ Запуск Avito → CRM завершён"
         subject = "[Avito CRM] Запуск завершён"
@@ -1076,18 +1076,14 @@ def _captcha_detected_lines(
     wait_seconds: float,
     emoji: bool = True,
 ) -> tuple[str, ...]:
-    headline = "Avito поставил очередь на паузу для ручной проверки."
+    headline = "Действие: разгадайте капчу Avito."
     if emoji:
         headline = f"⏸ {headline}"
     return (
         headline,
-        f"Компьютер: {computer_name}",
-        f"Причина: {reason}",
-        f"Ссылка: {url}",
-        f"Ожидание: до {_format_duration(wait_seconds)}.",
-        "Откройте выведенное на передний план окно Chrome. Если видите «Доступ ограничен», "
-        "нажмите «Продолжить» и пройдите проверку. Не закрывайте окно и не запускайте "
-        "очередь заново: программа ждёт и продолжит работу сама.",
+        "В окне Avito нажмите «Продолжить» и выполните проверку.",
+        "Если окно пустое или капчи нет — ответьте: «окно пустое».",
+        "После решения ничего не запускайте: очередь продолжится сама.",
     )
 
 

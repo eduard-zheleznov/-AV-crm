@@ -46,15 +46,12 @@ LOGGER = logging.getLogger(__name__)
 
 def _browser_preflight_message(exc: Exception, *, initial: bool) -> str:
     if isinstance(exc, ManualActionRequired):
-        return (
-            "Очередь ожидает ручной проверки Avito в управляемом окне инкогнито. "
-            "Нажмите «Продолжить» и решите проверку; продолжение произойдёт автоматически."
-        )
+        return "Действие: разгадайте капчу Avito. После решения ничего не запускайте."
     stage = "Предстартовая проверка" if initial else "Проверка перед следующей строкой"
     if isinstance(exc, BrowserInfrastructureError):
         return (
-            f"{stage}: Chrome не получил ответ расширения. Это не капча: проверьте, "
-            "что Avito CRM включено и разрешено в инкогнито, затем повторите запуск."
+            "Действие: отправьте данные для техпроверки. "
+            "Автоматическое восстановление окна Avito не удалось."
         )
     return f"{stage} Chrome/расширения не пройдена: {_safe_error(exc)}"
 

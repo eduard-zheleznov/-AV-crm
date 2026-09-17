@@ -44,10 +44,10 @@ def test_manual_check_notification_is_an_explicit_pause_not_a_completed_run():
         )
     )
 
-    assert "на паузу" in text
+    assert "Действие: разгадайте капчу" in text
     assert "Продолжить" in text
-    assert "не запускайте очередь заново" in text
-    assert "продолжит работу сама" in text
+    assert "ничего не запускайте" in text
+    assert "очередь продолжится сама" in text
     assert "заверш" not in text.casefold()
 
 
@@ -567,7 +567,7 @@ def test_crm_sync_warning_does_not_report_a_technical_processing_error():
         summary, "server-1", "google:secret-id:Лист1", "full", True
     )
 
-    assert subject == "[Avito CRM] Завершено с предупреждениями"
+    assert subject == "[Avito CRM] Запуск завершён"
     assert "CRM: 3 служебных обновлений не записаны" in body
 
 
@@ -584,8 +584,8 @@ def test_browser_preflight_failure_takes_priority_over_old_crm_warnings():
 
     subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
 
-    assert subject == "[Avito CRM] Завершено с техническими ошибками"
-    assert body.startswith("⚠️ Запуск завершён с техническими ошибками")
+    assert subject == "[Avito CRM] Требуется техпроверка"
+    assert body.startswith("⚠️ Требуется техпроверка")
     assert "renderer не отвечает" in body
 
 

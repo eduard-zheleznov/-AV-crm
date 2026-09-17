@@ -329,7 +329,7 @@ def test_extension_startup_canary_stops_before_consuming_a_row(tmp_path, setting
     assert summary.inspected == 0
     assert summary.processed == 0
     assert source.patches == []
-    assert summary.stopped_reason.startswith("Предстартовая проверка")
+    assert summary.stopped_reason.startswith("Действие: отправьте данные для техпроверки")
 
 
 def test_extension_startup_canary_operator_stop_is_not_a_technical_error(
