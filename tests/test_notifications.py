@@ -540,16 +540,9 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
     )
 
     assert subject == "[Avito CRM] Запуск завершён"
-    assert "Обработано ссылок: 8" in body
-    assert "Неактивные / снятые объявления: 2" in body
-    assert "Номеров открыто: 4 (50% от ссылок)" in body
-    assert "Лидов создано: 3 (75% от открытых)" in body
-    assert "Почему из открытых номеров не создан новый лид (1)" in body
-    assert "Номер показан, но OCR не распознал: 1" in body
-    assert "Не завершена запись CRM до остановки: 1" in body
-    assert "Другое" not in body
-    assert "secret-id" not in body
-    assert "очередь продолжает работу" not in body
+    assert body == (
+        "✅ Запуск завершён.\nОбработано ссылок: 8.\nНомеров открыто: 4.\nЛидов создано: 3."
+    )
 
 
 def test_crm_sync_warning_does_not_report_a_technical_processing_error():
@@ -568,7 +561,7 @@ def test_crm_sync_warning_does_not_report_a_technical_processing_error():
     )
 
     assert subject == "[Avito CRM] Запуск завершён"
-    assert "CRM: 3 служебных обновлений не записаны" in body
+    assert "⚠️" not in body
 
 
 def test_browser_preflight_failure_takes_priority_over_old_crm_warnings():
@@ -584,9 +577,40 @@ def test_browser_preflight_failure_takes_priority_over_old_crm_warnings():
 
     subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
 
-    assert subject == "[Avito CRM] Требуется техпроверка"
-    assert body.startswith("⚠️ Требуется техпроверка")
-    assert "renderer не отвечает" in body
+    assert subject == "[Avito CRM] Проверьте работу Avito"
+    assert body.startswith("⚠️ Проверьте работу Avito")
+    assert "перезапустите запуск через пульт" in body
+    assert "renderer" not in body
+
+
+def test_manual_challenge_takes_priority_over_previous_row_errors():
+    summary = RunSummary(
+        run_id="run-manual-priority",
+        requested=3,
+        errors=2,
+        manual_required=1,
+        stopped_reason="Avito требует ручной проверки",
+    )
+
+    subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
+
+    assert subject == "[Avito CRM] Разгадайте капчу Avito"
+    assert body.startswith("🧩 Разгадайте капчу Avito")
+    assert "перезапустите" not in body
+
+
+def test_time_deferred_completion_is_an_info_message():
+    summary = RunSummary(
+        run_id="run-time-wait",
+        requested=3,
+        stopped_reason="Отложено по времени: очередь продолжится сама не ранее 10:00 МСК",
+    )
+
+    subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
+
+    assert subject == "[Avito CRM] Очередь ждёт времени"
+    assert body.startswith("⏰ Отложено по времени")
+    assert "⚠️" not in body
 
 
 def test_completion_delivery_can_target_backup_without_changing_captcha_routing(

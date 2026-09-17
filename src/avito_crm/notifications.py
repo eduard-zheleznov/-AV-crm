@@ -17,7 +17,6 @@ import httpx
 from avito_crm.config import Settings
 from avito_crm.errors import ConfigurationError, NotificationError
 from avito_crm.models import RunSummary
-from avito_crm.reporting import format_run_report
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
@@ -1008,26 +1007,44 @@ def _run_completion_message(
             "предстартовая проверка chrome/расширения не пройдена",
             "chrome/расширение не восстановились",
             "аварийная остановка",
+            "действие: отправьте данные для техпроверки",
         )
     )
-    if summary.errors or reason_lower.startswith("ошибка запуска") or technical_stop:
-        headline = "⚠️ Требуется техпроверка"
-        subject = "[Avito CRM] Требуется техпроверка"
+    # A real Avito challenge is always the operator's first action. Earlier
+    # recoverable row errors stay in Diagnostics and must not hide it.
+    if reason_lower.startswith("ошибка запуска") or technical_stop:
+        return (
+            "[Avito CRM] Проверьте работу Avito",
+            "⚠️ Проверьте работу Avito.\n"
+            "Если очередь не продолжилась — перезапустите запуск через пульт.\n"
+            "Подробности сохранены в листе «Диагностика».",
+        )
     elif summary.manual_required:
-        headline = "⏸ Запуск завершён: капча не решена"
-        subject = "[Avito CRM] Ожидает решения капчи"
+        return (
+            "[Avito CRM] Разгадайте капчу Avito",
+            "🧩 Разгадайте капчу Avito.\n"
+            "После решения ничего не запускайте: очередь продолжится сама.",
+        )
+    elif summary.errors:
+        return (
+            "[Avito CRM] Проверьте работу Avito",
+            "⚠️ Проверьте работу Avito.\n"
+            "Если очередь не продолжилась — перезапустите запуск через пульт.\n"
+            "Подробности сохранены в листе «Диагностика».",
+        )
+    elif reason_lower.startswith("отложено по времени"):
+        return "[Avito CRM] Очередь ждёт времени", f"⏰ {reason}"
     elif "останов" in reason_lower:
-        headline = "⏹ Запуск остановлен оператором"
-        subject = "[Avito CRM] Запуск остановлен"
-    elif summary.crm_sync_errors:
-        headline = "ℹ️ Запуск завершён; есть запись в «Диагностике»"
-        subject = "[Avito CRM] Запуск завершён"
-    else:
-        headline = "✅ Запуск Avito → CRM завершён"
-        subject = "[Avito CRM] Запуск завершён"
+        return "[Avito CRM] Запуск остановлен", "⏹ Запуск остановлен оператором."
 
     del computer_name, source_name, mode, live
-    return subject, f"{headline}\n\n{format_run_report(summary, reason=reason)}"
+    return (
+        "[Avito CRM] Запуск завершён",
+        "✅ Запуск завершён.\n"
+        f"Обработано ссылок: {summary.processed}.\n"
+        f"Номеров открыто: {summary.captured}.\n"
+        f"Лидов создано: {summary.created}.",
+    )
 
 
 def _deduplicate(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -1082,7 +1099,6 @@ def _captcha_detected_lines(
     return (
         headline,
         "В окне Avito нажмите «Продолжить» и выполните проверку.",
-        "Если окно пустое или капчи нет — ответьте: «окно пустое».",
         "После решения ничего не запускайте: очередь продолжится сама.",
     )
 

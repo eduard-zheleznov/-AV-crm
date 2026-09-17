@@ -183,6 +183,7 @@ class CommandState:
     base_crm_write_failed: int = 0
     base_crm_sync_errors: int = 0
     resume_at: str = ""
+    time_window_notified: bool = False
     completion_notified: bool = False
     diagnostics_recorded: bool = False
     result: dict[str, Any] = field(default_factory=dict)
@@ -1505,6 +1506,7 @@ class RemoteController:
                 return
             state.phase = "claimed"
             state.resume_at = ""
+            state.time_window_notified = False
             self._save_state(state)
         if state.phase == "claiming":
             self.panel.claim(state)
@@ -1741,6 +1743,8 @@ class RemoteController:
                 self._state.resume_at = summary.resume_at
                 with self._worker_guard:
                     self._phase_message = summary.stopped_reason
+                self._notify_time_window_wait(self._state, summary)
+                self._state.time_window_notified = True
                 self._save_state(self._state)
                 return
             self._state.result = self._classify_summary(self._state, summary)
@@ -1948,6 +1952,31 @@ class RemoteController:
             )
         state.completion_notified = True
         self._save_state(state)
+
+    def _notify_time_window_wait(self, state: CommandState, summary: RunSummary) -> None:
+        if state.time_window_notified:
+            return
+        from avito_crm.notifications import NotificationRouter
+
+        try:
+            settings = self._load_worker_settings()
+            notifier = NotificationRouter(settings)
+            try:
+                if notifier.enabled:
+                    notifier.send_run_completed(
+                        summary=summary,
+                        source_name=(f"google:{settings.google_spreadsheet_id}:{state.worksheet}"),
+                        mode="full",
+                        live=True,
+                    )
+            finally:
+                notifier.close()
+        except Exception as exc:
+            LOGGER.warning(
+                "Уведомление об ожидании времени команды %s не доставлено (%s)",
+                state.command_id,
+                exc.__class__.__name__,
+            )
 
     def _load_state(self) -> CommandState | None:
         if not self.state_path.is_file():
