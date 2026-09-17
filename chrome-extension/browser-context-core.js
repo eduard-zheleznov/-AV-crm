@@ -52,22 +52,72 @@
     return url === "about:blank" || url === "chrome://newtab/";
   }
 
-  async function findReusableBootstrapTab(chromeApi) {
+  function isAvitoTab(tab) {
+    if (!tab || !Number.isInteger(tab.id) || !tab.incognito) {
+      return false;
+    }
+    return /^https:\/\/(?:www\.)?avito\.ru(?:[/?#]|$)/i.test(
+      String(tab.pendingUrl || tab.url || "")
+    );
+  }
+
+  function isManagedWindowCandidate(window) {
+    const tabs = Array.isArray(window?.tabs) ? window.tabs : [];
+    return Boolean(
+      window?.incognito &&
+        window?.type === "normal" &&
+        tabs.length === 1 &&
+        (isReusableBootstrapTab(tabs[0]) || isAvitoTab(tabs[0]))
+    );
+  }
+
+  function mostRecentCandidate(candidates) {
+    return [...candidates].sort((left, right) => {
+      const recency =
+        Number(right.tab?.lastAccessed || 0) - Number(left.tab?.lastAccessed || 0);
+      if (recency !== 0) {
+        return recency;
+      }
+      // If Chrome did not return timestamps, preserve a visible Avito challenge
+      // rather than a disposable blank page.
+      return Number(isAvitoTab(right.tab)) - Number(isAvitoTab(left.tab));
+    })[0] || null;
+  }
+
+  async function managedWindowCandidates(chromeApi) {
     let windows;
     try {
       windows = await chromeApi.windows.getAll({ populate: true, windowTypes: ["normal"] });
     } catch (_error) {
-      return null;
+      return [];
     }
-    const candidates = [];
-    for (const window of windows || []) {
-      const tabs = Array.isArray(window?.tabs) ? window.tabs : [];
-      if (!window?.incognito || tabs.length !== 1 || !isReusableBootstrapTab(tabs[0])) {
-        continue;
+    return (windows || [])
+      .filter(isManagedWindowCandidate)
+      .map((window) => ({ window, tab: window.tabs[0] }));
+  }
+
+  async function cleanupStaleBootstrapWindows(chromeApi) {
+    const candidates = (await managedWindowCandidates(chromeApi)).filter(({ tab }) =>
+      isReusableBootstrapTab(tab)
+    );
+    const keep = mostRecentCandidate(candidates);
+    for (const candidate of candidates) {
+      if (candidate.window.id !== keep?.window.id) {
+        await removeWindowSafely(chromeApi, candidate.window.id);
       }
-      candidates.push(tabs[0]);
     }
-    return candidates.length === 1 ? candidates[0] : null;
+    return keep?.tab || null;
+  }
+
+  async function reconcileManagedIncognitoWindows(chromeApi) {
+    const candidates = await managedWindowCandidates(chromeApi);
+    const keep = mostRecentCandidate(candidates);
+    for (const candidate of candidates) {
+      if (candidate.window.id !== keep?.window.id) {
+        await removeWindowSafely(chromeApi, candidate.window.id);
+      }
+    }
+    return keep?.tab || null;
   }
 
   async function createManagedTab(chromeApi, command) {
@@ -94,11 +144,11 @@
       return { ok: false, code: "incognito_not_allowed", incognitoAccess: false };
     }
 
-    const bootstrapTab = await findReusableBootstrapTab(chromeApi);
-    if (bootstrapTab && tabMatchesCommand(bootstrapTab, command)) {
+    const reusableTab = await reconcileManagedIncognitoWindows(chromeApi);
+    if (reusableTab && tabMatchesCommand(reusableTab, command)) {
       return {
         ok: true,
-        tab: bootstrapTab,
+        tab: reusableTab,
         incognitoAccess: true,
         reusedBootstrap: true
       };
@@ -144,11 +194,16 @@
 
   const api = {
     createManagedTab,
+    cleanupStaleBootstrapWindows,
     failureMessage,
-    findReusableBootstrapTab,
     isReusableBootstrapTab,
+    isAvitoTab,
+    isManagedWindowCandidate,
+    managedWindowCandidates,
+    mostRecentCandidate,
     removeTabSafely,
     resolveCreatedWindowTab,
+    reconcileManagedIncognitoWindows,
     requiresIncognito,
     tabMatchesCommand
   };

@@ -97,6 +97,10 @@ function startPolling() {
     return;
   }
   polling = true;
+  // A service-worker restart must not turn each old blank incognito tab into
+  // another Chrome window. This only removes disposable one-tab blank windows;
+  // a live Avito tab is retained until a command reconciles it safely.
+  BROWSER_CONTEXT.cleanupStaleBootstrapWindows(chrome).catch(() => undefined);
   pollLoop().finally(() => {
     polling = false;
   });

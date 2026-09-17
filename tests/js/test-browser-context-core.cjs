@@ -118,8 +118,77 @@ async function main() {
   });
   const ambiguousResult = await context.createManagedTab(ambiguous.api, {});
   assert.equal(ambiguousResult.ok, true);
-  assert.equal(ambiguousResult.reusedBootstrap, false);
-  assert.equal(ambiguous.calls.some(([name]) => name === "windows-create"), true);
+  assert.equal(ambiguousResult.reusedBootstrap, true);
+  assert.equal(ambiguousResult.tab.id, 55);
+  assert.equal(ambiguous.calls.some(([name]) => name === "windows-create"), false);
+  assert.deepEqual(ambiguous.calls.at(-1), ["windows-remove", 11]);
+
+  const staleAvito = fakeChrome({
+    existingWindows: [
+      {
+        id: 10,
+        type: "normal",
+        incognito: true,
+        tabs: [
+          {
+            id: 55,
+            incognito: true,
+            url: "https://www.avito.ru/moskva/test_55",
+            lastAccessed: 10
+          }
+        ]
+      },
+      {
+        id: 11,
+        type: "normal",
+        incognito: true,
+        tabs: [
+          {
+            id: 56,
+            incognito: true,
+            url: "https://www.avito.ru/moskva/test_56",
+            lastAccessed: 20
+          }
+        ]
+      },
+      {
+        id: 12,
+        type: "normal",
+        incognito: true,
+        tabs: [{ id: 57, incognito: true, url: "about:blank", lastAccessed: 5 }]
+      }
+    ]
+  });
+  const staleAvitoResult = await context.createManagedTab(staleAvito.api, {});
+  assert.equal(staleAvitoResult.ok, true);
+  assert.equal(staleAvitoResult.tab.id, 56);
+  assert.deepEqual(
+    staleAvito.calls.filter(([name]) => name === "windows-remove"),
+    [
+      ["windows-remove", 10],
+      ["windows-remove", 12]
+    ]
+  );
+
+  const staleBlank = fakeChrome({
+    existingWindows: [
+      {
+        id: 20,
+        type: "normal",
+        incognito: true,
+        tabs: [{ id: 65, incognito: true, url: "about:blank", lastAccessed: 10 }]
+      },
+      {
+        id: 21,
+        type: "normal",
+        incognito: true,
+        tabs: [{ id: 66, incognito: true, url: "chrome://newtab/", lastAccessed: 20 }]
+      }
+    ]
+  });
+  const keptBlank = await context.cleanupStaleBootstrapWindows(staleBlank.api);
+  assert.equal(keptBlank.id, 66);
+  assert.deepEqual(staleBlank.calls.at(-1), ["windows-remove", 20]);
 
   const queried = fakeChrome({ includeWindowTabs: false });
   const queriedResult = await context.createManagedTab(queried.api, {});
