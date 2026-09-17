@@ -680,7 +680,22 @@ def test_remote_run_reports_time_deferred_status(settings):
     assert "10:00–19:45" in result["message"]
 
 
-def test_remote_command_waits_and_keeps_state_for_known_local_resume(settings):
+def test_remote_command_waits_and_keeps_state_for_known_local_resume(settings, monkeypatch):
+    delivered = []
+
+    class FakeNotifier:
+        enabled = True
+
+        def __init__(self, _settings):
+            pass
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("avito_crm.notifications.NotificationRouter", FakeNotifier)
     panel = FakePanel(PanelCommand(False, False, 1, "Лист1", False))
     controller = TimeDeferredController(settings, panel)
     controller._state = CommandState(
@@ -701,8 +716,11 @@ def test_remote_command_waits_and_keeps_state_for_known_local_resume(settings):
     assert controller._state is not None
     assert controller._state.phase == "waiting_time_window"
     assert controller._state.resume_at
+    assert controller._state.time_window_notified is True
     assert panel.finishes == []
     assert panel.active_updates[-1][2]["status"] == "ОЖИДАЕТ ВРЕМЯ"
+    assert len(delivered) == 1
+    assert delivered[0]["summary"].resume_at
 
 
 def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):
