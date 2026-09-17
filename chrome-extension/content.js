@@ -37,6 +37,8 @@ const INACTIVE_PATTERNS = [
 ];
 const CONTENT_SCRIPT_VERSION = INSTALLED_CONTENT_VERSION;
 const PHONE_BUTTON_RE = /(?:показать\s+(?:номер(?:\s+телефона)?|телефон)|позвонить)/i;
+const MANUAL_ACTION_RE = /(?:продолжить|пройти\s+проверку|я\s+не\s+робот|подтвердить)/i;
+const MANUAL_CONFIRMATION_MS = 2500;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 let activeRevealCommandId = null;
 
@@ -340,7 +342,7 @@ async function waitForManualAction(_timeoutMs) {
   }
   // Do not stop the queue because of a short-lived page fragment. A real
   // challenge remains visible after the page has settled.
-  await delay(700);
+  await delay(MANUAL_CONFIRMATION_MS);
   initialReason = manualReason();
   if (!initialReason) {
     return null;
@@ -368,15 +370,16 @@ function manualReason() {
   const content = pageText();
   const currentUrl = location.href.toLowerCase();
   if (
-    content.includes("проблема с ip") ||
-    content.includes("доступ ограничен")
+    (content.includes("проблема с ip") || content.includes("доступ ограничен")) &&
+    hasVisibleManualAction()
   ) {
     return "доступ Avito ограничен по IP; нажмите «Продолжить» и пройдите проверку";
   }
   if (
     currentUrl.includes("captcha") ||
     currentUrl.includes("/challenge") ||
-    STRONG_CHALLENGE_PATTERNS.some((pattern) => content.includes(pattern)) ||
+    (STRONG_CHALLENGE_PATTERNS.some((pattern) => content.includes(pattern)) &&
+      hasVisibleManualAction()) ||
     hasVisibleChallengeSurface()
   ) {
     return "ручная проверка Avito";
@@ -385,6 +388,24 @@ function manualReason() {
     return "авторизация Avito";
   }
   return "";
+}
+
+function hasVisibleManualAction() {
+  const controls = document.querySelectorAll(
+    'button, [role="button"], input[type="submit"], input[type="button"], a[href]'
+  );
+  for (const control of controls) {
+    if (!isVisibleInViewport(control)) {
+      continue;
+    }
+    const text = String(
+      control.innerText || control.value || control.getAttribute("aria-label") || ""
+    );
+    if (MANUAL_ACTION_RE.test(text)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function hasVisibleChallengeSurface() {

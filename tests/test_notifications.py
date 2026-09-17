@@ -2,6 +2,7 @@ import hashlib
 import smtplib
 import ssl
 from dataclasses import replace
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -69,6 +70,29 @@ def test_telegram_test_is_sent_to_unique_primary_and_backup_chats(settings):
     assert notifier.send_test() == 3
     assert len(requests) == 3
     assert all(request.url.path.endswith("/sendMessage") for request in requests)
+
+
+def test_initial_captcha_alert_reaches_primary_and_backup_chats(settings):
+    recipients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recipients.append(parse_qs(request.content.decode())["chat_id"][0])
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    configured = _notification_settings(
+        settings,
+        telegram_primary_chat_ids=("10001",),
+        telegram_backup_chat_ids=("10002",),
+    )
+    notifier = TelegramNotifier(
+        configured, client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    assert (
+        notifier.send_captcha_detected(reason="captcha", url="https://example.com", wait_seconds=0)
+        == 2
+    )
+    assert recipients == ["10001", "10002"]
 
 
 def test_telegram_error_never_exposes_bot_token(settings):
@@ -515,6 +539,84 @@ def test_router_default_delivery_order_is_max_email_telegram(settings):
         ]
     finally:
         router.close()
+
+
+def test_router_suppresses_repeated_technical_alert_until_progress_recovers(settings):
+    delivered = []
+
+    class Backend:
+        enabled = True
+        channel_name = "Test"
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs["summary"].run_id)
+            return 1
+
+        def close(self):
+            return None
+
+    technical = RunSummary(
+        run_id="first", requested=1, errors=1, stopped_reason="Очередь обработана"
+    )
+    repeat = RunSummary(run_id="second", requested=1, errors=1, stopped_reason="Очередь обработана")
+    recovered = RunSummary(
+        run_id="recovered", requested=1, processed=1, stopped_reason="Очередь обработана"
+    )
+
+    assert (
+        NotificationRouter(settings, backends=[Backend()]).send_run_completed(
+            summary=technical, source_name="google:test", mode="full", live=True
+        )
+        == 1
+    )
+    assert (
+        NotificationRouter(settings, backends=[Backend()]).send_run_completed(
+            summary=repeat, source_name="google:test", mode="full", live=True
+        )
+        == 0
+    )
+    assert (
+        NotificationRouter(settings, backends=[Backend()]).send_run_completed(
+            summary=recovered, source_name="google:test", mode="full", live=True
+        )
+        == 1
+    )
+    assert (
+        NotificationRouter(settings, backends=[Backend()]).send_run_completed(
+            summary=repeat, source_name="google:test", mode="full", live=True
+        )
+        == 1
+    )
+    assert delivered == ["first", "recovered", "second"]
+
+
+def test_technical_completion_reaches_backup_even_if_routine_backup_is_disabled(settings):
+    recipients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recipients.append(parse_qs(request.content.decode())["chat_id"][0])
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    configured = _notification_settings(
+        settings,
+        telegram_completion_backup=False,
+        telegram_primary_chat_ids=("10001",),
+        telegram_backup_chat_ids=("10002",),
+    )
+    notifier = TelegramNotifier(
+        configured, client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    assert (
+        notifier.send_run_completed(
+            summary=RunSummary(run_id="technical", requested=1, errors=1),
+            source_name="google:test",
+            mode="full",
+            live=True,
+        )
+        == 2
+    )
+    assert recipients == ["10001", "10002"]
 
 
 def test_completion_message_reports_normal_outcomes_without_phone_data():

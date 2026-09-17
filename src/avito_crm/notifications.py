@@ -11,6 +11,7 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formataddr
 from importlib.resources import files
+from pathlib import Path
 
 import httpx
 
@@ -20,6 +21,7 @@ from avito_crm.models import RunSummary
 
 LOGGER = logging.getLogger(__name__)
 TELEGRAM_API_ROOT = "https://api.telegram.org"
+TECHNICAL_ALERT_COOLDOWN_SECONDS = 12 * 60 * 60
 TELEGRAM_MESSAGE_LIMIT = 4096
 MAX_MESSAGE_LIMIT = 4000
 MAX_ROOT_CA_RESOURCE = "certs/russian_trusted_root_ca.pem"
@@ -156,7 +158,7 @@ class TelegramNotifier:
                     wait_seconds=wait_seconds,
                 )
             ),
-            self.primary_chat_ids,
+            _deduplicate((*self.primary_chat_ids, *self.backup_chat_ids)),
         )
 
     def send_captcha_reminder(
@@ -242,7 +244,8 @@ class TelegramNotifier:
         _subject, body = _run_completion_message(
             summary, self.computer_name, source_name, mode, live
         )
-        recipients = _completion_recipients(
+        recipients = _completion_recipients_for_summary(
+            summary,
             self.primary_chat_ids,
             self.backup_chat_ids,
             primary=self.completion_primary,
@@ -427,7 +430,7 @@ class MaxNotifier:
                     wait_seconds=wait_seconds,
                 )
             ),
-            self.primary_recipients,
+            _deduplicate((*self.primary_recipients, *self.backup_recipients)),
         )
 
     def send_captcha_reminder(
@@ -510,7 +513,8 @@ class MaxNotifier:
         _subject, body = _run_completion_message(
             summary, self.computer_name, source_name, mode, live
         )
-        recipients = _completion_recipients(
+        recipients = _completion_recipients_for_summary(
+            summary,
             self.primary_recipients,
             self.backup_recipients,
             primary=self.completion_primary,
@@ -823,7 +827,8 @@ class EmailNotifier:
         subject, body = _run_completion_message(
             summary, self.computer_name, source_name, mode, live
         )
-        recipients = _completion_recipients(
+        recipients = _completion_recipients_for_summary(
+            summary,
             self.primary_recipients,
             self.backup_recipients,
             primary=self.completion_primary,
@@ -881,6 +886,52 @@ class EmailNotifier:
         return smtp
 
 
+class CompletionAlertGate:
+    """Persistently suppress repeated identical technical alerts from the pult."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def allow(self, summary: RunSummary) -> bool:
+        category = _technical_alert_category(summary)
+        if not category:
+            if summary.processed or summary.captured or summary.created:
+                self._clear()
+            return True
+
+        now = time.time()
+        previous = self._read()
+        if (
+            previous.get("category") == category
+            and now - float(previous.get("sent_at", 0) or 0) < TECHNICAL_ALERT_COOLDOWN_SECONDS
+        ):
+            return False
+        self._write({"category": category, "sent_at": now})
+        return True
+
+    def _read(self) -> dict[str, object]:
+        try:
+            value = json.loads(self.path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError, TypeError):
+            return {}
+
+    def _write(self, value: dict[str, object]) -> None:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError as exc:
+            LOGGER.warning("Не удалось сохранить защиту от повторных уведомлений: %s", exc)
+
+    def _clear(self) -> None:
+        try:
+            self.path.unlink(missing_ok=True)
+        except OSError as exc:
+            LOGGER.warning("Не удалось сбросить защиту от повторных уведомлений: %s", exc)
+
+
 class NotificationRouter:
     """Send through every configured channel without losing later reminders."""
 
@@ -892,6 +943,9 @@ class NotificationRouter:
             else [MaxNotifier(settings), EmailNotifier(settings), TelegramNotifier(settings)]
         )
         self._unavailable: set[int] = set()
+        self._completion_alerts = CompletionAlertGate(
+            settings.data_dir / "notification-alert-state.json"
+        )
 
     @property
     def enabled(self) -> bool:
@@ -965,6 +1019,10 @@ class NotificationRouter:
         return self._dispatch("send_captcha_stopped", **kwargs)
 
     def send_run_completed(self, **kwargs: object) -> int:
+        summary = kwargs.get("summary")
+        if isinstance(summary, RunSummary) and not self._completion_alerts.allow(summary):
+            LOGGER.info("Повторное техническое уведомление подавлено до изменения состояния")
+            return 0
         return self._dispatch("send_run_completed", **kwargs)
 
     def send_robot_handoff_required(self, **kwargs: object) -> int:
@@ -1064,6 +1122,47 @@ def _completion_recipients(
     if backup:
         selected += backup_values
     return _deduplicate(selected)
+
+
+def _technical_alert_category(summary: RunSummary) -> str:
+    reason = str(summary.stopped_reason or "").casefold()
+    if summary.manual_required:
+        return ""
+    if reason.startswith("ошибка запуска"):
+        return "startup_error"
+    if any(
+        marker in reason
+        for marker in (
+            "предстартовая проверка chrome/расширения не пройдена",
+            "chrome/расширение не восстановились",
+            "аварийная остановка",
+            "действие: отправьте данные для техпроверки",
+        )
+    ):
+        return "browser_check"
+    if summary.errors:
+        return "row_errors"
+    return ""
+
+
+def _completion_recipients_for_summary(
+    summary: RunSummary,
+    primary_values: tuple[str, ...],
+    backup_values: tuple[str, ...],
+    *,
+    primary: bool,
+    backup: bool,
+) -> tuple[str, ...]:
+    # Action messages cannot be allowed to disappear in a backup-only account.
+    # Routine informational completions still honor the user's channel switches.
+    if summary.manual_required or _technical_alert_category(summary):
+        return _deduplicate((*primary_values, *backup_values))
+    return _completion_recipients(
+        primary_values,
+        backup_values,
+        primary=primary,
+        backup=backup,
+    )
 
 
 def _mask_chat_id(chat_id: str) -> str:
