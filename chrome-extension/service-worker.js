@@ -97,10 +97,10 @@ function startPolling() {
     return;
   }
   polling = true;
-  // A service-worker restart must not turn each old blank incognito tab into
-  // another Chrome window. This only removes disposable one-tab blank windows;
-  // a live Avito tab is retained until a command reconciles it safely.
-  BROWSER_CONTEXT.cleanupStaleBootstrapWindows(chrome).catch(() => undefined);
+  // On startup keep only the latest one-tab window used by the bridge. This
+  // immediately removes old blank/Avito windows left by an earlier extension
+  // restart, while normal Chrome and unrelated incognito pages remain intact.
+  BROWSER_CONTEXT.reconcileManagedIncognitoWindows(chrome).catch(() => undefined);
   pollLoop().finally(() => {
     polling = false;
   });
