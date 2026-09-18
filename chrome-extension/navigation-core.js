@@ -92,11 +92,11 @@
     if (!probe || !probe.rendered) {
       return "";
     }
-    const bodyLength = Math.max(0, Number(probe.bodyLength) || 0);
-    const bodyBucket = Math.floor(bodyLength / 100);
+    // Avito keeps changing counters, recommendations and map data after the
+    // usable listing has appeared.  Text length therefore never settles on
+    // some healthy pages and must not make the bridge recreate the tab.
     return [
       String(probe.readyState || "unknown"),
-      bodyBucket,
       Math.max(0, Number(probe.visibleHeadings) || 0),
       Boolean(probe.hasPhone),
       Boolean(probe.hasPhoneButton),

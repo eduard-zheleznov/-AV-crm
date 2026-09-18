@@ -201,7 +201,7 @@ changing = navigation.advanceRenderedStability(
   { ...interactiveRendered, bodyLength: 2810 },
   500
 );
-assert.equal(changing.samples, 1);
+assert.equal(changing.samples, 2);
 assert.equal(changing.ready, false);
 changing = navigation.advanceRenderedStability(
   changing,
