@@ -593,8 +593,26 @@ class ChromeExtensionBrowser:
             return snapshot
 
         self._reset_manual_session()
+        recovery_attempt = 0
+        max_recovery_attempts = 2
         while True:
-            event = self.bridge.health_probe(status_callback=self._handle_preflight_status)
+            try:
+                event = self.bridge.health_probe(status_callback=self._handle_preflight_status)
+            except BrowserInfrastructureError as exc:
+                if recovery_attempt >= max_recovery_attempts:
+                    self._needs_active_probe = True
+                    raise
+                recovery_attempt += 1
+                delay_seconds = recovery_attempt * 2
+                LOGGER.warning(
+                    "Проверка Chrome временно не получила ответ (%s); повтор %s из %s через %s с",
+                    exc,
+                    recovery_attempt,
+                    max_recovery_attempts,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+                continue
             if event.status == "manual_required":
                 # Some Chrome versions return this result before the content-script
                 # waiter is attached. Repeating the probe attaches it to the same tab.
@@ -623,6 +641,18 @@ class ChromeExtensionBrowser:
                     str(event.payload.get("reason", "Ожидание Chrome остановлено оператором"))
                 )
             if event.status != "healthy":
+                if event.status == "browser_infra" and recovery_attempt < max_recovery_attempts:
+                    recovery_attempt += 1
+                    delay_seconds = recovery_attempt * 2
+                    LOGGER.warning(
+                        "Chrome ещё не подтвердил готовность (%s); повтор %s из %s через %s с",
+                        event.payload.get("reason", "без пояснения"),
+                        recovery_attempt,
+                        max_recovery_attempts,
+                        delay_seconds,
+                    )
+                    time.sleep(delay_seconds)
+                    continue
                 self._needs_active_probe = True
                 raise BrowserInfrastructureError(
                     str(

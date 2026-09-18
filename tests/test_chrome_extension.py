@@ -515,14 +515,36 @@ def test_extension_browser_preflight_maps_operator_stop_without_technical_failur
         browser.preflight(force=True)
 
 
-def test_extension_browser_marks_browser_infra_for_a_fresh_canary(settings):
+def test_extension_browser_marks_browser_infra_for_a_fresh_canary(settings, monkeypatch):
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
-    browser.bridge = _ProbeBridge(
-        ExtensionEvent("result", "browser_infra", {"reason": "renderer timeout"})
-    )
+    bridge = _ProbeBridge(ExtensionEvent("result", "browser_infra", {"reason": "renderer timeout"}))
+    browser.bridge = bridge
+    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
 
     with browser, pytest.raises(BrowserInfrastructureError, match="renderer timeout"):
         browser.preflight(force=True)
+
+    assert bridge.probe_calls == 3
+
+
+def test_extension_browser_recovers_transient_preflight_infrastructure_error(settings, monkeypatch):
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), _FakeNotifier())
+
+    class RecoveringProbeBridge(_ProbeBridge):
+        def health_probe(self, *, status_callback=None) -> ExtensionEvent:
+            self.probe_calls += 1
+            if self.probe_calls == 1:
+                return ExtensionEvent("result", "browser_infra", {"reason": "renderer timeout"})
+            return ExtensionEvent("result", "healthy", {})
+
+    bridge = RecoveringProbeBridge(ExtensionEvent("result", "healthy", {}))
+    browser.bridge = bridge
+    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
+
+    with browser:
+        browser.preflight(force=True)
+
+    assert bridge.probe_calls == 2
 
 
 def test_extension_browser_normalizes_a_dom_phone(settings):
