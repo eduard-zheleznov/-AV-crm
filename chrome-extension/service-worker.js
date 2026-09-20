@@ -173,7 +173,11 @@ async function executeCommand(command) {
     if (command.type === "health_probe") {
       const recovery = await MANUAL_SESSION.recoverHealthProbe(prepared, {
         focus: focusTab,
-        wait: (tabId) => sendManualWaitMessage(tabId, command),
+        // Do not keep a fragile content-script promise open while a person is
+        // solving a challenge. Avito can replace that document with its normal
+        // home page, which destroys the promise before it can report
+        // manual_cleared. The worker observes the managed tab independently.
+        wait: (tabId) => waitForManualSurfaceToClear(tabId, command),
         recheck: () => getManagedTab(command)
       });
       if (!recovery.completed) {
@@ -414,6 +418,59 @@ async function sendRevealMessage(tabId, command) {
 
 async function sendManualWaitMessage(tabId, command) {
   return await sendContentCommand(tabId, command, "avito_crm_wait_for_manual");
+}
+
+async function waitForManualSurfaceToClear(tabId, command) {
+  let unavailableProbes = 0;
+  let nextStatusCheckAt = 0;
+  while (currentCommandId === command.id) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab) {
+      return { status: "browser_infra", reason: "Управляемая вкладка Avito закрыта" };
+    }
+    try {
+      const probe = await probeTab(tabId, command.url, "health");
+      unavailableProbes = 0;
+      if (!probe?.manual && !probe?.auth && !RUNTIME.isManualSurface(tab.url || "")) {
+        return { status: "manual_cleared" };
+      }
+    } catch (_error) {
+      unavailableProbes += 1;
+      // A navigation after a solved challenge can destroy the old content
+      // script before the new one is ready. A normal Avito URL after several
+      // such probes is a resolved check; getManagedTab will inject/recheck it.
+      if (
+        unavailableProbes >= 3 &&
+        RUNTIME.avitoUrl(tab.url || "") &&
+        !RUNTIME.isManualSurface(tab.url || "")
+      ) {
+        return { status: "manual_cleared" };
+      }
+    }
+
+    if (Date.now() >= nextStatusCheckAt) {
+      nextStatusCheckAt = Date.now() + 3000;
+      try {
+        const response = await fetch(
+          `${BASE_URL}/v1/command-status?id=${encodeURIComponent(command.id)}`,
+          { method: "GET", headers: AUTH_HEADERS, cache: "no-store" }
+        );
+        if (response.ok) {
+          const payload = await response.json();
+          if (payload.status === "cancelled" || payload.status === "inactive") {
+            return {
+              status: "cancelled",
+              reason: "Ожидание Chrome остановлено оператором"
+            };
+          }
+        }
+      } catch (_error) {
+        // The local pult can be restarting. Keep the managed Avito page intact.
+      }
+    }
+    await delay(1000);
+  }
+  return { status: "cancelled", reason: "Команда Chrome больше не активна" };
 }
 
 async function sendContentCommand(tabId, command, type) {
