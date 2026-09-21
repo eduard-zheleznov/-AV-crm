@@ -275,6 +275,9 @@ def test_manifest_matches_the_required_extension_version():
     assert '"manual-session-core.js"' in service_worker
     assert "MANUAL_SESSION.recoverHealthProbe" in service_worker
     assert "waitForManualSurfaceToClear" in service_worker
+    assert 'type: "status"' in service_worker
+    assert 'status: "manual_required"' in service_worker
+    assert "Avito требует ручной проверки" in service_worker
     assert "unavailableProbes >= 3" in service_worker
     assert '"avito_crm_wait_for_manual"' in service_worker
     assert "BROWSER_CONTEXT.createManagedTab(chrome, command)" in service_worker

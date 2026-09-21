@@ -171,6 +171,19 @@ async function executeCommand(command) {
   try {
     let prepared = await getManagedTab(command);
     if (command.type === "health_probe") {
+      // The health probe reaches a manual Avito surface before it asks the
+      // session watcher to wait.  The watcher deliberately does not depend on
+      // a content-script promise (the page can replace itself after a solved
+      // check), so it must report the required operator action itself.
+      // Without this event the pult has no way to send the CAPTCHA alert.
+      if (prepared.classification.status === "manual_required") {
+        await postEvent({
+          id: command.id,
+          type: "status",
+          status: "manual_required",
+          reason: "Avito требует ручной проверки: нажмите «Продолжить» и решите капчу"
+        });
+      }
       const recovery = await MANUAL_SESSION.recoverHealthProbe(prepared, {
         focus: focusTab,
         // Do not keep a fragile content-script promise open while a person is
