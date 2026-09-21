@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from openpyxl import load_workbook
@@ -25,6 +26,14 @@ LOGGER = logging.getLogger(__name__)
 _PLAN_PRIORITY = "__plan_priority"
 _MOSCOW_OFFSET = "__moscow_offset"
 _LEGACY_FALSE_CAPTCHA_ERROR = "ручная проверка avito не завершена за отведённое время"
+_AVITO_CITY_NAMES = {
+    "barnaul": "Барнаул",
+    "kemerovo": "Кемерово",
+    "krasnoyarsk": "Красноярск",
+    "moskva": "Москва",
+    "novosibirsk": "Новосибирск",
+    "omsk": "Омск",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +235,12 @@ class QueueSource(ABC):
     ) -> datetime | None:
         """Earliest safe resume time, or ``None`` when the source cannot know it."""
         return None
+
+    def local_window_wait_detail(
+        self, items: list[QueueItem], *, now: datetime | None = None
+    ) -> str:
+        """Short operator-facing explanation of a deliberate time-window wait."""
+        return "для оставшихся строк сейчас нет безопасного местного окна 10:00–19:45."
 
 
 class XlsxQueueSource(QueueSource):
@@ -667,23 +682,54 @@ class GoogleSheetsQueueSource(QueueSource):
         if current.tzinfo is None:
             current = current.replace(tzinfo=moscow)
         current = current.astimezone(moscow)
-        candidates: list[datetime] = []
-        for item in items:
-            raw_offset = item.values.get(_MOSCOW_OFFSET)
-            if raw_offset is None:
-                continue
-            offset = _safe_int(raw_offset)
-            local_now = current + timedelta(hours=offset)
-            local_start = datetime.combine(local_now.date(), self.local_call_start, tzinfo=moscow)
-            local_cutoff = datetime.combine(local_now.date(), self.local_lead_cutoff, tzinfo=moscow)
-            if local_now < local_start:
-                candidate_local = local_start
-            elif local_now <= local_cutoff:
-                candidate_local = local_now
-            else:
-                candidate_local = local_start + timedelta(days=1)
-            candidates.append(candidate_local - timedelta(hours=offset))
+        candidates = [
+            candidate[0]
+            for item in items
+            if (candidate := self._local_window_candidate(item, current)) is not None
+        ]
         return min(candidates, default=None)
+
+    def local_window_wait_detail(
+        self, items: list[QueueItem], *, now: datetime | None = None
+    ) -> str:
+        if not self.timezone_guard_enabled:
+            return "ограничение местного времени отключено."
+        moscow = ZoneInfo("Europe/Moscow")
+        current = now or datetime.now(moscow)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=moscow)
+        current = current.astimezone(moscow)
+        candidates = [
+            (candidate[0], item, candidate[1])
+            for item in items
+            if (candidate := self._local_window_candidate(item, current)) is not None
+        ]
+        if not candidates:
+            return "для оставшихся строк безопасное местное время неизвестно."
+        _resume_at, item, local_now = min(candidates, key=lambda value: value[0])
+        return (
+            f"ближайший город — {_avito_city_name(item.url)}; там сейчас {local_now:%H:%M}, "
+            f"разрешено {self.local_call_start:%H:%M}–{self.local_lead_cutoff:%H:%M}."
+        )
+
+    def _local_window_candidate(
+        self, item: QueueItem, current: datetime
+    ) -> tuple[datetime, datetime] | None:
+        raw_offset = item.values.get(_MOSCOW_OFFSET)
+        if raw_offset is None:
+            return None
+        moscow = ZoneInfo("Europe/Moscow")
+        offset = _safe_int(raw_offset)
+        local_now = current + timedelta(hours=offset)
+        local_start = datetime.combine(local_now.date(), self.local_call_start, tzinfo=moscow)
+        local_cutoff = datetime.combine(local_now.date(), self.local_lead_cutoff, tzinfo=moscow)
+        if local_now < local_start:
+            candidate_local = local_start
+        elif local_now <= local_cutoff:
+            candidate_local = local_now
+        else:
+            candidate_local = local_start + timedelta(days=1)
+        return candidate_local - timedelta(hours=offset), local_now
 
     def update(self, item: QueueItem, patch: QueuePatch) -> None:
         from gspread.utils import rowcol_to_a1
@@ -793,6 +839,14 @@ def _safe_int(value: Any) -> int:
         return int(float(str(value or "0").strip()))
     except (TypeError, ValueError):
         return 0
+
+
+def _avito_city_name(url: str) -> str:
+    parts = [part for part in urlsplit(str(url or "")).path.split("/") if part]
+    slug = parts[0].casefold() if parts else ""
+    if slug in _AVITO_CITY_NAMES:
+        return _AVITO_CITY_NAMES[slug]
+    return slug.replace("-", " ").replace("_", " ").title() or "город не определён"
 
 
 def _patch_values(columns: QueueColumns, patch: QueuePatch) -> dict[str, Any]:

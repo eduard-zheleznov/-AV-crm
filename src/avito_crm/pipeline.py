@@ -68,8 +68,9 @@ def _defer_until_local_window(
         return
     summary.resume_at = resume_at.astimezone(UTC).isoformat()
     summary.stopped_reason = (
-        "Отложено по времени: для оставшихся строк сейчас нет безопасного местного окна "
-        f"10:00–19:45. Автопродолжение не ранее {resume_at:%H:%M} МСК."
+        "Отложено по времени: "
+        f"{source.local_window_wait_detail(items)} "
+        f"Автопродолжение не ранее {resume_at:%H:%M} МСК."
     )
 
 

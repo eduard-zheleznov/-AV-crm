@@ -183,6 +183,7 @@ class CommandState:
     base_crm_write_failed: int = 0
     base_crm_sync_errors: int = 0
     resume_at: str = ""
+    time_window_message: str = ""
     time_window_notified: bool = False
     completion_notified: bool = False
     diagnostics_recorded: bool = False
@@ -1499,13 +1500,14 @@ class RemoteController:
             resume_at = _parse_utc_timestamp(state.resume_at)
             if resume_at and datetime.now(UTC) < resume_at:
                 with self._worker_guard:
-                    self._phase_message = (
+                    self._phase_message = self._state.time_window_message or (
                         "Ожидаем безопасное местное время; автопродолжение "
                         f"не ранее {resume_at.astimezone(ZoneInfo('Europe/Moscow')):%H:%M} МСК."
                     )
                 return
             state.phase = "claimed"
             state.resume_at = ""
+            state.time_window_message = ""
             state.time_window_notified = False
             self._save_state(state)
         if state.phase == "claiming":
@@ -1741,6 +1743,7 @@ class RemoteController:
                 self._remember_progress_baseline(self._state)
                 self._state.phase = "waiting_time_window"
                 self._state.resume_at = summary.resume_at
+                self._state.time_window_message = summary.stopped_reason
                 with self._worker_guard:
                     self._phase_message = summary.stopped_reason
                 self._notify_time_window_wait(self._state, summary)

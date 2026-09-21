@@ -716,6 +716,7 @@ def test_remote_command_waits_and_keeps_state_for_known_local_resume(settings, m
     assert controller._state is not None
     assert controller._state.phase == "waiting_time_window"
     assert controller._state.resume_at
+    assert "Отложено по времени" in controller._state.time_window_message
     assert controller._state.time_window_notified is True
     assert panel.finishes == []
     assert panel.active_updates[-1][2]["status"] == "ОЖИДАЕТ ВРЕМЯ"

@@ -1,11 +1,38 @@
 from dataclasses import replace
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
 import avito_crm.queue as queue_module
-from avito_crm.models import ItemStatus, QueuePatch
-from avito_crm.queue import QueueColumns, XlsxQueueSource, build_queue_source
+from avito_crm.models import ItemStatus, QueueItem, QueuePatch
+from avito_crm.queue import (
+    GoogleSheetsQueueSource,
+    QueueColumns,
+    XlsxQueueSource,
+    build_queue_source,
+)
+
+
+def test_google_queue_explains_the_nearest_local_time_window():
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.timezone_guard_enabled = True
+    source.local_call_start = time(10, 0)
+    source.local_lead_cutoff = time(19, 45)
+    item = QueueItem(
+        "3763",
+        "https://www.avito.ru/novosibirsk/predlozheniya_uslug/remont_123",
+        values={"__moscow_offset": 4},
+    )
+    current = datetime(2026, 9, 21, 18, 33, tzinfo=ZoneInfo("Europe/Moscow"))
+
+    assert source.next_local_window_open_at([item], now=current) == datetime(
+        2026, 9, 22, 6, 0, tzinfo=ZoneInfo("Europe/Moscow")
+    )
+    assert source.local_window_wait_detail([item], now=current) == (
+        "ближайший город — Новосибирск; там сейчас 22:33, разрешено 10:00–19:45."
+    )
 
 
 def test_xlsx_queue_adds_columns_updates_atomically_and_backs_up(tmp_path, settings):
