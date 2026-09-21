@@ -202,6 +202,17 @@ async function executeCommand(command) {
         return;
       }
       prepared = recovery.prepared;
+      // The independent watcher can observe a check disappearing without the
+      // content script surviving long enough to report it.  Close the operator
+      // notification explicitly before declaring Chrome healthy; otherwise a
+      // person can see a normal listing while still believing a CAPTCHA waits.
+      if (recovery.manualWaits > 0) {
+        await postEvent({
+          id: command.id,
+          type: "status",
+          status: "manual_cleared"
+        });
+      }
       await postEvent({
         id: command.id,
         type: "result",
