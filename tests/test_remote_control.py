@@ -203,6 +203,21 @@ class TimeDeferredController(RemoteController):
             self._worker_result = WorkerResult(kind="finished", summary=summary)
 
 
+class TechnicalRetryController(RemoteController):
+    def _run_worker(self, state, remaining, remaining_inspected):
+        del remaining, remaining_inspected
+        summary = RunSummary(
+            run_id=state.command_id,
+            requested=state.target,
+            errors=2,
+            stopped_reason="Автоповтор технических строк: пульт продолжит работу сам.",
+            resume_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+        )
+        self._progress_callback(state, summary, "")
+        with self._worker_guard:
+            self._worker_result = WorkerResult(kind="finished", summary=summary)
+
+
 def test_panel_reads_remote_command_from_fixed_cells(settings):
     values = [[""] * 6 for _ in range(12)]
     values[3][1] = "TRUE"
@@ -722,6 +737,49 @@ def test_remote_command_waits_and_keeps_state_for_known_local_resume(settings, m
     assert panel.active_updates[-1][2]["status"] == "ОЖИДАЕТ ВРЕМЯ"
     assert len(delivered) == 1
     assert delivered[0]["summary"].resume_at
+
+
+def test_remote_command_retries_technical_rows_without_operator_action(settings, monkeypatch):
+    delivered = []
+
+    class FakeNotifier:
+        enabled = True
+
+        def __init__(self, _settings):
+            pass
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("avito_crm.notifications.NotificationRouter", FakeNotifier)
+    panel = FakePanel(PanelCommand(False, False, 1, "Лист1", False))
+    controller = TechnicalRetryController(settings, panel)
+    controller._state = CommandState(
+        command_id="cmd-auto-retry",
+        target=1,
+        worksheet="Лист1",
+        retry_manual=False,
+        phase="claimed",
+        started_at="2026-08-01T18:19:40+00:00",
+        history_row=2,
+    )
+
+    controller.tick()
+    assert controller._worker is not None
+    controller._worker.join(timeout=2)
+    controller.tick()
+
+    assert controller._state is not None
+    assert controller._state.phase == "waiting_retry"
+    assert controller._state.technical_retry_cycles == 1
+    assert panel.finishes == []
+    controller.tick()
+    assert panel.active_updates[-1][2]["status"] == "ОЖИДАЕТ ПОВТОР"
+    assert len(delivered) == 1
+    assert delivered[0]["summary"].stopped_reason.startswith("Автоповтор технических строк")
 
 
 def test_crm_sync_warning_is_not_a_remote_technical_failure(settings):

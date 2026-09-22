@@ -185,6 +185,7 @@ class CommandState:
     resume_at: str = ""
     time_window_message: str = ""
     time_window_notified: bool = False
+    technical_retry_cycles: int = 0
     completion_notified: bool = False
     diagnostics_recorded: bool = False
     result: dict[str, Any] = field(default_factory=dict)
@@ -1368,6 +1369,15 @@ class RemoteController:
                     status="ОЖИДАЕТ ВРЕМЯ",
                     message=message or "Ожидаем ближайшее безопасное местное время.",
                 )
+            elif self._state.phase == "waiting_retry":
+                with self._worker_guard:
+                    message = self._phase_message
+                self.panel.update_active(
+                    self._state,
+                    self._progress,
+                    status="ОЖИДАЕТ ПОВТОР",
+                    message=message or "Технические строки будут автоматически повторены.",
+                )
             else:
                 self.panel.heartbeat()
         else:
@@ -1495,15 +1505,18 @@ class RemoteController:
         if state.stop_requested:
             self._prepare_stopped_result(state)
             return
-        resuming_time_window = state.phase == "waiting_time_window"
-        if resuming_time_window:
+        resuming_deferred_run = state.phase in {"waiting_time_window", "waiting_retry"}
+        if resuming_deferred_run:
             resume_at = _parse_utc_timestamp(state.resume_at)
             if resume_at and datetime.now(UTC) < resume_at:
+                default_message = (
+                    "Ожидаем безопасное местное время; автопродолжение "
+                    f"не ранее {resume_at.astimezone(ZoneInfo('Europe/Moscow')):%H:%M} МСК."
+                    if state.phase == "waiting_time_window"
+                    else "Технические строки будут автоматически повторены."
+                )
                 with self._worker_guard:
-                    self._phase_message = self._state.time_window_message or (
-                        "Ожидаем безопасное местное время; автопродолжение "
-                        f"не ранее {resume_at.astimezone(ZoneInfo('Europe/Moscow')):%H:%M} МСК."
-                    )
+                    self._phase_message = self._state.time_window_message or default_message
                 return
             state.phase = "claimed"
             state.resume_at = ""
@@ -1517,7 +1530,7 @@ class RemoteController:
         if state.history_row < 2:
             state.history_row = self.panel.append_history(state)
             self._save_state(state)
-        if resuming_time_window:
+        if resuming_deferred_run:
             recovered = ProgressSnapshot(
                 created=state.base_created,
                 captured=state.base_captured,
@@ -1741,7 +1754,26 @@ class RemoteController:
             summary = result.summary or RunSummary(self._state.command_id, 0)
             if summary.resume_at:
                 self._remember_progress_baseline(self._state)
-                self._state.phase = "waiting_time_window"
+                automatic_technical_retry = summary.stopped_reason.startswith(
+                    "Автоповтор технических строк"
+                )
+                if automatic_technical_retry:
+                    self._state.technical_retry_cycles += 1
+                    if self._state.technical_retry_cycles > 3:
+                        summary.resume_at = ""
+                        summary.stopped_reason = (
+                            "Аварийная остановка после 3 автоматических повторов "
+                            "технических строк"
+                        )
+                    else:
+                        self._state.phase = "waiting_retry"
+                else:
+                    self._state.phase = "waiting_time_window"
+                if not summary.resume_at:
+                    self._state.result = self._classify_summary(self._state, summary)
+                    self._state.phase = "finalizing"
+                    self._save_state(self._state)
+                    return
                 self._state.resume_at = summary.resume_at
                 self._state.time_window_message = summary.stopped_reason
                 with self._worker_guard:

@@ -74,6 +74,18 @@ def _defer_until_local_window(
     )
 
 
+def _earliest_retry_at(current: str, candidate: str) -> str:
+    """Keep the earliest scheduled technical retry as an ISO-8601 timestamp."""
+    if not current:
+        return candidate
+    try:
+        current_at = datetime.fromisoformat(current.replace("Z", "+00:00"))
+        candidate_at = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return candidate
+    return candidate if candidate_at < current_at else current
+
+
 class Pipeline:
     def __init__(
         self,
@@ -124,6 +136,7 @@ class Pipeline:
         processed_rows: set[str] = set()
         captured_rows: set[str] = set()
         unresolved_technical_rows: set[str] = set()
+        technical_retry_at = ""
         time_deferred_rows: set[str] = set()
         captured_time_deferred_rows: set[str] = set()
         recovered_rows: set[str] = set()
@@ -637,6 +650,8 @@ class Pipeline:
                                 if repeat_flow
                                 else ItemStatus.RETRY_TECHNICAL
                             )
+                            retry_at = self._next_phone_retry_at()
+                            technical_retry_at = _earliest_retry_at(technical_retry_at, retry_at)
                             self._finalize_expected(
                                 canonical_url,
                                 item,
@@ -648,7 +663,7 @@ class Pipeline:
                                 repeat_phone_attempts=(
                                     repeat_phone_attempts if repeat_flow else None
                                 ),
-                                next_retry_at=self._next_phone_retry_at(),
+                                next_retry_at=retry_at,
                             )
                             summary.retries += 1
                             unresolved_technical_rows.add(item.row_id)
@@ -738,6 +753,8 @@ class Pipeline:
                                 if repeat_flow
                                 else ItemStatus.RETRY_TECHNICAL
                             )
+                            retry_at = self._next_phone_retry_at()
+                            technical_retry_at = _earliest_retry_at(technical_retry_at, retry_at)
                             self._finalize_expected(
                                 canonical_url,
                                 item,
@@ -749,7 +766,7 @@ class Pipeline:
                                 repeat_phone_attempts=(
                                     repeat_phone_attempts if repeat_flow else None
                                 ),
-                                next_retry_at=self._next_phone_retry_at(),
+                                next_retry_at=retry_at,
                             )
                             summary.retries += 1
                             unresolved_technical_rows.add(item.row_id)
@@ -901,6 +918,11 @@ class Pipeline:
                                 if repeat_flow
                                 else ItemStatus.RETRY_TECHNICAL
                             )
+                            retry_at = "" if final_attempt else self._next_phone_retry_at()
+                            if retry_at:
+                                technical_retry_at = _earliest_retry_at(
+                                    technical_retry_at, retry_at
+                                )
                             self._finalize_expected(
                                 canonical_url,
                                 item,
@@ -912,9 +934,7 @@ class Pipeline:
                                 repeat_phone_attempts=(
                                     repeat_phone_attempts if repeat_flow else None
                                 ),
-                                next_retry_at=(
-                                    "" if final_attempt else self._next_phone_retry_at()
-                                ),
+                                next_retry_at=retry_at,
                             )
                             if not final_attempt:
                                 summary.retries += 1
@@ -942,7 +962,15 @@ class Pipeline:
                         break
 
                 if not summary.stopped_reason:
-                    summary.stopped_reason = "Очередь обработана: все доступные попытки завершены"
+                    if summary.errors and technical_retry_at:
+                        summary.resume_at = technical_retry_at
+                        summary.stopped_reason = (
+                            "Автоповтор технических строк: пульт продолжит работу сам."
+                        )
+                    else:
+                        summary.stopped_reason = (
+                            "Очередь обработана: все доступные попытки завершены"
+                        )
         except KeyboardInterrupt:
             summary.stopped_reason = "Остановлено с клавиатуры"
             LOGGER.warning(summary.stopped_reason)

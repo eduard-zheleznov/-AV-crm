@@ -1082,6 +1082,12 @@ def _run_completion_message(
             "🧩 Разгадайте капчу Avito.\n"
             "После решения ничего не запускайте: очередь продолжится сама.",
         )
+    elif reason_lower.startswith("автоповтор технических строк"):
+        return (
+            "[Avito CRM] Очередь повторит строки сама",
+            "ℹ️ Технические строки будут автоматически повторены.\n"
+            "Ничего делать не нужно.",
+        )
     elif summary.errors:
         return (
             "[Avito CRM] Проверьте работу Avito",
@@ -1126,6 +1132,8 @@ def _completion_recipients(
 def _technical_alert_category(summary: RunSummary) -> str:
     reason = str(summary.stopped_reason or "").casefold()
     if summary.manual_required:
+        return ""
+    if reason.startswith("автоповтор технических строк"):
         return ""
     if reason.startswith("ошибка запуска"):
         return "startup_error"

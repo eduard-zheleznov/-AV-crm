@@ -393,7 +393,8 @@ def test_ineffective_click_continues_without_consuming_attempt_or_using_ocr(
     assert source.items[1].status == ItemStatus.CAPTURED
     assert summary.processed == 2
     assert summary.captured == 1
-    assert summary.stopped_reason == "Очередь обработана: все доступные попытки завершены"
+    assert summary.stopped_reason == "Автоповтор технических строк: пульт продолжит работу сам."
+    assert summary.resume_at
 
 
 def test_ineffective_click_stops_after_consecutive_failure_limit(tmp_path, settings, monkeypatch):

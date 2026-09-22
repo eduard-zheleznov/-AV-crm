@@ -744,6 +744,21 @@ def test_time_deferred_completion_is_an_info_message():
     assert "⚠️" not in body
 
 
+def test_automatic_technical_retry_is_an_info_message_without_action_request():
+    summary = RunSummary(
+        run_id="run-auto-retry",
+        requested=3,
+        errors=2,
+        stopped_reason="Автоповтор технических строк: пульт продолжит работу сам.",
+    )
+
+    subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
+
+    assert subject == "[Avito CRM] Очередь повторит строки сама"
+    assert body.startswith("ℹ️ Технические строки будут автоматически повторены")
+    assert "перезапустите" not in body
+
+
 def test_completion_delivery_can_target_backup_without_changing_captcha_routing(
     settings, monkeypatch
 ):
