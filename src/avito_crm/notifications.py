@@ -197,7 +197,7 @@ class TelegramNotifier:
         return self.send(
             "\n".join(
                 (
-                    "✅ Проверка Avito завершена, очередь продолжает работу.",
+                    "✅ Проверка Avito завершена. Продолжаем обработку.",
                     f"Компьютер: {self.computer_name}",
                     f"Пауза заняла: {_format_duration(elapsed_seconds)}",
                     f"Ссылка: {url}",
@@ -466,7 +466,7 @@ class MaxNotifier:
         return self.send(
             "\n".join(
                 (
-                    "✅ Проверка Avito завершена, очередь продолжает работу.",
+                    "✅ Проверка Avito завершена. Продолжаем обработку.",
                     f"Компьютер: {self.computer_name}",
                     f"Пауза заняла: {_format_duration(elapsed_seconds)}",
                     f"Ссылка: {url}",
@@ -775,10 +775,10 @@ class EmailNotifier:
         if include_backup:
             recipients = _deduplicate((*self.primary_recipients, *self.backup_recipients))
         return self.send(
-            "[Avito CRM] Капча решена, работа продолжена",
+            "[Avito CRM] Проверка Avito завершена",
             "\n".join(
                 (
-                    "Проверка Avito завершена, очередь продолжает работу.",
+                    "Проверка Avito завершена. Продолжаем обработку.",
                     f"Компьютер: {self.computer_name}",
                     f"Пауза заняла: {_format_duration(elapsed_seconds)}",
                     f"Ссылка: {url}",

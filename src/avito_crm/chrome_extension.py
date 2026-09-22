@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.29"
+EXPECTED_EXTENSION_VERSION = "1.0.30"
 
 
 @dataclass(slots=True)
@@ -562,6 +562,11 @@ class ChromeExtensionBrowser:
         self._needs_active_probe = True
         self._last_probe_at = 0.0
         self._last_extension_instance = ""
+        # A solved Avito check can leave the first listing document in a
+        # short-lived state: it looks normal, but the next phone button does
+        # not accept the Chrome UI-gesture yet. Keep this fact only for the
+        # immediately following reveal and give it one clean retry.
+        self._post_manual_resume_retry_pending = False
         self.captchas_solved = 0
 
     def __enter__(self) -> ChromeExtensionBrowser:
@@ -675,20 +680,43 @@ class ChromeExtensionBrowser:
             raise ValueError("max_clicks должен быть равен 1 или 2")
         canonical_url = canonical_avito_url(url)
         self.preflight()
+        manual_check_just_cleared = self._take_post_manual_resume_retry()
         self._reset_manual_session()
         try:
-            event = self.bridge.execute(
-                url=canonical_url,
-                row_id=row_id,
-                max_clicks=max_clicks,
-                status_callback=lambda status: self._handle_status(status, canonical_url),
-            )
+            event = self._execute_reveal(canonical_url, row_id, max_clicks)
         except OperatorStopRequested:
             self._notify_captcha_stopped(canonical_url)
             raise
         except PageNotReadyError:
             self._needs_active_probe = True
             raise
+
+        # Do not surface a technical warning immediately after a person has
+        # cleared Avito's check. Recreate the managed context once and retry
+        # the same row. This is a bounded recovery of browser state, not a
+        # CAPTCHA bypass and not an extra attempt to create a CRM lead.
+        manual_check_just_cleared = (
+            manual_check_just_cleared or self._take_post_manual_resume_retry()
+        )
+        if manual_check_just_cleared and event.status in {
+            "browser_infra",
+            "page_not_ready",
+            "stale_content_script",
+            "click_not_effective",
+        }:
+            LOGGER.warning(
+                "Первое раскрытие после ручной проверки не подтвердилось; "
+                "пересоздаём управляемую вкладку и повторяем ту же строку один раз"
+            )
+            self._needs_active_probe = True
+            time.sleep(max(1.0, self.settings.avito_extension_recovery_backoff))
+            try:
+                self.preflight(force=True)
+                self._reset_manual_session()
+                event = self._execute_reveal(canonical_url, row_id, max_clicks)
+            except OperatorStopRequested:
+                self._notify_captcha_stopped(canonical_url)
+                raise
         status = event.status
         payload = event.payload
         if status == "phone":
@@ -759,6 +787,14 @@ class ChromeExtensionBrowser:
             str(payload.get("reason", f"Неизвестный ответ расширения: {status}"))
         )
 
+    def _execute_reveal(self, url: str, row_id: str, max_clicks: int) -> ExtensionEvent:
+        return self.bridge.execute(
+            url=url,
+            row_id=row_id,
+            max_clicks=max_clicks,
+            status_callback=lambda status: self._handle_status(status, url),
+        )
+
     def _handle_status(self, event: ExtensionEvent, url: str) -> None:
         if event.status == "manual_required" and not self._manual_notified:
             self._manual_notified = True
@@ -781,6 +817,7 @@ class ChromeExtensionBrowser:
             if self._manual_pending:
                 self.captchas_solved += 1
                 self._manual_pending = False
+                self._post_manual_resume_retry_pending = True
                 elapsed = max(
                     0.0,
                     time.monotonic() - (self._manual_started_at or time.monotonic()),
@@ -821,6 +858,11 @@ class ChromeExtensionBrowser:
         self._manual_pending = False
         self._manual_backup_alerted = False
         self._manual_started_at = None
+
+    def _take_post_manual_resume_retry(self) -> bool:
+        pending = self._post_manual_resume_retry_pending
+        self._post_manual_resume_retry_pending = False
+        return pending
 
     def _notify_safely(self, method: str, **kwargs: object) -> None:
         if not self.notifier.enabled:

@@ -610,6 +610,53 @@ def test_extension_browser_counts_each_solved_captcha_once(settings):
     assert browser.captchas_solved == 1
 
 
+def test_extension_browser_retries_once_after_manual_check_when_first_click_fails(
+    settings, monkeypatch
+):
+    """A just-solved Avito check must not strand the next queue row."""
+
+    notifier = _RecordingNotifier()
+    browser = ChromeExtensionBrowser(settings, _FakeOcr(), notifier)
+
+    class PostManualRecoveryBridge(_FakeBridge):
+        def __init__(self) -> None:
+            super().__init__(ExtensionEvent("result", "healthy", {}))
+            self.probe_calls = 0
+            self.execute_calls = 0
+
+        def health_probe(self, *, status_callback=None) -> ExtensionEvent:
+            self.probe_calls += 1
+            assert status_callback is not None
+            if self.probe_calls == 1:
+                status_callback(
+                    ExtensionEvent("status", "manual_required", {"reason": "капча"})
+                )
+                status_callback(ExtensionEvent("status", "manual_cleared", {}))
+            return ExtensionEvent("result", "healthy", {})
+
+        def execute(self, **_kwargs: object) -> ExtensionEvent:
+            self.execute_calls += 1
+            if self.execute_calls == 1:
+                return ExtensionEvent(
+                    "result", "click_not_effective", {"reason": "первый клик не прошёл"}
+                )
+            return ExtensionEvent(
+                "result", "phone", {"phone": "+79991234567", "source": "extension"}
+            )
+
+    bridge = PostManualRecoveryBridge()
+    browser.bridge = bridge
+    monkeypatch.setattr(chrome_extension_module.time, "sleep", lambda _seconds: None)
+
+    with browser:
+        result = browser.reveal_phone("https://www.avito.ru/moskva/test_123", max_clicks=1)
+
+    assert result.phone == "+79991234567"
+    assert bridge.execute_calls == 2
+    assert bridge.probe_calls == 2
+    assert [name for name, _kwargs in notifier.events] == ["detected", "resolved"]
+
+
 def test_extension_browser_reminds_and_reports_operator_stop(settings):
     notifier = _RecordingNotifier()
     browser = ChromeExtensionBrowser(settings, _FakeOcr(), notifier)
