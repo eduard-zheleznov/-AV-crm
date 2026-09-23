@@ -33,6 +33,7 @@ let polling = false;
 let managedTabId = null;
 let currentCommandId = null;
 let currentCommand = null;
+let manualRecoveryToken = 0;
 
 class BrowserInfrastructureError extends Error {
   constructor(message, diagnostics = {}) {
@@ -70,6 +71,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   const statusCommandId = currentCommandId;
   const senderTabId = sender?.tab?.id;
+  if (message.status === "manual_cleared") {
+    // The content script has observed the challenge disappearing itself.
+    // Invalidate any independent stale-session watcher before forwarding it.
+    manualRecoveryToken += 1;
+  }
   const bringManualTabForward =
     message.status === "manual_required" && senderTabId === managedTabId
       ? focusTab(senderTabId)
@@ -86,6 +92,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     )
     .then(() => sendResponse({ ok: true }))
     .catch(() => sendResponse({ ok: false }));
+  if (message.status === "manual_required" && senderTabId === managedTabId) {
+    // This is a background recovery guard. A temporary bridge outage must not
+    // turn into an unhandled service-worker rejection or affect a real check.
+    watchForStaleManualSession(statusCommandId, senderTabId).catch(() => undefined);
+  }
   return true;
 });
 
@@ -290,6 +301,46 @@ async function executeCommand(command) {
     currentCommandId = null;
     currentCommand = null;
   }
+}
+
+async function watchForStaleManualSession(commandId, tabId) {
+  // A real person normally clears the check through the same content-script
+  // promise, which emits manual_cleared within a second.  If Avito replaces
+  // that document, the promise can be left behind although the tab is already
+  // a normal listing.  Detect only that stale state, then reload once so the
+  // ordinary bounded recovery can continue the same row without a false alert.
+  const token = ++manualRecoveryToken;
+  await delay(5000);
+  if (token !== manualRecoveryToken || currentCommandId !== commandId) {
+    return;
+  }
+  const cleared = await waitForManualSurfaceToClear(tabId, { id: commandId });
+  if (
+    token !== manualRecoveryToken ||
+    currentCommandId !== commandId ||
+    !cleared ||
+    cleared.status !== "manual_cleared"
+  ) {
+    return;
+  }
+  // Give a surviving content script time to report its normal manual_cleared
+  // event. Only a missing event means the old manual waiter is stale.
+  await delay(2000);
+  if (token !== manualRecoveryToken || currentCommandId !== commandId) {
+    return;
+  }
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tab || !RUNTIME.avitoUrl(tab.url || "") || RUNTIME.isManualSurface(tab.url || "")) {
+    return;
+  }
+  await postEvent({
+    id: commandId,
+    type: "status",
+    status: "manual_cleared",
+    reason: "Avito вернул обычную страницу; ожидание проверки восстановлено автоматически"
+  });
+  manualRecoveryToken += 1;
+  await chrome.tabs.reload(tabId).catch(() => undefined);
 }
 
 async function validateBrowserClickLive(message, senderTabId) {
