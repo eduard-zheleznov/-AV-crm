@@ -48,6 +48,27 @@ def _diagnostic_action(status: str, detail: str) -> str:
 
 
 CONTROL_MARKER = "AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"
+MULTI_CONTROL_MARKER = "ПУЛЬТЫ ПО КОМПЬЮТЕРАМ"
+MULTI_CONTROL_HEADER_ROW = 15
+MULTI_CONTROL_FIRST_ROW = 16
+MULTI_CONTROL_SLOT_COUNT = 3
+MULTI_CONTROL_HEADERS = (
+    "Компьютер",
+    "Включён",
+    "Лист очереди",
+    "Запуск",
+    "Остановить",
+    "Цель",
+    "Предел",
+    "Статус",
+    "Осталось",
+    "Прогресс",
+    "Связь",
+    "Сообщение",
+    "Версия",
+    "Команда ID",
+)
+QUEUE_SUMMARY_LABEL = "Осталось ссылок без статуса"
 ANALYTICS_MARKER_V1 = "AVITO CRM — АНАЛИТИКА"
 ANALYTICS_MARKER = "AVITO CRM — АНАЛИТИКА v2"
 ANALYTICS_WORKSHEET = "Аналитика"
@@ -150,6 +171,8 @@ class PanelCommand:
     worksheet: str
     retry_manual: bool
     max_inspected: int = 0
+    slot: str = ""
+    enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -161,6 +184,7 @@ class CommandState:
     phase: str
     started_at: str
     max_inspected: int = 0
+    slot: str = ""
     history_row: int = 0
     stop_requested: bool = False
     base_created: int = 0
@@ -285,6 +309,8 @@ class GoogleControlPanel:
             else:
                 self._upgrade_control_labels()
                 self._apply_sheet_rules(self.control)
+            self._ensure_multi_control_layout()
+            self._ensure_queue_summary(self.settings.google_worksheet)
             history_values = self.history.get(f"A1:{_column_letter(len(HISTORY_HEADERS))}1")
             history_headers = tuple(history_values[0]) if history_values else ()
             if history_headers and history_headers not in {
@@ -343,6 +369,8 @@ class GoogleControlPanel:
     def read_command(self) -> PanelCommand:
         control = self._require_control()
         try:
+            if self.settings.remote_control_slot:
+                return self._read_multi_command()
             values = control.get("A1:F12")
             raw_limit = self._cell(values, 6, 2)
             limit = _parse_panel_limit(raw_limit)
@@ -362,7 +390,241 @@ class GoogleControlPanel:
         except Exception as exc:
             raise SourceError(f"Не удалось прочитать пульт: {exc}") from exc
 
+    def _read_multi_command(self) -> PanelCommand:
+        """Read only this computer's dedicated row from the shared control table."""
+        values = self._require_control().get("A16:N18")
+        slot = self.settings.remote_control_slot.strip()
+        for _offset, row in enumerate(values):
+            if self._cell([row], 1, 1) != slot:
+                continue
+            padded = list(row) + [""] * (len(MULTI_CONTROL_HEADERS) - len(row))
+            worksheet = str(padded[2]).strip()
+            if worksheet:
+                self._ensure_queue_summary(worksheet)
+            return PanelCommand(
+                start=_checked(str(padded[3])),
+                stop=_checked(str(padded[4])),
+                limit=_parse_panel_limit(str(padded[5])),
+                worksheet=worksheet,
+                retry_manual=False,
+                max_inspected=_parse_panel_limit(str(padded[6])),
+                slot=slot,
+                enabled=_checked(str(padded[1])),
+            )
+        raise ConfigurationError(
+            f"В листе «{self.settings.google_control_worksheet}» нет строки компьютера {slot!r}"
+        )
+
+    def _ensure_queue_summary(self, worksheet_name: str) -> None:
+        """Add one frozen counter row without changing a queue that already has it.
+
+        The queue reader locates the real ``Ссылка`` header dynamically, so the
+        counter can safely sit above the headers after the application update.
+        """
+        if not worksheet_name:
+            return
+        try:
+            worksheet = self.spreadsheet.worksheet(worksheet_name)
+            top_rows = worksheet.get("A1:B3")
+            if self._cell(top_rows, 1, 1) == QUEUE_SUMMARY_LABEL:
+                return
+            if self._cell(top_rows, 1, 1) != "Ссылка":
+                return
+            sheet_id = getattr(worksheet, "id", None)
+            if sheet_id is None:
+                return
+            formula = '=COUNTIFS(A3:A;"<>";B3:B;"")'
+            self.spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "insertDimension": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "dimension": "ROWS",
+                                    "startIndex": 0,
+                                    "endIndex": 1,
+                                },
+                                "inheritFromBefore": False,
+                            }
+                        },
+                        {
+                            "updateCells": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": 1,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 2,
+                                },
+                                "rows": [
+                                    {
+                                        "values": [
+                                            {
+                                                "userEnteredValue": {
+                                                    "stringValue": QUEUE_SUMMARY_LABEL
+                                                }
+                                            },
+                                            {"userEnteredValue": {"formulaValue": formula}},
+                                        ]
+                                    }
+                                ],
+                                "fields": "userEnteredValue",
+                            }
+                        },
+                        {
+                            "repeatCell": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 0,
+                                    "endRowIndex": 1,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": 2,
+                                },
+                                "cell": {
+                                    "userEnteredFormat": {
+                                        "backgroundColor": {"red": 0.89, "green": 0.95, "blue": 1},
+                                        "textFormat": {"bold": True},
+                                    }
+                                },
+                                "fields": "userEnteredFormat(backgroundColor,textFormat)",
+                            }
+                        },
+                        {
+                            "updateSheetProperties": {
+                                "properties": {
+                                    "sheetId": sheet_id,
+                                    "gridProperties": {"frozenRowCount": 2},
+                                },
+                                "fields": "gridProperties.frozenRowCount",
+                            }
+                        },
+                    ]
+                }
+            )
+        except self.worksheet_not_found:
+            LOGGER.warning("Лист очереди %r не найден: индикатор не добавлен", worksheet_name)
+        except Exception as exc:
+            LOGGER.warning("Не удалось добавить индикатор очереди %r: %s", worksheet_name, exc)
+
+    def _ensure_multi_control_layout(self) -> None:
+        """Provision inactive slots without changing the current legacy control flow."""
+        control = self._require_control()
+        with suppress(Exception):
+            control.resize(rows=max(24, int(getattr(control, "row_count", 0))), cols=14)
+        existing = self._cell(control.get("A14:N18"), 1, 1)
+        if existing == MULTI_CONTROL_MARKER:
+            self._format_multi_control()
+            return
+        if existing:
+            raise SourceError("Строки 14–18 листа «Управление» заняты; пульт не изменён")
+        default_slot = self.settings.remote_control_slot or _computer_name(self.settings)
+        standby_slots = [name for name in ("ПК-2", "ПК-3", "ПК-4") if name != default_slot]
+        rows = [
+            [MULTI_CONTROL_MARKER, "", "", "", "", "", "", "", "", "", "", "", "", ""],
+            list(MULTI_CONTROL_HEADERS),
+            [
+                default_slot,
+                True,
+                self.settings.google_worksheet,
+                False,
+                False,
+                0,
+                0,
+                "ТЕКУЩИЙ ПУЛЬТ",
+                '=IF(C16="","",IFERROR(COUNTIFS(INDIRECT("\'"&C16&"\'!A2:A"),"<>",INDIRECT("\'"&C16&"\'!B2:B"),""),"—"))',
+                "0 / все",
+                utc_now(),
+                "До включения режима слота состояние смотрите в верхнем пульте.",
+                __version__,
+                "",
+            ],
+            [standby_slots[0], False, "", False, False, 0, 0, "НЕ ПОДКЛЮЧЕН", *([""] * 6)],
+            [standby_slots[1], False, "", False, False, 0, 0, "НЕ ПОДКЛЮЧЕН", *([""] * 6)],
+        ]
+        control.update(rows, "A14:N18", value_input_option="USER_ENTERED")
+        self._format_multi_control()
+
+    def _format_multi_control(self) -> None:
+        control = self._require_control()
+        with suppress(Exception):
+            control.format("A14:N14", {"textFormat": {"bold": True}})
+            control.format(
+                "A15:N15",
+                {
+                    "backgroundColor": {"red": 0.05, "green": 0.09, "blue": 0.16},
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                    },
+                    "wrapStrategy": "WRAP",
+                },
+            )
+        sheet_id = getattr(control, "id", None)
+        if sheet_id is None:
+            return
+        requests: list[dict[str, Any]] = []
+        for column in (1, 3, 4):
+            requests.append(
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": MULTI_CONTROL_FIRST_ROW - 1,
+                            "endRowIndex": MULTI_CONTROL_FIRST_ROW - 1 + MULTI_CONTROL_SLOT_COUNT,
+                            "startColumnIndex": column,
+                            "endColumnIndex": column + 1,
+                        },
+                        "rule": {
+                            "condition": {"type": "BOOLEAN"},
+                            "strict": True,
+                            "showCustomUi": True,
+                        },
+                    }
+                }
+            )
+        for column in (5, 6):
+            requests.append(
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": MULTI_CONTROL_FIRST_ROW - 1,
+                            "endRowIndex": MULTI_CONTROL_FIRST_ROW - 1 + MULTI_CONTROL_SLOT_COUNT,
+                            "startColumnIndex": column,
+                            "endColumnIndex": column + 1,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "NUMBER_GREATER_THAN_EQ",
+                                "values": [{"userEnteredValue": "0"}],
+                            },
+                            "strict": True,
+                            "showCustomUi": True,
+                        },
+                    }
+                }
+            )
+        widths = (
+            (0, 1, 120), (1, 2, 70), (2, 3, 150), (3, 5, 80),
+            (5, 7, 76), (7, 10, 115), (10, 12, 165), (12, 14, 125),
+        )
+        for start, end, size in widths:
+            requests.append(_column_width_request(sheet_id, start, end, size))
+        with suppress(Exception):
+            self.spreadsheet.batch_update({"requests": requests})
+
     def claim(self, state: CommandState) -> None:
+        if state.slot:
+            self._batch_multi_control(
+                state.slot,
+                {
+                    "D": False, "H": "ПРИНЯТО", "J": f"0 / {_target_label(state.target)}",
+                    "K": utc_now(), "L": "Команда зафиксирована; запускаем.",
+                    "M": __version__, "N": state.command_id,
+                },
+            )
+            return
         self._batch_control(
             {
                 "B4": False,
@@ -382,12 +644,24 @@ class GoogleControlPanel:
         )
 
     def acknowledge_stop(self, *, clear_start: bool = False) -> None:
+        if self.settings.remote_control_slot:
+            values: dict[str, Any] = {"E": False, "K": utc_now()}
+            if clear_start:
+                values["D"] = False
+            self._batch_multi_control(self.settings.remote_control_slot, values)
+            return
         values: dict[str, Any] = {"B5": False, "E8": utc_now()}
         if clear_start:
             values["B4"] = False
         self._batch_control(values)
 
     def reject_start(self, message: str) -> None:
+        if self.settings.remote_control_slot:
+            self._batch_multi_control(
+                self.settings.remote_control_slot,
+                {"D": False, "H": "ВНИМАНИЕ", "K": utc_now(), "L": message[:500]},
+            )
+            return
         self._batch_control({"B4": False, "E9": message, "E8": utc_now()})
 
     def update_active(
@@ -401,6 +675,15 @@ class GoogleControlPanel:
         detail = message or "Обрабатываем очередь по одной строке."
         if progress.row_id:
             detail = f"Строка {progress.row_id}. {detail}"
+        if state.slot:
+            self._batch_multi_control(
+                state.slot,
+                {
+                    "H": status, "J": f"{progress.created} / {_target_label(state.target)}",
+                    "K": utc_now(), "L": detail[:500], "M": __version__, "N": state.command_id,
+                },
+            )
+            return
         self._batch_control(
             {
                 "E4": status,
@@ -416,6 +699,18 @@ class GoogleControlPanel:
 
     def finish(self, state: CommandState) -> None:
         result = state.result
+        if state.slot:
+            self._batch_multi_control(
+                state.slot,
+                {
+                    "H": str(result.get("status", "ЗАВЕРШЕНО")),
+                    "J": f"{int(result.get('created', 0))} / {_target_label(state.target)}",
+                    "K": utc_now(), "L": str(result.get("message", ""))[:1000],
+                    "M": __version__, "N": state.command_id,
+                },
+            )
+            self.finish_history(state)
+            return
         self._batch_control(
             {
                 "E4": str(result.get("status", "ЗАВЕРШЕНО")),
@@ -430,6 +725,12 @@ class GoogleControlPanel:
         self.finish_history(state)
 
     def heartbeat(self) -> None:
+        if self.settings.remote_control_slot:
+            self._batch_multi_control(
+                self.settings.remote_control_slot,
+                {"K": utc_now(), "M": __version__},
+            )
+            return
         self._batch_control(
             {"E8": utc_now(), "E11": _computer_name(self.settings), "E12": __version__}
         )
@@ -1227,6 +1528,41 @@ class GoogleControlPanel:
         except Exception as exc:
             raise SourceError(f"Не удалось обновить пульт: {exc}") from exc
 
+    def _batch_multi_control(self, slot: str, values: dict[str, Any]) -> None:
+        control = self._require_control()
+        rows = control.get("A16:A18")
+        for offset, row in enumerate(rows, start=MULTI_CONTROL_FIRST_ROW):
+            if self._cell([row], 1, 1) == slot:
+                data = [
+                    {"range": f"{column}{offset}", "values": [[value]]}
+                    for column, value in values.items()
+                ]
+                try:
+                    control.batch_update(data, value_input_option="RAW")
+                    return
+                except Exception as exc:
+                    raise SourceError(
+                        f"Не удалось обновить пульт компьютера {slot!r}: {exc}"
+                    ) from exc
+        raise SourceError(f"Не найдена строка компьютера {slot!r} в листе пульта")
+
+    def ensure_unique_queue_slot(self, command: PanelCommand) -> None:
+        if not command.slot:
+            return
+        values = self._require_control().get("A16:C18")
+        duplicates = [
+            self._cell([row], 1, 1)
+            for row in values
+            if self._cell([row], 1, 1) != command.slot
+            and _checked(self._cell([row], 1, 2))
+            and self._cell([row], 1, 3).casefold() == command.worksheet.casefold()
+        ]
+        if duplicates:
+            raise ConfigurationError(
+                f"Лист очереди {command.worksheet!r} уже закреплён за: {', '.join(duplicates)}. "
+                "Для каждого включённого компьютера укажите отдельный лист."
+            )
+
     def _require_control(self) -> Any:
         if self.control is None:
             raise SourceError("Лист пульта ещё не подготовлен")
@@ -1305,6 +1641,11 @@ class RemoteController:
 
         command = self.panel.read_command()
         self._collect_handoff_result()
+        if not command.enabled:
+            if self._state:
+                self._handle_stop(clear_start=True)
+            self.panel.heartbeat()
+            return
         try:
             self.panel.refresh_analytics_if_needed()
         except Exception as exc:
@@ -1476,6 +1817,7 @@ class RemoteController:
             phase="claiming",
             started_at=utc_now(),
             max_inspected=_effective_max_inspected(command.limit, command.max_inspected),
+            slot=command.slot,
         )
         self._state = state
         self._save_state(state)
@@ -1497,6 +1839,12 @@ class RemoteController:
         if not command.worksheet.strip() or command.worksheet.casefold() in reserved:
             self.panel.reject_start("Укажите отдельный лист очереди, например «Лист1».")
             raise ConfigurationError("Некорректный лист очереди")
+        if command.slot:
+            try:
+                self.panel.ensure_unique_queue_slot(command)
+            except ConfigurationError as exc:
+                self.panel.reject_start(str(exc))
+                raise
 
     def _continue_existing_state(self) -> None:
         state = self._state

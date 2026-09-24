@@ -169,6 +169,7 @@ class Settings:
     google_history_worksheet: str
     google_plan_worksheet: str
     remote_control_poll_seconds: float
+    remote_control_slot: str
 
     url_column: str
     status_column: str
@@ -376,6 +377,7 @@ class Settings:
             ).strip(),
             google_plan_worksheet=os.getenv("GOOGLE_PLAN_WORKSHEET", "План загрузки").strip(),
             remote_control_poll_seconds=_float("REMOTE_CONTROL_POLL_SECONDS", 20.0),
+            remote_control_slot=os.getenv("REMOTE_CONTROL_SLOT", "").strip(),
             url_column=os.getenv("QUEUE_URL_COLUMN", "Ссылка").strip(),
             status_column=os.getenv("QUEUE_STATUS_COLUMN", "Статус").strip(),
             phone_column=os.getenv("QUEUE_PHONE_COLUMN", "Телефон").strip(),

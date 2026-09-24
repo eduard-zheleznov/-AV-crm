@@ -473,6 +473,7 @@ class GoogleSheetsQueueSource(QueueSource):
             )
             self._headers_cache: list[str] | None = None
             self._rows_cache: list[list[str]] | None = None
+            self._header_row_number = 1
             self.plan_worksheet = plan_worksheet
             self.timezone_guard_enabled = timezone_guard_enabled
             self.local_call_start = local_call_start
@@ -501,8 +502,21 @@ class GoogleSheetsQueueSource(QueueSource):
             self._format_empty_sheet(headers)
             self._headers_cache = headers
             self._rows_cache = []
+            self._header_row_number = 1
             return headers, []
-        headers = [str(value).strip() for value in values[0]]
+        # A queue may have a small frozen summary above its actual columns.
+        # Find the real header instead of treating the first visible row as data.
+        header_index = next(
+            (
+                index
+                for index, row in enumerate(values[:10])
+                if self.columns.url in {str(value).strip() for value in row}
+            ),
+            None,
+        )
+        if header_index is None:
+            raise SourceError(f"В Google Sheet нет колонки {self.columns.url!r}")
+        headers = [str(value).strip() for value in values[header_index]]
         if self.columns.url not in headers:
             raise SourceError(f"В Google Sheet нет колонки {self.columns.url!r}")
         changed = False
@@ -513,15 +527,20 @@ class GoogleSheetsQueueSource(QueueSource):
         if changed:
             try:
                 google_api_call(
-                    lambda: self.sheet.update([headers], "1:1", value_input_option="RAW"),
+                    lambda: self.sheet.update(
+                        [headers],
+                        f"{header_index + 1}:{header_index + 1}",
+                        value_input_option="RAW",
+                    ),
                     label="Добавление служебных колонок Google Sheet",
                 )
             except Exception as exc:
                 raise SourceError(f"Не удалось добавить служебные колонки: {exc}") from exc
         width = len(headers)
-        rows = [row + [""] * (width - len(row)) for row in values[1:]]
+        rows = [row + [""] * (width - len(row)) for row in values[header_index + 1 :]]
         self._headers_cache = headers
         self._rows_cache = rows
+        self._header_row_number = header_index + 1
         return headers, rows
 
     def _format_empty_sheet(self, headers: list[str]) -> None:
@@ -583,7 +602,7 @@ class GoogleSheetsQueueSource(QueueSource):
         index = {name: position for position, name in enumerate(headers)}
         plan = self._read_plan() if getattr(self, "timezone_guard_enabled", False) else {}
         items = []
-        for row_number, row in enumerate(rows, start=2):
+        for row_number, row in enumerate(rows, start=self._header_row_number + 1):
             url = row[index[self.columns.url]].strip()
             if not url:
                 continue
@@ -740,7 +759,7 @@ class GoogleSheetsQueueSource(QueueSource):
             headers, rows = self._read()
         index = {name: position for position, name in enumerate(headers)}
         row_number = _safe_int(item.row_id)
-        values_index = row_number - 2
+        values_index = row_number - self._header_row_number - 1
         if values_index < 0 or values_index >= len(rows):
             raise SourceError(f"Строка Google Sheet больше не существует: {item.row_id}")
         url_column = index[self.columns.url]

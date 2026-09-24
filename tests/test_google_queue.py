@@ -122,6 +122,25 @@ def test_google_sheet_initializes_an_empty_tab(settings):
     assert source.sheet.filter_enabled is True
 
 
+def test_google_sheet_accepts_a_frozen_summary_above_the_queue_header(settings):
+    source = object.__new__(GoogleSheetsQueueSource)
+    source.columns = QueueColumns.from_settings(settings)
+    source.max_attempts = 3
+    headers = [source.columns.url, *source.columns.managed]
+    source.sheet = FakeSheet()
+    source.sheet.values = [
+        ["Осталось без статуса", "1"],
+        [""],
+        headers,
+        ["https://www.avito.ru/moskva/item_123456789", *([""] * (len(headers) - 1))],
+    ]
+
+    items = source.list_actionable()
+
+    assert len(items) == 1
+    assert items[0].row_id == "4"
+
+
 @pytest.mark.parametrize(
     ("title", "qualified_status_cell"),
     [

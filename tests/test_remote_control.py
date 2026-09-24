@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -16,6 +17,7 @@ from avito_crm.remote_control import (
     HISTORY_HEADERS,
     LEGACY_HISTORY_HEADERS,
     PREVIOUS_HISTORY_HEADERS,
+    QUEUE_SUMMARY_LABEL,
     CommandState,
     GoogleControlPanel,
     PanelCommand,
@@ -100,6 +102,7 @@ class MissingWorksheet(Exception):
 class FakeSpreadsheet:
     def __init__(self, worksheets=None):
         self.worksheets = worksheets or {}
+        self.requests = []
 
     def worksheet(self, title):
         if title not in self.worksheets:
@@ -111,6 +114,9 @@ class FakeSpreadsheet:
         sheet = MatrixSheet()
         self.worksheets[title] = sheet
         return sheet
+
+    def batch_update(self, body):
+        self.requests.append(body)
 
 
 class FakePanel:
@@ -294,6 +300,56 @@ def test_existing_user_control_sheet_is_never_overwritten(settings):
         panel.ensure_layout()
 
     assert existing.values == [["Мои важные данные"]]
+
+
+def test_multi_computer_slots_are_provisioned_and_read_independently(settings):
+    configured = replace(settings, remote_control_slot="ПК-2")
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    spreadsheet = FakeSpreadsheet({configured.google_control_worksheet: control})
+    panel = GoogleControlPanel(configured, spreadsheet, MissingWorksheet)
+
+    panel.ensure_layout()
+    control.update([[True, "Очередь-2", True, False, 3, 15]], "B16:G16")
+    command = panel.read_command()
+
+    assert control.values[13][0] == "ПУЛЬТЫ ПО КОМПЬЮТЕРАМ"
+    assert control.values[14][0] == "Компьютер"
+    assert command.slot == "ПК-2"
+    assert command.enabled is True
+    assert command.worksheet == "Очередь-2"
+    assert command.start is True
+    assert command.limit == 3
+    assert command.max_inspected == 15
+
+
+def test_queue_summary_is_inserted_only_above_a_standard_queue_header(settings):
+    control = MatrixSheet([["AVITO CRM — УДАЛЁННЫЙ ПУЛЬТ"]])
+    queue = MatrixSheet([["Ссылка", "Статус"], ["https://www.avito.ru/item", ""]])
+    queue.id = 71
+    spreadsheet = FakeSpreadsheet(
+        {settings.google_control_worksheet: control, settings.google_worksheet: queue}
+    )
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel._ensure_queue_summary(settings.google_worksheet)
+
+    assert len(spreadsheet.requests) == 1
+    requests = spreadsheet.requests[0]["requests"]
+    assert requests[0]["insertDimension"]["range"]["sheetId"] == 71
+    summary_cells = requests[1]["updateCells"]["rows"][0]["values"]
+    assert summary_cells[0]["userEnteredValue"]["stringValue"] == QUEUE_SUMMARY_LABEL
+    assert "COUNTIFS(A3:A" in summary_cells[1]["userEnteredValue"]["formulaValue"]
+
+
+def test_queue_summary_does_not_touch_a_nonstandard_first_row(settings):
+    queue = MatrixSheet([["Уже есть другой блок"], ["Ссылка", "Статус"]])
+    queue.id = 72
+    spreadsheet = FakeSpreadsheet({settings.google_worksheet: queue})
+    panel = GoogleControlPanel(settings, spreadsheet, MissingWorksheet)
+
+    panel._ensure_queue_summary(settings.google_worksheet)
+
+    assert spreadsheet.requests == []
 
 
 def test_diagnostics_sheet_records_actionable_row_errors(settings):
