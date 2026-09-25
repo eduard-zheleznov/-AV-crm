@@ -588,6 +588,37 @@ def test_router_suppresses_only_repeated_empty_queue_notice_until_progress(setti
     assert delivered == ["first", "recovered", "second"]
 
 
+def test_router_never_suppresses_queue_completion_after_a_solved_captcha(settings):
+    delivered = []
+
+    class Backend:
+        enabled = True
+        channel_name = "Test"
+
+        def send_run_completed(self, **kwargs):
+            delivered.append(kwargs["summary"].run_id)
+            return 1
+
+    routine_empty = RunSummary(
+        run_id="routine-empty", requested=0, stopped_reason="Очередь обработана"
+    )
+    captcha_finished = RunSummary(
+        run_id="captcha-finished",
+        requested=0,
+        captchas_solved=1,
+        stopped_reason="Очередь обработана: все доступные попытки завершены",
+    )
+
+    router = NotificationRouter(settings, backends=[Backend()])
+    assert router.send_run_completed(
+        summary=routine_empty, source_name="google:test", mode="full", live=True
+    ) == 1
+    assert router.send_run_completed(
+        summary=captcha_finished, source_name="google:test", mode="full", live=True
+    ) == 1
+    assert delivered == ["routine-empty", "captcha-finished"]
+
+
 def test_router_never_suppresses_repeated_technical_alerts(settings):
     delivered = []
 
@@ -670,10 +701,8 @@ def test_completion_message_reports_normal_outcomes_without_phone_data():
         summary, "server-1", "google:secret-id:Лист1", "full", True
     )
 
-    assert subject == "[Avito CRM] Запуск завершён"
-    assert body == (
-        "✅ Запуск завершён.\nОбработано ссылок: 8.\nНомеров открыто: 4.\nЛидов создано: 3."
-    )
+    assert subject == "[Avito CRM] Очередь завершена"
+    assert body == "✅ Очередь завершена.\nДоступных ссылок для обработки не осталось."
 
 
 def test_crm_sync_warning_does_not_report_a_technical_processing_error():
@@ -756,6 +785,25 @@ def test_automatic_technical_retry_is_an_info_message_without_action_request():
 
     assert subject == "[Avito CRM] Очередь повторит строки сама"
     assert body.startswith("ℹ️ Технические строки будут автоматически повторены")
+    assert "перезапустите" not in body
+
+
+def test_finished_queue_after_captcha_is_never_presented_as_a_restart_request():
+    summary = RunSummary(
+        run_id="captcha-finished",
+        requested=0,
+        errors=2,
+        captchas_solved=1,
+        stopped_reason="Очередь обработана: все доступные попытки завершены",
+    )
+
+    subject, body = _run_completion_message(summary, "LENOVO", "google:test", "full", True)
+
+    assert subject == "[Avito CRM] Очередь завершена"
+    assert body.startswith("✅ Очередь завершена.")
+    assert "Доступных ссылок для обработки не осталось" in body
+    assert "За запуск решено капч: 1." in body
+    assert "Диагностика" in body
     assert "перезапустите" not in body
 
 

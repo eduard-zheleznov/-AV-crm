@@ -1082,6 +1082,16 @@ def _run_completion_message(
             "🧩 Разгадайте капчу Avito.\n"
             "После решения ничего не запускайте: очередь продолжится сама.",
         )
+    elif reason_lower.startswith("очередь обработана"):
+        lines = [
+            "✅ Очередь завершена.",
+            "Доступных ссылок для обработки не осталось.",
+        ]
+        if summary.captchas_solved:
+            lines.append(f"За запуск решено капч: {summary.captchas_solved}.")
+        if summary.errors:
+            lines.append("Технические строки сохранены в листе «Диагностика».")
+        return "[Avito CRM] Очередь завершена", "\n".join(lines)
     elif reason_lower.startswith("автоповтор технических строк"):
         return (
             "[Avito CRM] Очередь повторит строки сама",
@@ -1133,6 +1143,10 @@ def _technical_alert_category(summary: RunSummary) -> str:
     reason = str(summary.stopped_reason or "").casefold()
     if summary.manual_required:
         return ""
+    # Exhausted retry rows are recorded in Diagnostics, but a command that
+    # naturally reached the end of the queue does not need an operator restart.
+    if reason.startswith("очередь обработана"):
+        return ""
     if reason.startswith("автоповтор технических строк"):
         return ""
     if reason.startswith("ошибка запуска"):
@@ -1169,6 +1183,7 @@ def _is_empty_queue_completion(summary: RunSummary) -> bool:
                 summary.unavailable,
                 summary.phone_failed,
                 summary.manual_required,
+                summary.captchas_solved,
                 summary.crm_sync_errors,
             )
         )
@@ -1185,7 +1200,7 @@ def _completion_recipients_for_summary(
 ) -> tuple[str, ...]:
     # Action messages cannot be allowed to disappear in a backup-only account.
     # Routine informational completions still honor the user's channel switches.
-    if summary.manual_required or _technical_alert_category(summary):
+    if summary.manual_required or summary.captchas_solved or _technical_alert_category(summary):
         return _deduplicate((*primary_values, *backup_values))
     return _completion_recipients(
         primary_values,
