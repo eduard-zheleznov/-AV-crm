@@ -89,6 +89,7 @@ class TelegramNotifier:
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self.token = settings.telegram_bot_token
+        self.notifications_enabled = settings.telegram_notifications_enabled
         self.primary_chat_ids = settings.telegram_primary_chat_ids
         self.backup_chat_ids = settings.telegram_backup_chat_ids
         self.completion_primary = settings.telegram_completion_primary
@@ -103,7 +104,7 @@ class TelegramNotifier:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token and self.primary_chat_ids)
+        return bool(self.notifications_enabled and self.token and self.primary_chat_ids)
 
     def close(self) -> None:
         if self._owns_client:
@@ -158,7 +159,7 @@ class TelegramNotifier:
                     wait_seconds=wait_seconds,
                 )
             ),
-            _deduplicate((*self.primary_chat_ids, *self.backup_chat_ids)),
+            self.primary_chat_ids,
         )
 
     def send_captcha_reminder(
@@ -359,6 +360,7 @@ class MaxNotifier:
 
     def __init__(self, settings: Settings, client: httpx.Client | None = None) -> None:
         self.token = settings.max_bot_token
+        self.notifications_enabled = settings.max_notifications_enabled
         self.primary_recipients = settings.max_primary_recipients
         self.backup_recipients = settings.max_backup_recipients
         self.completion_primary = settings.max_completion_primary
@@ -375,7 +377,7 @@ class MaxNotifier:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.token and self.primary_recipients)
+        return bool(self.notifications_enabled and self.token and self.primary_recipients)
 
     def close(self) -> None:
         if self._owns_client:
@@ -430,7 +432,7 @@ class MaxNotifier:
                     wait_seconds=wait_seconds,
                 )
             ),
-            _deduplicate((*self.primary_recipients, *self.backup_recipients)),
+            self.primary_recipients,
         )
 
     def send_captcha_reminder(
@@ -656,6 +658,7 @@ class EmailNotifier:
         self.username = settings.smtp_username
         self.password = settings.smtp_password
         self.from_address = settings.smtp_from_address or settings.smtp_username
+        self.notifications_enabled = settings.email_notifications_enabled
         self.primary_recipients = settings.email_primary_recipients
         self.backup_recipients = settings.email_backup_recipients
         self.completion_primary = settings.email_completion_primary
@@ -667,7 +670,8 @@ class EmailNotifier:
     @property
     def enabled(self) -> bool:
         return bool(
-            self.host
+            self.notifications_enabled
+            and self.host
             and self.username
             and self.password
             and self.from_address

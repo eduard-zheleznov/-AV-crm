@@ -74,6 +74,15 @@ class DesktopApp:
             value=_env_flag(values, "ROBOT_HANDOFF_ENABLED", False)
         )
         self.robot_handoff_status_var = tk.StringVar()
+        self.telegram_notifications_enabled_var = tk.BooleanVar(
+            value=_env_flag(values, "TELEGRAM_NOTIFICATIONS_ENABLED", True)
+        )
+        self.max_notifications_enabled_var = tk.BooleanVar(
+            value=_env_flag(values, "MAX_NOTIFICATIONS_ENABLED", True)
+        )
+        self.email_notifications_enabled_var = tk.BooleanVar(
+            value=_env_flag(values, "EMAIL_NOTIFICATIONS_ENABLED", True)
+        )
         self.telegram_token_var = tk.StringVar(value=values.get("TELEGRAM_BOT_TOKEN", ""))
         self.telegram_primary_var = tk.StringVar(value=values.get("TELEGRAM_PRIMARY_CHAT_IDS", ""))
         self.telegram_backup_var = tk.StringVar(value=values.get("TELEGRAM_BACKUP_CHAT_IDS", ""))
@@ -316,7 +325,7 @@ class DesktopApp:
         handoff_row.columnconfigure(1, weight=1)
         self.robot_handoff_checkbox = ttk.Checkbutton(
             handoff_row,
-            text="Фоновая обработка «Лид с робота»",
+            text="Автоперевод лида после звонка робота",
             variable=self.robot_handoff_enabled_var,
             command=self._save_robot_handoff_toggle,
         )
@@ -351,27 +360,32 @@ class DesktopApp:
             textvariable=self.telegram_summary_var,
             style="Hint.TLabel",
         ).grid(row=0, column=1, columnspan=3, sticky="w")
-        self.telegram_button = ttk.Button(
+        for column in range(1, 4):
+            notification_row.columnconfigure(column, weight=1)
+        self._build_notification_channel_control(
             notification_row,
-            text="Настроить Telegram",
-            command=self._show_telegram_settings,
-            style="Secondary.TButton",
+            column=1,
+            label="MAX",
+            variable=self.max_notifications_enabled_var,
+            command=lambda: self._save_notification_channel_toggle("MAX"),
+            configure=self._show_max_settings,
         )
-        self.telegram_button.grid(row=1, column=3, sticky="e", padx=(8, 0), pady=(8, 0))
-        self.email_button = ttk.Button(
+        self._build_notification_channel_control(
             notification_row,
-            text="Настроить Email",
-            command=self._show_email_settings,
-            style="Secondary.TButton",
+            column=2,
+            label="Email",
+            variable=self.email_notifications_enabled_var,
+            command=lambda: self._save_notification_channel_toggle("Email"),
+            configure=self._show_email_settings,
         )
-        self.email_button.grid(row=1, column=2, sticky="e", padx=(8, 0), pady=(8, 0))
-        self.max_button = ttk.Button(
+        self._build_notification_channel_control(
             notification_row,
-            text="Настроить MAX",
-            command=self._show_max_settings,
-            style="Secondary.TButton",
+            column=3,
+            label="Telegram",
+            variable=self.telegram_notifications_enabled_var,
+            command=lambda: self._save_notification_channel_toggle("Telegram"),
+            configure=self._show_telegram_settings,
         )
-        self.max_button.grid(row=1, column=1, sticky="e", pady=(8, 0))
 
         controls = ttk.Frame(outer, style="App.TFrame")
         controls.grid(row=2, column=0, sticky="ew", pady=16)
@@ -498,6 +512,33 @@ class DesktopApp:
         self.root.clipboard_append(email)
         self.status_var.set("Email скопирован")
 
+    def _build_notification_channel_control(
+        self,
+        parent: ttk.Frame,
+        *,
+        column: int,
+        label: str,
+        variable: tk.BooleanVar,
+        command: object,
+        configure: object,
+    ) -> None:
+        """Place a persistent on/off switch next to each channel's setup action."""
+        control = ttk.Frame(parent, style="Card.TFrame")
+        control.grid(row=1, column=column, sticky="e", padx=(8, 0), pady=(8, 0))
+        ttk.Checkbutton(
+            control,
+            text=label,
+            variable=variable,
+            command=command,
+            style="Card.TCheckbutton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            control,
+            text="Настроить",
+            command=configure,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, padx=(6, 0))
+
     def _show_google_help(self) -> None:
         answer = messagebox.askyesno(
             "Настройка Google Sheets",
@@ -517,15 +558,25 @@ class DesktopApp:
 
     def _refresh_notification_summary(self) -> None:
         channels: list[str] = []
-        if self.max_token_var.get().strip() and self.max_primary_var.get().strip():
+        if (
+            self.max_notifications_enabled_var.get()
+            and self.max_token_var.get().strip()
+            and self.max_primary_var.get().strip()
+        ):
             channels.append("MAX")
         if (
-            self.smtp_username_var.get().strip()
+            self.email_notifications_enabled_var.get()
+            and self.smtp_host_var.get().strip()
+            and self.smtp_username_var.get().strip()
             and self.smtp_password_var.get()
             and self.email_primary_var.get().strip()
         ):
             channels.append("Email")
-        if self.telegram_token_var.get().strip() and self.telegram_primary_var.get().strip():
+        if (
+            self.telegram_notifications_enabled_var.get()
+            and self.telegram_token_var.get().strip()
+            and self.telegram_primary_var.get().strip()
+        ):
             channels.append("Telegram")
         if not channels:
             self.telegram_summary_var.set(
@@ -538,9 +589,9 @@ class DesktopApp:
             or self.telegram_backup_var.get().strip()
             or self.email_backup_var.get().strip()
         )
-        backup = "; есть резервный получатель" if has_backup else ""
+        backup = "; резерв подключится только на эскалации" if has_backup else ""
         self.telegram_summary_var.set(
-            f"{' + '.join(channels)}: сразу + {reminders} мин; ожидание до решения или STOP{backup}"
+            f"{' + '.join(channels)}: основным сразу, эскалация через {reminders} мин{backup}"
         )
 
     def _show_telegram_settings(self) -> None:
@@ -567,7 +618,7 @@ class DesktopApp:
             card,
             text=(
                 "Сразу пишем основному ответственному, затем напоминаем. "
-                "Последнее напоминание уходит также резервному человеку."
+                "Резервный получатель подключается только при эскалации, а не сразу."
             ),
             style="Hint.TLabel",
             wraplength=700,
@@ -640,8 +691,8 @@ class DesktopApp:
             card,
             text=(
                 "После решения капчи программа сама заметит, что проверка исчезла, "
-                "и продолжит работу без отдельного уведомления. Итоговая статистика "
-                "придёт после завершения всего запуска."
+                "и продолжит работу. В уведомления придёт подтверждение продолжения "
+                "либо понятный итог, что доступные ссылки закончились."
             ),
             style="Hint.TLabel",
             wraplength=700,
@@ -702,8 +753,8 @@ class DesktopApp:
         ttk.Label(
             card,
             text=(
-                "MAX отправляется первым, затем срабатывают Email и Telegram. "
-                "Токен хранится только на этом компьютере."
+                "Первое уведомление получает основной адресат. Резервный подключается "
+                "только при эскалации. Токен хранится только на этом компьютере."
             ),
             style="Hint.TLabel",
             wraplength=720,
@@ -834,8 +885,8 @@ class DesktopApp:
         ttk.Label(
             card,
             text=(
-                "Почта доступна на этом сервере и служит надёжным резервом после MAX. "
-                "Для Яндекса нужен отдельный пароль приложения, а не пароль от аккаунта."
+                "Первое уведомление получает основной адресат. Резервный подключается "
+                "только при эскалации. Для Яндекса нужен пароль приложения, а не пароль аккаунта."
             ),
             style="Hint.TLabel",
             wraplength=740,
@@ -981,6 +1032,9 @@ class DesktopApp:
             raise ValueError("Укажите хотя бы один основной Chat ID")
         return {
             "TELEGRAM_BOT_TOKEN": token,
+            "TELEGRAM_NOTIFICATIONS_ENABLED": _bool_text(
+                self.telegram_notifications_enabled_var.get()
+            ),
             "TELEGRAM_PRIMARY_CHAT_IDS": ",".join(primary),
             "TELEGRAM_BACKUP_CHAT_IDS": ",".join(backup),
             "TELEGRAM_COMPLETION_PRIMARY": _bool_text(self.telegram_completion_primary_var.get()),
@@ -1006,6 +1060,7 @@ class DesktopApp:
         return {
             "MAX_API_BASE_URL": "https://platform-api2.max.ru",
             "MAX_BOT_TOKEN": token,
+            "MAX_NOTIFICATIONS_ENABLED": _bool_text(self.max_notifications_enabled_var.get()),
             "MAX_PRIMARY_RECIPIENTS": ",".join(primary),
             "MAX_BACKUP_RECIPIENTS": ",".join(backup),
             "MAX_COMPLETION_PRIMARY": _bool_text(self.max_completion_primary_var.get()),
@@ -1044,6 +1099,7 @@ class DesktopApp:
             "SMTP_USERNAME": username,
             "SMTP_PASSWORD": password,
             "SMTP_FROM_ADDRESS": username,
+            "EMAIL_NOTIFICATIONS_ENABLED": _bool_text(self.email_notifications_enabled_var.get()),
             "EMAIL_PRIMARY_RECIPIENTS": ",".join(primary),
             "EMAIL_BACKUP_RECIPIENTS": ",".join(backup),
             "EMAIL_COMPLETION_PRIMARY": _bool_text(self.email_completion_primary_var.get()),
@@ -1096,6 +1152,27 @@ class DesktopApp:
         }
         update_env_values(self.env_path, updates)
         self._refresh_notification_summary()
+
+    def _save_notification_channel_toggle(self, channel: str) -> None:
+        channel_key = channel.upper()
+        variables = {
+            "MAX": self.max_notifications_enabled_var,
+            "EMAIL": self.email_notifications_enabled_var,
+            "TELEGRAM": self.telegram_notifications_enabled_var,
+        }
+        variable = variables[channel_key]
+        try:
+            update_env_values(
+                self.env_path,
+                {f"{channel_key}_NOTIFICATIONS_ENABLED": _bool_text(variable.get())},
+            )
+        except OSError as exc:
+            variable.set(not variable.get())
+            messagebox.showerror("Уведомления", str(exc), parent=self.root)
+            return
+        self._refresh_notification_summary()
+        state = "включены" if variable.get() else "выключены"
+        self.status_var.set(f"Уведомления {channel}: {state}; получатели сохранены")
 
     def _save_telegram_dialog(self) -> None:
         try:
@@ -1187,9 +1264,15 @@ class DesktopApp:
 
     def _refresh_robot_handoff_status(self) -> None:
         if self.robot_handoff_enabled_var.get():
-            text = "Включено постоянно: работает и при закрытом окне программы."
+            text = (
+                "Включено: отдельно проверяет лиды после звонка робота, распознаёт запись "
+                "и переводит подходящий лид. Не влияет на очередь Avito."
+            )
         else:
-            text = "Выключено: лиды не потеряются и будут обработаны после включения."
+            text = (
+                "Выключено — это нормально: функция не нужна для открытия номеров, "
+                "создания лидов и уведомлений Avito."
+            )
         self.robot_handoff_status_var.set(text)
 
     def _save_robot_handoff_toggle(self) -> None:

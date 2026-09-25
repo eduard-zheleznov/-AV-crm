@@ -20,6 +20,24 @@ def test_refresh_env_reloads_gui_saved_notification_recipients(tmp_path, monkeyp
     assert refreshed.telegram_primary_chat_ids == ("222222",)
 
 
+def test_notification_channel_switches_default_to_enabled_and_can_be_disabled(
+    tmp_path, monkeypatch
+):
+    defaults = Settings.load(tmp_path)
+    assert defaults.telegram_notifications_enabled is True
+    assert defaults.max_notifications_enabled is True
+    assert defaults.email_notifications_enabled is True
+
+    monkeypatch.setenv("TELEGRAM_NOTIFICATIONS_ENABLED", "false")
+    monkeypatch.setenv("MAX_NOTIFICATIONS_ENABLED", "false")
+    monkeypatch.setenv("EMAIL_NOTIFICATIONS_ENABLED", "false")
+    disabled = Settings.load(tmp_path, refresh_env=True)
+
+    assert disabled.telegram_notifications_enabled is False
+    assert disabled.max_notifications_enabled is False
+    assert disabled.email_notifications_enabled is False
+
+
 def test_invalid_crm_timezone_does_not_block_unrelated_settings_load(tmp_path, monkeypatch):
     monkeypatch.setenv("LPTRACKER_TIMEZONE", "Missing/Timezone")
 

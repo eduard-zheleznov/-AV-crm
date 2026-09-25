@@ -72,7 +72,7 @@ def test_telegram_test_is_sent_to_unique_primary_and_backup_chats(settings):
     assert all(request.url.path.endswith("/sendMessage") for request in requests)
 
 
-def test_initial_captcha_alert_reaches_primary_and_backup_chats(settings):
+def test_initial_captcha_alert_reaches_only_primary_chats(settings):
     recipients = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -90,9 +90,67 @@ def test_initial_captcha_alert_reaches_primary_and_backup_chats(settings):
 
     assert (
         notifier.send_captcha_detected(reason="captcha", url="https://example.com", wait_seconds=0)
-        == 2
+        == 1
     )
+    assert recipients == ["10001"]
+
+
+def test_captcha_escalation_adds_backup_chats(settings):
+    recipients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recipients.append(parse_qs(request.content.decode())["chat_id"][0])
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    notifier = TelegramNotifier(
+        _notification_settings(
+            settings,
+            telegram_primary_chat_ids=("10001",),
+            telegram_backup_chat_ids=("10002",),
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert notifier.send_captcha_reminder(
+        reason="captcha", url="https://example.com", elapsed_seconds=60, escalate=True
+    ) == 2
     assert recipients == ["10001", "10002"]
+
+
+def test_captcha_resolution_informs_backup_only_after_escalation(settings):
+    recipients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recipients.append(parse_qs(request.content.decode())["chat_id"][0])
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1}})
+
+    notifier = TelegramNotifier(
+        _notification_settings(
+            settings,
+            telegram_primary_chat_ids=("10001",),
+            telegram_backup_chat_ids=("10002",),
+        ),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert notifier.send_captcha_resolved(
+        url="https://example.com", elapsed_seconds=60, include_backup=False
+    ) == 1
+    assert recipients == ["10001"]
+
+    recipients.clear()
+    assert notifier.send_captcha_resolved(
+        url="https://example.com", elapsed_seconds=60, include_backup=True
+    ) == 2
+    assert recipients == ["10001", "10002"]
+
+
+def test_disabled_notification_channel_keeps_recipients_but_does_not_send(settings):
+    notifier = TelegramNotifier(
+        _notification_settings(settings, telegram_notifications_enabled=False)
+    )
+
+    assert notifier.enabled is False
 
 
 def test_telegram_error_never_exposes_bot_token(settings):
@@ -204,6 +262,37 @@ def test_max_test_is_sent_to_unique_users_and_chats(settings):
     assert requests[0].url.params["user_id"] == "10001"
     assert requests[1].url.params["chat_id"] == "20002"
     assert all(request.headers["Authorization"] == "max-test-token" for request in requests)
+
+
+def test_initial_max_captcha_alert_reaches_only_primary(settings):
+    recipients = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        recipients.append(
+            request.url.params.get("user_id") or request.url.params.get("chat_id")
+        )
+        return httpx.Response(200, json={"message": {"body": {"text": "ok"}}})
+
+    configured = _max_settings(settings)
+    notifier = MaxNotifier(
+        configured,
+        client=httpx.Client(
+            base_url=configured.max_api_base_url,
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    assert notifier.send_captcha_detected(
+        reason="captcha", url="https://example.com", wait_seconds=0
+    ) == 1
+    assert recipients == ["10001"]
+
+
+def test_disabled_max_and_email_channels_do_not_send(settings):
+    assert MaxNotifier(_max_settings(settings, max_notifications_enabled=False)).enabled is False
+    assert (
+        EmailNotifier(_email_settings(settings, email_notifications_enabled=False)).enabled is False
+    )
 
 
 def test_max_error_never_exposes_bot_token(settings):

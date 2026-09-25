@@ -208,6 +208,7 @@ class Settings:
     avito_long_break_duration_min: float
     avito_long_break_duration_max: float
     telegram_bot_token: str
+    telegram_notifications_enabled: bool
     telegram_primary_chat_ids: tuple[str, ...]
     telegram_backup_chat_ids: tuple[str, ...]
     telegram_reminder_minutes: tuple[float, ...]
@@ -217,6 +218,7 @@ class Settings:
     telegram_completion_backup: bool
     max_api_base_url: str
     max_bot_token: str
+    max_notifications_enabled: bool
     max_primary_recipients: tuple[str, ...]
     max_backup_recipients: tuple[str, ...]
     max_request_timeout: float
@@ -229,6 +231,7 @@ class Settings:
     smtp_username: str
     smtp_password: str
     smtp_from_address: str
+    email_notifications_enabled: bool
     email_primary_recipients: tuple[str, ...]
     email_backup_recipients: tuple[str, ...]
     email_request_timeout: float
@@ -423,6 +426,7 @@ class Settings:
             avito_long_break_duration_min=_float("AVITO_LONG_BREAK_DURATION_MIN_SECONDS", 180.0),
             avito_long_break_duration_max=_float("AVITO_LONG_BREAK_DURATION_MAX_SECONDS", 420.0),
             telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+            telegram_notifications_enabled=_bool("TELEGRAM_NOTIFICATIONS_ENABLED", True),
             telegram_primary_chat_ids=parse_chat_ids(os.getenv("TELEGRAM_PRIMARY_CHAT_IDS", "")),
             telegram_backup_chat_ids=parse_chat_ids(os.getenv("TELEGRAM_BACKUP_CHAT_IDS", "")),
             telegram_reminder_minutes=parse_reminder_minutes(
@@ -436,6 +440,7 @@ class Settings:
             .strip()
             .rstrip("/"),
             max_bot_token=os.getenv("MAX_BOT_TOKEN", "").strip(),
+            max_notifications_enabled=_bool("MAX_NOTIFICATIONS_ENABLED", True),
             max_primary_recipients=parse_max_recipients(os.getenv("MAX_PRIMARY_RECIPIENTS", "")),
             max_backup_recipients=parse_max_recipients(os.getenv("MAX_BACKUP_RECIPIENTS", "")),
             max_request_timeout=_float("MAX_REQUEST_TIMEOUT_SECONDS", 15.0),
@@ -448,6 +453,7 @@ class Settings:
             smtp_username=os.getenv("SMTP_USERNAME", "").strip(),
             smtp_password=os.getenv("SMTP_PASSWORD", ""),
             smtp_from_address=os.getenv("SMTP_FROM_ADDRESS", "").strip(),
+            email_notifications_enabled=_bool("EMAIL_NOTIFICATIONS_ENABLED", True),
             email_primary_recipients=parse_email_addresses(
                 os.getenv("EMAIL_PRIMARY_RECIPIENTS", "")
             ),
