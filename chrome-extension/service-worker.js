@@ -4,6 +4,7 @@ importScripts(
   "navigation-core.js",
   "browser-context-core.js",
   "manual-session-core.js",
+  "command-lifecycle-core.js",
   "trusted-click.js"
 );
 
@@ -13,6 +14,7 @@ const NAVIGATION = globalThis.AVITO_CRM_NAVIGATION_CORE;
 const BROWSER_CONTEXT = globalThis.AVITO_CRM_BROWSER_CONTEXT_CORE;
 const MANUAL_SESSION = globalThis.AVITO_CRM_MANUAL_SESSION_CORE;
 const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
+const COMMAND_LIFECYCLE = globalThis.AVITO_CRM_COMMAND_LIFECYCLE;
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
 const BROWSER_CLICK_API_TIMEOUT_MS = 1500;
@@ -33,6 +35,7 @@ let polling = false;
 let managedTabId = null;
 let currentCommandId = null;
 let currentCommand = null;
+let currentManualRequired = false;
 let manualRecoveryToken = 0;
 
 class BrowserInfrastructureError extends Error {
@@ -71,6 +74,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   const statusCommandId = currentCommandId;
   const senderTabId = sender?.tab?.id;
+  if (senderTabId !== managedTabId || message.commandId !== statusCommandId) {
+    return false;
+  }
+  if (message.status === "manual_required") currentManualRequired = true;
+  if (message.status === "manual_cleared") currentManualRequired = false;
   if (message.status === "manual_cleared") {
     // The content script has observed the challenge disappearing itself.
     // Invalidate any independent stale-session watcher before forwarding it.
@@ -155,7 +163,8 @@ async function pollLoop() {
       const response = await fetch(`${BASE_URL}/v1/poll`, {
         method: "GET",
         headers: AUTH_HEADERS,
-        cache: "no-store"
+        cache: "no-store",
+        signal: AbortSignal.timeout(45000)
       });
       if (response.status === 204) {
         retryDelayMs = 1000;
@@ -179,6 +188,7 @@ async function pollLoop() {
 async function executeCommand(command) {
   currentCommandId = command.id;
   currentCommand = command;
+  currentManualRequired = false;
   try {
     let prepared = await getManagedTab(command);
     if (command.type === "health_probe") {
@@ -300,6 +310,7 @@ async function executeCommand(command) {
   } finally {
     currentCommandId = null;
     currentCommand = null;
+    currentManualRequired = false;
   }
 }
 
@@ -339,6 +350,7 @@ async function watchForStaleManualSession(commandId, tabId) {
     status: "manual_cleared",
     reason: "Avito вернул обычную страницу; ожидание проверки восстановлено автоматически"
   });
+  currentManualRequired = false;
   manualRecoveryToken += 1;
   await chrome.tabs.reload(tabId).catch(() => undefined);
 }
@@ -528,7 +540,8 @@ async function waitForManualSurfaceToClear(tabId, command) {
       try {
         const response = await fetch(
           `${BASE_URL}/v1/command-status?id=${encodeURIComponent(command.id)}`,
-          { method: "GET", headers: AUTH_HEADERS, cache: "no-store" }
+          { method: "GET", headers: AUTH_HEADERS, cache: "no-store",
+            signal: AbortSignal.timeout(5000) }
         );
         if (response.ok) {
           const payload = await response.json();
@@ -556,7 +569,7 @@ async function sendContentCommand(tabId, command, type) {
   try {
     while (Date.now() < deadline) {
       try {
-        return await Promise.race([
+        return await COMMAND_LIFECYCLE.waitForReply(Promise.race([
           chrome.tabs.sendMessage(tabId, {
             type,
             commandId: command.id,
@@ -567,8 +580,16 @@ async function sendContentCommand(tabId, command, type) {
             phoneWaitMs: command.phoneWaitMs
           }),
           cancellation
-        ]);
+        ]), {
+          timeoutMs: command.pageTimeoutMs + 5000,
+          isManual: () => currentManualRequired
+        });
       } catch (error) {
+        if (error.code === "content_reply_timeout") {
+          // Dispose only our managed document, including any late reply/click.
+          await chrome.tabs.reload(tabId).catch(() => undefined);
+          throw error;
+        }
         lastError = error;
         await delay(1000);
       }
@@ -588,19 +609,22 @@ async function waitForCancellation(tabId, commandId, signal) {
     try {
       const response = await fetch(
         `${BASE_URL}/v1/command-status?id=${encodeURIComponent(commandId)}`,
-        { method: "GET", headers: AUTH_HEADERS, cache: "no-store" }
+        { method: "GET", headers: AUTH_HEADERS, cache: "no-store",
+          signal: AbortSignal.timeout(5000) }
       );
       if (!response.ok) {
         continue;
       }
       const payload = await response.json();
-      if (payload.status === "cancelled") {
+      if (COMMAND_LIFECYCLE.isTerminalCommandStatus(payload.status)) {
         // Destroy the waiting content-script context so the service worker is
         // immediately ready for the next command after STOP/restart.
         await chrome.tabs.reload(tabId).catch(() => undefined);
         return {
           status: "cancelled",
-          reason: "Ожидание Chrome остановлено оператором"
+          reason: payload.status === "inactive"
+            ? "Предыдущая команда завершена или истекла; Chrome готов к следующей"
+            : "Ожидание Chrome остановлено оператором"
         };
       }
     } catch (_error) {
@@ -807,11 +831,11 @@ function isMissingContentScriptError(message) {
 }
 
 async function probeTab(tabId, expectedUrl, mode) {
-  return await chrome.tabs.sendMessage(tabId, {
+  return await COMMAND_LIFECYCLE.waitForReply(chrome.tabs.sendMessage(tabId, {
     type: "avito_crm_probe",
     expectedUrl,
     mode
-  });
+  }), { timeoutMs: 5000 });
 }
 
 function classifyWithoutContent(tab, expectedUrl, mode) {
@@ -834,7 +858,8 @@ async function postEvent(payload) {
     method: "POST",
     headers: AUTH_HEADERS,
     body: JSON.stringify(payload),
-    cache: "no-store"
+    cache: "no-store",
+    signal: AbortSignal.timeout(10000)
   });
   if (!response.ok) {
     throw new Error(`Локальный мост отклонил событие: HTTP ${response.status}`);

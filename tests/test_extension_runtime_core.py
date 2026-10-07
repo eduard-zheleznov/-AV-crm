@@ -16,6 +16,7 @@ import pytest
         "test-browser-context-core.cjs",
         "test-manual-session-core.cjs",
         "test-trusted-click.cjs",
+        "test-command-lifecycle-core.cjs",
     ],
 )
 def test_extension_runtime_core_offline_contract(script_name: str) -> None:

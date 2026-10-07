@@ -359,7 +359,8 @@ async function waitForManualAction(_timeoutMs) {
 }
 
 function notifyStatus(status, reason) {
-  chrome.runtime.sendMessage({ type: "avito_crm_status", status, reason }).catch(() => undefined);
+  chrome.runtime.sendMessage({ type: "avito_crm_status", status, reason,
+    commandId: activeRevealCommandId }).catch(() => undefined);
 }
 
 function pageText() {
