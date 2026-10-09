@@ -8,9 +8,11 @@ import sys
 import threading
 import tkinter as tk
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 from tkinter import END, filedialog, messagebox, ttk
 
+from avito_crm.diagnostics import save_report, show_report_in_folder
 from avito_crm.gui_config import (
     browser_profile_dir,
     browser_profile_is_initialized,
@@ -431,9 +433,14 @@ class DesktopApp:
         log_card.grid(row=3, column=0, sticky="nsew")
         log_card.columnconfigure(0, weight=1)
         log_card.rowconfigure(1, weight=1)
-        ttk.Label(log_card, text="Ход работы", style="Section.TLabel").grid(
-            row=0, column=0, sticky="w", pady=(0, 10)
+        log_header = ttk.Frame(log_card, style="Card.TFrame")
+        log_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        ttk.Label(log_header, text="Ход работы", style="Section.TLabel").pack(side="left")
+        self.diagnostics_button = ttk.Button(
+            log_header, text="Собрать диагностику", command=self._collect_diagnostics,
+            style="Secondary.TButton",
         )
+        self.diagnostics_button.pack(side="right")
         self.log = tk.Text(
             log_card,
             wrap="word",
@@ -1431,6 +1438,17 @@ class DesktopApp:
         return_code = process.wait()
         self.events.put(("done", (self.process_kind, return_code)))
 
+    def _collect_diagnostics(self) -> None:
+        self.diagnostics_button.configure(state="disabled", text="Собираем отчёт…")
+        # Runs independently of the queue and needs neither valid CRM/Google
+        # settings nor the worker lock. Tk is touched only on the main thread.
+        def collect() -> None:
+            try:
+                self.events.put(("diagnostics_ready", save_report(self.project_root)))
+            except Exception as exc:
+                self.events.put(("diagnostics_error", type(exc).__name__))
+        threading.Thread(target=collect, daemon=True).start()
+
     def _poll_events(self) -> None:
         try:
             while True:
@@ -1442,6 +1460,23 @@ class DesktopApp:
                 elif kind == "done":
                     process_kind, return_code = payload  # type: ignore[misc]
                     self._process_done(str(process_kind), int(return_code))
+                elif kind in {"diagnostics_ready", "diagnostics_error"}:
+                    self.diagnostics_button.configure(state="normal", text="Собрать диагностику")
+                    if kind == "diagnostics_error":
+                        messagebox.showerror(
+                            "Диагностика", "Не удалось сохранить отчёт. Проверьте доступ "
+                            f"к папке output и свободное место. Код: {payload}", parent=self.root,
+                        )
+                    else:
+                        archive = Path(str(payload))
+                        self._append_log(f"Диагностический отчёт сохранён: {archive}\n", "success")
+                        with suppress(OSError):
+                            show_report_in_folder(archive)
+                        messagebox.showinfo(
+                            "Диагностика готова", f"Передайте этот ZIP-файл в чат поддержки:\n"
+                            f"{archive}\n\nСекреты, телефоны и исходные логи не включены. "
+                            "Очередь и настройки не изменены.", parent=self.root,
+                        )
         except queue.Empty:
             pass
         if self.root.winfo_exists():
