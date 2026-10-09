@@ -44,7 +44,7 @@ from avito_crm.phone import canonical_avito_url, normalize_phone
 
 LOGGER = logging.getLogger(__name__)
 MAX_EVENT_BYTES = 12 * 1024 * 1024
-EXPECTED_EXTENSION_VERSION = "1.0.32"
+EXPECTED_EXTENSION_VERSION = "1.0.33"
 
 
 @dataclass(slots=True)
@@ -64,6 +64,7 @@ class _BridgeState:
         self.last_seen = 0.0
         self.extension_version = ""
         self.extension_instance = ""
+        self.progress_stage = ""
         self.stopped = False
 
 
@@ -217,6 +218,7 @@ class ExtensionBridge:
             self.state.dispatched = False
             self.state.events.clear()
             self.state.result = None
+            self.state.progress_stage = ""
             self.state.condition.notify_all()
         self._write_diagnostic(
             "command_created",
@@ -357,6 +359,31 @@ class ExtensionBridge:
             session_changed = bool(
                 extension_instance and extension_instance.strip() != self.state.extension_instance
             )
+            # A new MV3 worker cannot finish a command owned by the old worker.
+            # Fail it explicitly rather than strand the sequential queue until
+            # a minutes-long timeout. Never re-deliver a phone-click command.
+            if (
+                session_changed
+                and self.state.extension_instance
+                and self.state.command is not None
+                and self.state.dispatched
+                and self.state.result is None
+            ):
+                self.state.result = ExtensionEvent(
+                    "result",
+                    "browser_infra",
+                    {"reason": "Фоновый обработчик расширения Chrome перезапустился; "
+                     "текущая команда прервана без повторной отправки клика",
+                     "diagnostics": {"stage": self.state.progress_stage}},
+                )
+                self._write_diagnostic(
+                    "extension_restarted_during_command",
+                    command_id=str(self.state.command["id"]),
+                    command_type=str(self.state.command.get("type", "")),
+                    row_id=str(self.state.command.get("rowId", "")),
+                    status="browser_infra",
+                    diagnostics={"stage": self.state.progress_stage},
+                )
             self.state.last_seen = time.monotonic()
             self.state.extension_version = extension_version.strip()
             self.state.extension_instance = extension_instance.strip()
@@ -406,11 +433,24 @@ class ExtensionBridge:
             self.state.last_seen = time.monotonic()
             if not self.state.command or command_id != self.state.command.get("id"):
                 raise ValueError("Событие не относится к активной команде")
+            if self.state.result is not None:
+                raise ValueError("Команда Chrome уже завершена; позднее событие отклонено")
             command_type = str(self.state.command.get("type", ""))
             row_id = str(self.state.command.get("rowId", ""))
             url = str(self.state.command.get("url", ""))
             extension_version = self.state.extension_version
             extension_instance = self.state.extension_instance
+            if status == "command_progress":
+                progress = payload.get("diagnostics")
+                if not isinstance(progress, dict):
+                    raise ValueError("Некорректное описание этапа команды Chrome")
+                stage = str(progress.get("stage", ""))[:100]
+                if stage == self.state.progress_stage:
+                    # Refresh liveness without filling the log/event queue
+                    # with identical active-command heartbeat messages.
+                    self.state.condition.notify_all()
+                    return
+                self.state.progress_stage = stage
             if event_type == "result":
                 self.state.result = event
             else:

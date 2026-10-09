@@ -15,6 +15,7 @@ const BROWSER_CONTEXT = globalThis.AVITO_CRM_BROWSER_CONTEXT_CORE;
 const MANUAL_SESSION = globalThis.AVITO_CRM_MANUAL_SESSION_CORE;
 const TRUSTED_CLICK = globalThis.AVITO_CRM_TRUSTED_CLICK;
 const COMMAND_LIFECYCLE = globalThis.AVITO_CRM_COMMAND_LIFECYCLE;
+const BROWSER_API = COMMAND_LIFECYCLE.boundedBrowserApi(chrome);
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 const EXTENSION_INSTANCE_ID = crypto.randomUUID();
 const BROWSER_CLICK_API_TIMEOUT_MS = 1500;
@@ -37,6 +38,7 @@ let currentCommandId = null;
 let currentCommand = null;
 let currentManualRequired = false;
 let manualRecoveryToken = 0;
+let currentCommandStage = "";
 
 class BrowserInfrastructureError extends Error {
   constructor(message, diagnostics = {}) {
@@ -119,7 +121,7 @@ function startPolling() {
   // On startup keep only the latest one-tab window used by the bridge. This
   // immediately removes old blank/Avito windows left by an earlier extension
   // restart, while normal Chrome and unrelated incognito pages remain intact.
-  BROWSER_CONTEXT.reconcileManagedIncognitoWindows(chrome).catch(() => undefined);
+  BROWSER_CONTEXT.reconcileManagedIncognitoWindows(BROWSER_API).catch(() => undefined);
   pollLoop().finally(() => {
     polling = false;
   });
@@ -189,6 +191,27 @@ async function executeCommand(command) {
   currentCommandId = command.id;
   currentCommand = command;
   currentManualRequired = false;
+  currentCommandStage = "preparing_tab";
+  // Active-only liveness: do not depend on a pending Chrome/content promise.
+  // Extension API calls reset Chrome's idle timer (Chrome 110+). The progress
+  // event also records which stage stalled, without creating operator alerts.
+  let pulsePending = false;
+  const pulse = async () => {
+    if (pulsePending || currentCommandId !== command.id) return;
+    pulsePending = true;
+    try {
+      await BROWSER_API.runtime.getPlatformInfo();
+      if (currentCommandId !== command.id) return;
+      await postEvent({ id: command.id, type: "status", status: "command_progress",
+        diagnostics: { stage: currentCommandStage } });
+    } catch (_error) {
+      // Transient bridge downtime is not a CAPTCHA or a completed command.
+    } finally {
+      pulsePending = false;
+    }
+  };
+  const pulseTimer = setInterval(pulse, 5000);
+  pulse();
   try {
     let prepared = await getManagedTab(command);
     if (command.type === "health_probe") {
@@ -264,6 +287,7 @@ async function executeCommand(command) {
         }
       }
       await focusTab(tab.id);
+      currentCommandStage = "waiting_content_reply";
       const result = await sendRevealMessage(tab.id, command);
       if (result.status === "phone_error" && attempt < command.maxClicks) {
         continue;
@@ -308,9 +332,11 @@ async function executeCommand(command) {
       diagnostics: error?.diagnostics || null
     }).catch(() => undefined);
   } finally {
+    clearInterval(pulseTimer);
     currentCommandId = null;
     currentCommand = null;
     currentManualRequired = false;
+    currentCommandStage = "";
   }
 }
 
@@ -340,7 +366,7 @@ async function watchForStaleManualSession(commandId, tabId) {
   if (token !== manualRecoveryToken || currentCommandId !== commandId) {
     return;
   }
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const tab = await BROWSER_API.tabs.get(tabId).catch(() => null);
   if (!tab || !RUNTIME.avitoUrl(tab.url || "") || RUNTIME.isManualSurface(tab.url || "")) {
     return;
   }
@@ -352,7 +378,7 @@ async function watchForStaleManualSession(commandId, tabId) {
   });
   currentManualRequired = false;
   manualRecoveryToken += 1;
-  await chrome.tabs.reload(tabId).catch(() => undefined);
+  await BROWSER_API.tabs.reload(tabId).catch(() => undefined);
 }
 
 async function validateBrowserClickLive(message, senderTabId) {
@@ -391,7 +417,7 @@ async function browserClickTab(tabId) {
     return null;
   }
   return await TRUSTED_CLICK.withTimeout(
-    chrome.tabs.get(tabId),
+    BROWSER_API.tabs.get(tabId),
     BROWSER_CLICK_API_TIMEOUT_MS,
     "tab_lookup_timeout"
   ).catch(() => null);
@@ -416,14 +442,14 @@ async function getManagedTab(command) {
   for (let recoveryAttempt = 0; recoveryAttempt <= 1; recoveryAttempt += 1) {
     let tab = null;
     if (recoveryAttempt === 0 && managedTabId !== null) {
-      tab = await chrome.tabs.get(managedTabId).catch(() => null);
+      tab = await BROWSER_API.tabs.get(managedTabId).catch(() => null);
       if (tab && !BROWSER_CONTEXT.tabMatchesCommand(tab, command)) {
         await resetManagedTab(tab.id);
         tab = null;
       }
     }
     if (!tab) {
-      const created = await BROWSER_CONTEXT.createManagedTab(chrome, command);
+      const created = await BROWSER_CONTEXT.createManagedTab(BROWSER_API, command);
       if (!created.ok || !created.tab) {
         throw new BrowserInfrastructureError(
           BROWSER_CONTEXT.failureMessage(created.code),
@@ -483,7 +509,7 @@ async function resetManagedTab(tabId) {
   if (managedTabId === tabId) {
     managedTabId = null;
   }
-  await chrome.tabs.remove(tabId).catch(() => undefined);
+  await BROWSER_API.tabs.remove(tabId).catch(() => undefined);
 }
 
 function navigationError(navigation, expectedUrl) {
@@ -511,7 +537,7 @@ async function waitForManualSurfaceToClear(tabId, command) {
   let unavailableProbes = 0;
   let nextStatusCheckAt = 0;
   while (currentCommandId === command.id) {
-    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    const tab = await BROWSER_API.tabs.get(tabId).catch(() => null);
     if (!tab) {
       return { status: "browser_infra", reason: "Управляемая вкладка Avito закрыта" };
     }
@@ -587,7 +613,7 @@ async function sendContentCommand(tabId, command, type) {
       } catch (error) {
         if (error.code === "content_reply_timeout") {
           // Dispose only our managed document, including any late reply/click.
-          await chrome.tabs.reload(tabId).catch(() => undefined);
+          await BROWSER_API.tabs.reload(tabId).catch(() => undefined);
           throw error;
         }
         lastError = error;
@@ -619,7 +645,7 @@ async function waitForCancellation(tabId, commandId, signal) {
       if (COMMAND_LIFECYCLE.isTerminalCommandStatus(payload.status)) {
         // Destroy the waiting content-script context so the service worker is
         // immediately ready for the next command after STOP/restart.
-        await chrome.tabs.reload(tabId).catch(() => undefined);
+        await BROWSER_API.tabs.reload(tabId).catch(() => undefined);
         return {
           status: "cancelled",
           reason: payload.status === "inactive"
@@ -635,15 +661,16 @@ async function waitForCancellation(tabId, commandId, signal) {
 }
 
 async function focusTab(tabId) {
-  const tab = await chrome.tabs.get(tabId);
-  await chrome.windows.update(tab.windowId, { focused: true });
-  await chrome.tabs.update(tabId, { active: true });
+  const tab = await BROWSER_API.tabs.get(tabId);
+  await BROWSER_API.windows.update(tab.windowId, { focused: true });
+  await BROWSER_API.tabs.update(tabId, { active: true });
 }
 
 async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   const startedAt = Date.now();
   const deadline = startedAt + Math.max(3000, Number(timeoutMs) || 45000);
-  const initial = await chrome.tabs.get(tabId);
+  currentCommandStage = "navigation_lookup";
+  const initial = await BROWSER_API.tabs.get(tabId);
   const preserveManagedTab = NAVIGATION.shouldPreserveManagedTab(
     initial,
     expectedUrl,
@@ -651,11 +678,14 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
     RUNTIME
   );
   if (forceReload && preserveManagedTab) {
-    await chrome.tabs.reload(tabId);
+    currentCommandStage = "navigation_reload";
+    await BROWSER_API.tabs.reload(tabId);
   } else if (!preserveManagedTab) {
-    await chrome.tabs.update(tabId, { url: expectedUrl, active: true });
+    currentCommandStage = "navigation_update";
+    await BROWSER_API.tabs.update(tabId, { url: expectedUrl, active: true });
   }
-  let tab = await chrome.tabs.get(tabId);
+  currentCommandStage = "navigation_probe";
+  let tab = await BROWSER_API.tabs.get(tabId);
   let probe = null;
   let probeError = "";
   let staleContentReloaded = false;
@@ -665,7 +695,7 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
   let renderedStability = null;
   let classification = { status: "loading", reason: "navigation_started" };
   while (Date.now() < deadline) {
-    tab = await chrome.tabs.get(tabId);
+    tab = await BROWSER_API.tabs.get(tabId);
     const contentGate = NAVIGATION.contentGate(tab, expectedUrl, mode, RUNTIME);
     if (!contentGate.ok) {
       committedSurfaceSince = 0;
@@ -706,7 +736,7 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
           contentInjectionAttempted = false;
           contentInjectionStatus = "stale_content_reload";
           committedSurfaceSince = 0;
-          await chrome.tabs.reload(tabId);
+          await BROWSER_API.tabs.reload(tabId);
           await delay(500);
           probe = null;
           continue;
@@ -764,7 +794,7 @@ async function navigateTab(tabId, expectedUrl, timeoutMs, forceReload, mode) {
       );
       if (injectionDecision.ok) {
         const recovery = await NAVIGATION.injectContentFiles(
-          chrome,
+          BROWSER_API,
           tabId,
           expectedUrl,
           mode,

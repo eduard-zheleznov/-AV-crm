@@ -31,7 +31,48 @@
     });
   }
 
-  const api = { isTerminalCommandStatus, waitForReply };
+  // Chrome APIs can leave their promise pending after window/renderer failure.
+  // Bound infrastructure calls, but NOT sendMessage: a real CAPTCHA reply is
+  // deliberately allowed to wait for the operator by waitForReply above.
+  function boundedBrowserApi(chromeApi, timeoutMs = 10000) {
+    const methods = {
+      tabs: ["get", "query", "create", "update", "reload", "remove"],
+      windows: ["getAll", "create", "update", "remove"],
+      extension: ["isAllowedIncognitoAccess"],
+      scripting: ["executeScript"],
+      runtime: ["getPlatformInfo"]
+    };
+    const namespaces = new Map();
+    return new Proxy(chromeApi, {
+      get(target, namespace) {
+        if (!methods[namespace] || !target[namespace]) return target[namespace];
+        if (!namespaces.has(namespace)) {
+          namespaces.set(namespace, new Proxy(target[namespace], {
+            get(api, method) {
+              if (!methods[namespace].includes(method) || typeof api[method] !== "function") {
+                return api[method];
+              }
+              return (...args) => new Promise((resolve, reject) => {
+                const timer = setTimeout(() => {
+                  const error = new Error(`Chrome не завершил ${namespace}.${method} вовремя`);
+                  error.code = "browser_api_timeout";
+                  error.diagnostics = { stage: `${namespace}.${method}` };
+                  reject(error);
+                }, timeoutMs);
+                Promise.resolve().then(() => api[method].apply(api, args)).then(
+                  value => { clearTimeout(timer); resolve(value); },
+                  error => { clearTimeout(timer); reject(error); }
+                );
+              });
+            }
+          }));
+        }
+        return namespaces.get(namespace);
+      }
+    });
+  }
+
+  const api = { isTerminalCommandStatus, waitForReply, boundedBrowserApi };
   globalObject.AVITO_CRM_COMMAND_LIFECYCLE = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(globalThis);

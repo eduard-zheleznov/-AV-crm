@@ -166,6 +166,49 @@ def test_bridge_exposes_stop_to_the_waiting_extension(settings):
     assert bridge._command_status("waiting-command") == "cancelled"
 
 
+def test_worker_restart_fails_dispatched_command_without_redelivering_click(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.extension_instance = "old-worker"
+    bridge.state.command = {"id": "owned-command", "type": "reveal_phone", "rowId": "2"}
+    bridge.state.dispatched = True
+    bridge.state.progress_stage = "navigation_update"
+    assert bridge._poll(timeout=0, extension_instance="new-worker") is None
+    assert bridge.state.dispatched is True
+    assert bridge.state.result is not None
+    assert bridge.state.result.status == "browser_infra"
+    assert bridge.state.result.payload["diagnostics"]["stage"] == "navigation_update"
+    with pytest.raises(ValueError, match="уже завершена"):
+        bridge._receive_event({"id": "owned-command", "type": "result", "status": "phone"})
+    assert bridge.state.result.status == "browser_infra"
+
+
+def test_same_worker_heartbeat_does_not_abort_active_command(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.extension_instance = "same-worker"
+    bridge.state.command = {"id": "active-command"}
+    bridge.state.dispatched = True
+    bridge._poll(timeout=0, extension_instance="same-worker")
+    assert bridge.state.result is None
+
+
+def test_command_progress_deduplicates_log_and_refreshes_liveness(settings):
+    bridge = ExtensionBridge(settings)
+    bridge.state.command = {"id": "active-command"}
+    payload = {"id": "active-command", "type": "status", "status": "command_progress",
+               "diagnostics": {"stage": "navigation_update"}}
+    bridge._receive_event(payload)
+    before = bridge.state.last_seen
+    bridge._receive_event(payload)
+    assert bridge.state.last_seen >= before
+    assert len(bridge.state.events) == 1
+    assert bridge.state.result is None
+    records = (settings.logs_dir / "chrome-extension-health.jsonl").read_text().splitlines()
+    assert len(records) == 1
+    assert json.loads(records[0])["diagnostics"]["stage"] == "navigation_update"
+    with pytest.raises(ValueError, match="описание этапа"):
+        bridge._receive_event({**payload, "diagnostics": None})
+
+
 def test_bridge_runs_a_no_click_health_probe_and_records_the_instance(settings):
     port = _free_port()
     token = "c" * 64
@@ -277,14 +320,14 @@ def test_manifest_matches_the_required_extension_version():
     assert "waitForManualSurfaceToClear" in service_worker
     assert "watchForStaleManualSession" in service_worker
     assert "Avito вернул обычную страницу" in service_worker
-    assert "await chrome.tabs.reload(tabId)" in service_worker
+    assert "await BROWSER_API.tabs.reload(tabId)" in service_worker
     assert 'type: "status"' in service_worker
     assert 'status: "manual_required"' in service_worker
     assert "Avito требует ручной проверки" in service_worker
     assert 'status: "manual_cleared"' in service_worker
     assert "unavailableProbes >= 3" in service_worker
     assert '"avito_crm_wait_for_manual"' in service_worker
-    assert "BROWSER_CONTEXT.createManagedTab(chrome, command)" in service_worker
+    assert "BROWSER_CONTEXT.createManagedTab(BROWSER_API, command)" in service_worker
 
 
 def test_manual_wait_hotfix_does_not_change_the_proven_click_and_ocr_block():
